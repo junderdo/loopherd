@@ -63,6 +63,9 @@ struct LeadFile {
     #[serde(default)]
     mcp_servers: Vec<String>,
     unix_sockets: Option<UnixSockets>,
+    /// Commands `loopherd gate` runs, in its broker, on a commit merged with the base.
+    #[serde(default)]
+    gate: Vec<String>,
 }
 
 /// A herd's workers: every member but its lead.
@@ -956,6 +959,15 @@ pub fn lead_unix_sockets(paths: &Paths, herd: &str) -> Result<Option<UnixSockets
     Ok(lead.unix_sockets)
 }
 
+/// The commands a herd's `[lead]` gates a merge with; empty when it sets none.
+pub fn lead_gate(paths: &Paths, herd: &str) -> Result<Vec<String>> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    let lead = file
+        .lead
+        .with_context(|| format!("herd: {herd} has no [lead]"))?;
+    Ok(lead.gate)
+}
+
 /// A herd's `[worker]`: sandbox, Unix sockets and MCP servers.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Worker {
@@ -1016,6 +1028,16 @@ pub fn merge_guard(paths: &Paths, herd: &str) -> Result<Option<MergeGuard>> {
     Ok((!merge).then_some(lead.merge_guard))
 }
 
+/// Whether `herd`'s lead has `merge` off and guards it by credentials, so its
+/// workers are confined from the human's. A broken `config.toml`, which
+/// `herds` and doctor report, counts as merge off, keeping the confinement.
+pub fn guards_by_credentials(paths: &Paths, herd: &str) -> Result<bool> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    Ok(file
+        .lead
+        .is_some_and(|lead| lead.guards_by_credentials(paths)))
+}
+
 /// The repo whose merges the human hears of while `herd`'s lead runs: one
 /// whose `[lead]` has `merge` off and guards it by hook; else `None`.
 pub fn merge_alerts(paths: &Paths, herd: &str) -> Result<Option<PathBuf>> {
@@ -1059,6 +1081,11 @@ fn lead_defaults(paths: &Paths) -> Result<SwitchValues> {
 }
 
 impl LeadFile {
+    fn guards_by_credentials(&self, paths: &Paths) -> bool {
+        let defaults = lead_defaults(paths).unwrap_or_default();
+        !self.switches().over(&defaults).merge && self.merge_guard == MergeGuard::Credentials
+    }
+
     fn switches(&self) -> SwitchValues {
         SwitchValues {
             merge: self.merge,
@@ -1259,12 +1286,7 @@ fn check(herd: &str, text: &str, paths: &Paths, fix: Fix) -> Result<HerdFile> {
         let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths);
         prompt.and_then(|p| check_lead_prompt(&p)).context("lead")?;
         check_mcp_servers(&lead.mcp_servers).context("lead")?;
-        // A broken config.toml is reported on its own; judge the herd with merge off.
-        let merge = lead
-            .switches()
-            .over(&lead_defaults(paths).unwrap_or_default())
-            .merge;
-        let credentials = !merge && lead.merge_guard == MergeGuard::Credentials;
+        let credentials = lead.guards_by_credentials(paths);
         if credentials && lead.unix_sockets == Some(UnixSockets::All) {
             bail!(
                 "lead: can't start with merge_guard = \"credentials\": {}",
@@ -1433,6 +1455,10 @@ fn describe(
             match lead.unix_sockets {
                 Some(UnixSockets::All) => "  unix_sockets: all".into(),
                 None => "  unix_sockets: none".into(),
+            },
+            match lead.gate.is_empty() {
+                true => "  gate: none".into(),
+                false => format!("  gate: {}", lead.gate.join("; ")),
             },
         ]
     });
@@ -3814,6 +3840,31 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn herds_shows_the_commands_each_lead_gates_a_merge_with() {
+        let lead = |line: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{line}\n");
+        let config = Config::with(&[
+            (
+                "gated",
+                &lead("gate = [\"cargo fmt --check\", \"cargo test\"]"),
+            ),
+            ("ungated", &lead("")),
+        ]);
+
+        let (report, _) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let shown = |herd: &str| {
+            let at = report.find(&format!("{herd}  repo")).unwrap();
+            report[at..]
+                .lines()
+                .find(|line| line.starts_with("  gate:"))
+                .unwrap()
+                .to_string()
+        };
+        assert_eq!(shown("gated"), "  gate: cargo fmt --check; cargo test");
+        assert_eq!(shown("ungated"), "  gate: none");
+    }
+
+    #[test]
     fn herds_shows_which_unix_sockets_each_lead_may_use_and_refuses_any_but_all() {
         let lead = |line: &str| format!("{LEAD_HERD}[lead]\nprompt = \"go\"\n{line}\n");
         let config = Config::with(&[
@@ -4110,6 +4161,7 @@ args = ["--model", "opus"]
              \x20 review_rounds: 3 (built-in)\n\
              \x20 mcp_servers: none\n\
              \x20 unix_sockets: none\n\
+             \x20 gate: none\n\
              invalid b.toml: lead: prompt: unknown placeholder {pane}"
         );
         assert_eq!(code, 1);

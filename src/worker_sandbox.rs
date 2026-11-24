@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::handoff;
-use crate::herd::{self, MergeGuard, Paths};
+use crate::herd::{self, Paths};
 use crate::herdr::Herdr;
 use crate::ledger::{AgentRecord, Ledger};
 use crate::sandbox::{
@@ -185,7 +185,8 @@ pub enum ArgsFrom {
 /// loopherd's config dir, from its herd's `[worker]`, when that turns the
 /// sandbox on. Under `require`, a sandbox that can't start, or that the
 /// human's settings or the worker's args would loosen, fails with
-/// [`NotStarted`]; under `prefer` those are warnings. A passed launch flag or
+/// [`NotStarted`]; under `prefer` those are warnings, except in a
+/// credentials herd, which refuses them too. A passed launch flag or
 /// an unknown MCP server fails under both.
 pub fn prepare(
     paths: &Paths,
@@ -259,7 +260,9 @@ fn judge(
     probe: &dyn Fn() -> Result<Sockets, Unavailable>,
 ) -> Result<Judged> {
     let herd = &member.herd;
-    let (disallowed, mcp_config) = judge_args_and_mcp(paths, name, member, worker, from)?;
+    let credentials = herd::guards_by_credentials(paths, herd)?;
+    let (disallowed, mcp_config) =
+        judge_args_and_mcp(paths, name, member, worker, credentials, from)?;
     // A branch checked out in the main checkout plans the main checkout itself.
     let repo = herd::repo(paths, herd)?;
     let worktree =
@@ -280,7 +283,6 @@ fn judge(
         }
         (_, Ok(_)) => None,
     };
-    let credentials = herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials);
     if credentials && worker.unix_sockets == Some(UnixSockets::All) {
         let why = herd::credentials_with_sockets(herd, "worker");
         return Err(NotStarted(format!(
@@ -300,14 +302,12 @@ fn judge(
             let own = settings(paths, name, herd, worktree)?;
             // A worktree not yet checked out has no project settings to read.
             let loosened = loosenings(&paths.home, worktree, &own);
-            if worker.sandbox == WorkerSandbox::Require && !loosened.is_empty() {
-                return Err(NotStarted(format!(
-                    "{name} can't start sandboxed: your Claude settings loosen its sandbox: {}; \
-                     remove those, {}",
-                    loosened.join("; "),
-                    prefer_instead(herd)
-                ))
-                .into());
+            let why = settings_loosen(&loosened);
+            if !loosened.is_empty()
+                && let Some(refused) =
+                    loosened_refusal(name, herd, credentials, worker.sandbox, "start", &why)
+            {
+                return Err(NotStarted(refused).into());
             }
             Some((own, loosened))
         }
@@ -379,18 +379,17 @@ fn judge_args_and_mcp(
     name: &str,
     member: &Member,
     worker: &herd::Worker,
+    credentials: bool,
     from: ArgsFrom,
 ) -> Result<(Vec<String>, Value)> {
     let herd = &member.herd;
     refuse_lead_name(name, herd, &member.template)?;
-    let require = worker.sandbox == WorkerSandbox::Require;
-    let prefer_instead = prefer_instead(herd);
     let sources = arg_sources(paths, member, from)?;
     if let Some(why) = launch_flag_refusals(name, &sources).into_iter().next() {
         return Err(NotStarted(why).into());
     }
     let disallowed = disallowed(&sources);
-    if require && !disallowed.is_empty() {
+    if !disallowed.is_empty() {
         let fix = match from {
             ArgsFrom::Fresh => "drop those".to_string(),
             ArgsFrom::Kept => format!(
@@ -398,12 +397,12 @@ fn judge_args_and_mcp(
                 member.template
             ),
         };
-        return Err(NotStarted(format!(
-            "{name} can't start sandboxed: its args may loosen its sandbox or permissions: {}; \
-             a sandboxed worker takes only {ALLOWED_ARGS}, so {fix}, {prefer_instead}",
-            disallowed.join("; ")
-        ))
-        .into());
+        let why = args_loosen(&disallowed, &fix);
+        if let Some(refused) =
+            loosened_refusal(name, herd, credentials, worker.sandbox, "start", &why)
+        {
+            return Err(NotStarted(refused).into());
+        }
     }
     // An unreadable ~/.claude.json refuses this worker alone, so a feed goes on.
     let mcp_config = crate::sandbox::user_scope_mcp_config(paths, &worker.mcp_servers)
@@ -416,8 +415,48 @@ fn judge_args_and_mcp(
     Ok((disallowed, mcp_config))
 }
 
-fn prefer_instead(herd: &str) -> String {
-    format!("or set [worker] sandbox = \"prefer\" in herd {herd} to start it with them as warnings")
+/// The refusal of worker `name`, which can't `verb` for `why` (ending in
+/// its fix), or `None` where `mode` starts it warned. A credentials herd
+/// refuses under both modes: a loosening could open its key and token.
+fn loosened_refusal(
+    name: &str,
+    herd: &str,
+    credentials: bool,
+    mode: WorkerSandbox,
+    verb: &str,
+    why: &str,
+) -> Option<String> {
+    let (cant, switches) = match (credentials, mode) {
+        (true, WorkerSandbox::Require) => (
+            "with merge_guard = \"credentials\"",
+            "[lead] merge_guard = \"hook\" and [worker] sandbox = \"prefer\"",
+        ),
+        (true, _) => (
+            "with merge_guard = \"credentials\"",
+            "[lead] merge_guard = \"hook\"",
+        ),
+        (false, WorkerSandbox::Require) => ("sandboxed", "[worker] sandbox = \"prefer\""),
+        (false, _) => return None,
+    };
+    Some(format!(
+        "{name} can't {verb} {cant}: {why}, or set {switches} in herd {herd} to {verb} it with \
+         them as warnings"
+    ))
+}
+
+fn settings_loosen(loosened: &[String]) -> String {
+    format!(
+        "your Claude settings loosen its sandbox: {}; remove those",
+        loosened.join("; ")
+    )
+}
+
+fn args_loosen(disallowed: &[String], fix: &str) -> String {
+    format!(
+        "its args may loosen its sandbox or permissions: {}; a sandboxed worker takes only \
+         {ALLOWED_ARGS}, so {fix}",
+        disallowed.join("; ")
+    )
 }
 
 /// A worker's args split by where they were set, each part named.
@@ -628,7 +667,15 @@ fn checkout_before_prepare(
         return Ok(None);
     }
     crate::spawn::preview(herdr, req, inherited_workspace)?;
-    judge_args_and_mcp(paths, &req.name, member, &worker, ArgsFrom::Fresh)?;
+    let credentials = herd::guards_by_credentials(paths, &member.herd)?;
+    judge_args_and_mcp(
+        paths,
+        &req.name,
+        member,
+        &worker,
+        credentials,
+        ArgsFrom::Fresh,
+    )?;
     let branch = match checkout {
         Checkout::Branch(branch) if !crate::worktree::has_local_branch(&req.repo, branch) => {
             Some(branch.clone())
@@ -680,7 +727,7 @@ pub fn running_unsandboxed(
 /// without writing anything: its recorded args must pass it its settings,
 /// its kept args must be allowlisted, and the human's settings mustn't loosen
 /// its sandbox. Returns why it runs unsandboxed under `prefer`, and the
-/// warnings; `require` refuses what `prepare` would.
+/// warnings; refuses what `prepare` would.
 pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<String>, Vec<String>)> {
     let name = &record.name;
     let resume = format!("quit its Claude and run loopherd revive --name {name}");
@@ -695,7 +742,7 @@ pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<Stri
         )
     });
     if let Some((why, herd, mode)) = running_unsandboxed(paths, record)? {
-        let credentials = herd::merge_guard(paths, &herd)? == Some(MergeGuard::Credentials);
+        let credentials = herd::guards_by_credentials(paths, &herd)?;
         let Some(otherwise) = unsandboxed_fix(&herd, credentials, mode, "run") else {
             let warning = format!("{name} runs unsandboxed ({why})");
             return Ok((
@@ -724,26 +771,21 @@ pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<Stri
         Err(_) => settings(paths, name, herd, worktree)?,
     };
     let loosened = loosenings(&paths.home, worktree, &own);
-    if worker.sandbox == WorkerSandbox::Require {
-        let prefer = format!(
-            "or set [worker] sandbox = \"prefer\" in herd {herd} to run it with them as warnings"
+    let credentials = herd::guards_by_credentials(paths, herd)?;
+    let refusal = |why: &str| loosened_refusal(name, herd, credentials, worker.sandbox, "run", why);
+    if !disallowed.is_empty() {
+        let fix = format!(
+            "retire it and add it again from herd {herd}'s template {}, without those",
+            member.template
         );
-        if !disallowed.is_empty() {
-            bail!(
-                "{name} can't run sandboxed: its args may loosen its sandbox or permissions: {}; \
-                 a sandboxed worker takes only {ALLOWED_ARGS}, so retire it and add it again \
-                 from herd {herd}'s template {}, without those, {prefer}",
-                disallowed.join("; "),
-                member.template
-            );
+        if let Some(refused) = refusal(&args_loosen(&disallowed, &fix)) {
+            bail!(refused);
         }
-        if !loosened.is_empty() {
-            bail!(
-                "{name} can't run sandboxed: your Claude settings loosen its sandbox: {}; \
-                 remove those, {prefer}",
-                loosened.join("; ")
-            );
-        }
+    }
+    if !loosened.is_empty()
+        && let Some(refused) = refusal(&settings_loosen(&loosened))
+    {
+        bail!(refused);
     }
     let warnings = (loosened.iter().map(|line| loosened_warning(name, line)))
         .chain(disallowed.iter().map(|line| disallowed_warning(name, line)))
@@ -879,7 +921,7 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
             "deny": deny,
         },
     });
-    if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
+    if herd::guards_by_credentials(paths, herd)? {
         confine_credentials(
             paths,
             name,
@@ -2061,5 +2103,205 @@ mod tests {
                     .contains("Read(")
             );
         }
+    }
+
+    #[test]
+    fn a_broken_config_toml_counts_as_merge_off_so_a_credentials_herds_worker_is_still_confined() {
+        let h = credentials_herd("sandbox = \"require\"");
+        std::fs::write(crate::herd::config_file(&h.paths), "[lead_defaults\n").unwrap();
+
+        prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree_of(&h))),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap();
+
+        let settings = read_json(&settings_file(&h.paths, "w1"));
+        assert_eq!(settings["env"]["GH_TOKEN"], "github_pat_pr_only");
+        let deny_read = strings(&settings["sandbox"]["filesystem"]["denyRead"]);
+        assert!(deny_read.contains(&"/home/me/.config/gh".to_string()));
+    }
+
+    #[test]
+    fn a_broken_config_toml_doesnt_stop_a_hook_herds_worker() {
+        let h = herd("sandbox = \"require\"");
+        let toml = h.paths.herds.join("h.toml");
+        let text = std::fs::read_to_string(&toml).unwrap();
+        std::fs::write(&toml, format!("{text}[lead]\nprompt = \"go\"\n")).unwrap();
+        std::fs::write(crate::herd::config_file(&h.paths), "[lead_defaults\n").unwrap();
+
+        prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree_of(&h))),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap();
+
+        let settings = read_json(&settings_file(&h.paths, "w1"));
+        assert_eq!(settings.get("env"), None);
+    }
+
+    /// [`credentials_herd`] with a home of its own, whose Claude settings are `user`.
+    fn credentials_herd_with_settings(worker: &str, user: &str) -> (Herd, PathBuf) {
+        let mut h = credentials_herd(worker);
+        h.paths.home = h._root.path().join("home");
+        let file = h.paths.home.join(".claude/settings.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, user).unwrap();
+        (h, file)
+    }
+
+    #[test]
+    fn a_credentials_herds_worker_its_settings_loosen_isnt_started_under_either_mode() {
+        for (mode, switches) in [
+            (
+                "require",
+                "[lead] merge_guard = \"hook\" and [worker] sandbox = \"prefer\"",
+            ),
+            ("prefer", "[lead] merge_guard = \"hook\""),
+        ] {
+            let (h, user) = credentials_herd_with_settings(
+                &format!("sandbox = \"{mode}\""),
+                r#"{"sandbox": {"filesystem": {"allowRead": ["~/.config/gh"]}}}"#,
+            );
+            let worktree = worktree_of(&h);
+            let local = worktree.join(".claude/settings.local.json");
+            std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+            std::fs::write(
+                &local,
+                r#"{"permissions": {"defaultMode": "bypassPermissions"}}"#,
+            )
+            .unwrap();
+
+            let err = prepare(
+                &h.paths,
+                "w1",
+                &member(Some(&worktree)),
+                ArgsFrom::Fresh,
+                &blocked,
+            )
+            .unwrap_err();
+
+            assert!(err.downcast_ref::<NotStarted>().is_some(), "{mode}");
+            let message = format!("{err:#}");
+            assert!(
+                message.starts_with(&format!(
+                    "w1 can't start with merge_guard = \"credentials\": your Claude settings \
+                     loosen its sandbox: {}: sandbox.filesystem.allowRead",
+                    user.display()
+                )),
+                "{mode}: {message}"
+            );
+            assert!(
+                message.ends_with(&format!(
+                    "{}: permissions.defaultMode bypassPermissions lets its file tools write \
+                     anywhere; remove those, or set {switches} in herd h to start it with them \
+                     as warnings",
+                    local.display()
+                )),
+                "{mode}: {message}"
+            );
+            assert!(!settings_file(&h.paths, "w1").exists(), "{mode}");
+        }
+    }
+
+    #[test]
+    fn a_credentials_herds_worker_with_args_outside_the_allowlist_isnt_started_under_prefer() {
+        let h = credentials_herd("sandbox = \"prefer\"");
+        let worktree = worktree_of(&h);
+
+        let err = prepare(
+            &h.paths,
+            "w1",
+            &with_args(&worktree, &["--allowedTools", "Write"]),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap_err();
+
+        assert!(err.downcast_ref::<NotStarted>().is_some());
+        assert_eq!(
+            format!("{err:#}"),
+            "w1 can't start with merge_guard = \"credentials\": its args may loosen its sandbox \
+             or permissions: --allowedTools Write, from the command line; a sandboxed worker \
+             takes only --model, --effort, --verbose and --permission-mode default, manual, \
+             auto or plan, so drop those, or set [lead] merge_guard = \"hook\" in herd h to \
+             start it with them as warnings"
+        );
+        assert!(!h.paths.config_dir().join("sandbox").exists());
+    }
+
+    #[test]
+    fn a_running_credentials_herds_worker_its_settings_loosen_is_refused_under_prefer() {
+        let (h, user) = credentials_herd_with_settings(
+            "sandbox = \"prefer\"",
+            r#"{"sandbox": {"excludedCommands": ["docker"]}}"#,
+        );
+        let worktree = worktree_of(&h);
+        let kept = member(Some(&worktree));
+        std::fs::create_dir_all(h.paths.config_dir().join("sandbox")).unwrap();
+        std::fs::write(
+            member_file(&h.paths, "w1"),
+            serde_json::to_string(&kept).unwrap(),
+        )
+        .unwrap();
+        let file = settings_file(&h.paths, "w1");
+        std::fs::write(&file, "{}").unwrap();
+        let record = AgentRecord {
+            name: "w1".into(),
+            pane_id: "w1:p1".into(),
+            env_pane_id: None,
+            env_pane_shell: None,
+            tab_id: None,
+            session_id: None,
+            repo: h.repo.clone(),
+            worktree: Some(worktree.clone()),
+            branch: None,
+            workspace: "w1".into(),
+            workspace_label: None,
+            claude_args: vec![
+                "--settings".into(),
+                file.display().to_string(),
+                "--strict-mcp-config".into(),
+            ],
+            prompt: None,
+            prompt_sent: true,
+            created: "2026-11-01T00:00:00Z".into(),
+            retired: false,
+            retired_at: None,
+            outcome: None,
+            released_at: None,
+            herd: Some("h".into()),
+            template: Some("t".into()),
+            params: None,
+            socket: None,
+            process: None,
+            role: None,
+            attended: None,
+            no_slot: false,
+            after_merge: None,
+            unsandboxed: None,
+            sockets_unblocked: None,
+            earlier: vec![],
+            unknown: Default::default(),
+        };
+
+        let err = check_running(&h.paths, &record).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "w1 can't run with merge_guard = \"credentials\": your Claude settings loosen \
+                 its sandbox: {}: sandbox.excludedCommands runs \"docker\" outside it; remove \
+                 those, or set [lead] merge_guard = \"hook\" in herd h to run it with them as \
+                 warnings",
+                user.display()
+            )
+        );
     }
 }

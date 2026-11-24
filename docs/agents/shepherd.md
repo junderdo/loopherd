@@ -249,9 +249,11 @@ is skipped: the lead isn't refused or flagged for open sockets, though
 the package is the human's. What still gets past the sandbox: workers run
 unsandboxed unless `[worker] sandbox` turns theirs on (LH-284); a
 `credentials` lead starts only with `[worker] sandbox = "require"` (D131), and most of the state dir is writable (LH-298). A lead's
-`tell`, `read`, `status`, `feed`, `add`, `prompt`, `restart`, `retire` and
-`release` run in its broker, outside the sandbox and only on its own herd
-(D98); its watch still calls herdr itself, run bare outside the sandbox
+`tell`, `read`, `status`, `feed`, `add`, `prompt`, `restart`, `retire`,
+`release` and `gate` run in its broker, outside the sandbox and only on its own herd
+(D98). A lead gates its own merges: `loopherd gate <sha>` runs the herd
+file's `[lead] gate` commands on that head merged with the base (D149), so
+socket tests pass without `unix_sockets = "all"` and you don't gate for it; its watch still calls herdr itself, run bare outside the sandbox
 (D104); doctor fails for a lead with no broker running, and
 `loopherd revive --name <lead>` from an unsandboxed shell starts it. Doctor
 names each running lead without its sandbox; `loopherd revive --name

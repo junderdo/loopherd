@@ -701,7 +701,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   it when the sandbox can't start at all. What still gets past the sandbox:
   workers run unsandboxed unless the herd's `[worker] sandbox` turns
   theirs on, so a lead can have one act for it (a `credentials` lead
-  starts only with `[worker] sandbox = "require"`), and most of
+  starts only with `[worker] sandbox = "require"`, and its workers are
+  refused for loosened settings or args under either mode), and most of
   the state dir stays writable to it. Set `prefer` only
   when the human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>
@@ -901,6 +902,18 @@ Shepherd section has the detail):
    comment <n> --body-file <scratch>/pr<n>/review-<round>-blocking.md`),
    then `loopherd tell` the member to read it. Keep the files until the PR
    merges or closes.
+   Before you merge a passing PR or ask to, run `loopherd gate <full head
+   sha>` when your herd file sets `[lead] gate`: your broker runs those
+   checks outside your sandbox on that head merged with origin's default
+   branch, sockets and all. For a PR into another branch (a stacked PR's
+   parent, a release branch), add `--base <branch>` from `gh pr view <n>
+   --json baseRefName`; the gate otherwise checks it against the default
+   branch, not its real base. It prints `gate <sha> merged with origin/<base>
+   <base sha>: pass`, or `failed:` with the command and its output's tail
+   (exit 1), which goes back to the member. It refuses a sha not on one of
+   origin's branches, and without a `gate` ask the human to add one. It can
+   take many minutes, so run it as a background task and act on its
+   completion; killed mid-wait, it runs on unread.
 5. **After merge** (`gh pr view <n> --json state`): close out the task in
    the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
    `after_merge`; do by hand what its note says didn't run), then `git
@@ -981,12 +994,13 @@ What differs from the shepherd:
   $pid`; if it must use `pgrep -f <pattern>`, that matches the waiting
   shell's own command line, which holds the pattern, so bracket a letter
   (`pgrep -f "[t]arget-…"`). `loopherd report`, `tell`, `read`, `status`,
-  `restart` (`--self` included), `prompt`, `feed`, `add`, `retire` and `release` don't call
+  `restart` (`--self` included), `prompt`, `feed`, `add`, `retire`, `release` and `gate` don't call
   herdr or write your mailbox themselves: they hand the operation to your broker, a process
   outside the sandbox that `loopherd lead` started for you, in any form.
   `feed`, `add`, `restart`, `retire` and `release` run one at a time, so a
   running `feed` holds up the others; `report`, `tell`, `read`, `prompt`
-  and `restart --self` run beside it, and `status` beside both.
+  and `restart --self` run beside it, and `status` and `gate` each in
+  a lane of their own.
   Your `status` shows your own herd alone, with no strays, and refuses
   `--strays`. With no broker running they fail at once, naming the
   shepherd's `loopherd revive --name <you>`. Your `report` fails that way

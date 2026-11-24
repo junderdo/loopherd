@@ -683,6 +683,151 @@ pub fn ensure_detached_worktree(repo: &Path, slug: &str) -> Result<PathBuf> {
     Ok(path)
 }
 
+/// Turns off the hooks in the shared `.git`, which a lead can write.
+const NO_HOOKS: [&str; 2] = ["-c", "core.hooksPath=/dev/null"];
+
+/// `rev` as a full commit sha when, after a fetch, it is on one of the
+/// branches origin lists; `None` when it names no commit there. Prunes no
+/// ref, so a branch gone from origin keeps its tracking ref.
+pub fn pushed_commit(repo: &Path, rev: &str) -> Result<Option<String>> {
+    let fetch = [&NO_HOOKS[..], &["fetch", "--quiet", "origin"]].concat();
+    match remote_git(repo, &fetch) {
+        Err(e) if lost_ref_lock_race(&e) => remote_git(repo, &fetch)?,
+        result => result?,
+    };
+    let Ok(sha) = git(
+        repo,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            &format!("{rev}^{{commit}}"),
+        ],
+    ) else {
+        return Ok(None);
+    };
+    let sha = sha.trim();
+    for (tip, _) in origin_heads(repo)? {
+        if has_commit(repo, &tip) && is_ancestor(repo, sha, &tip)? {
+            return Ok(Some(sha.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Each branch origin lists, as its tip's sha and its name.
+fn origin_heads(repo: &Path) -> Result<Vec<(String, String)>> {
+    let heads = remote_git(repo, &["ls-remote", "--heads", "origin"])?;
+    Ok(heads
+        .lines()
+        .filter_map(|line| {
+            let (sha, name) = line.split_once('\t')?;
+            Some((
+                sha.to_string(),
+                name.strip_prefix("refs/heads/")?.to_string(),
+            ))
+        })
+        .collect())
+}
+
+fn has_commit(repo: &Path, sha: &str) -> bool {
+    git(repo, &["cat-file", "-e", &format!("{sha}^{{commit}}")]).is_ok()
+}
+
+/// A commit merged with origin's default branch in a detached worktree.
+pub struct Merged {
+    pub path: PathBuf,
+    /// Origin's default branch, as `origin/<branch>`.
+    pub base: String,
+    pub base_sha: String,
+    /// The files a conflicting merge left unmerged; the worktree is then at `sha`.
+    pub conflicts: Vec<String>,
+}
+
+/// Checks out `sha` in the detached worktree at `slug`'s path and merges
+/// into it origin's `base` branch, which origin must list, else its default
+/// branch, with no hooks. The worktree is reused, its ignored files kept as a
+/// build cache, and holds nothing else; one with a branch is refused.
+pub fn merge_with_base(repo: &Path, slug: &str, sha: &str, base: Option<&str>) -> Result<Merged> {
+    let path = worktree_path(repo, slug);
+    let (base, base_sha) = match base {
+        Some(branch) => {
+            let tip = origin_heads(repo)?
+                .into_iter()
+                .find(|(_, name)| name == branch)
+                .map(|(tip, _)| tip)
+                .filter(|tip| has_commit(repo, tip));
+            let Some(tip) = tip else {
+                bail!("refused: origin has no branch {branch} fetched here");
+            };
+            (format!("origin/{branch}"), tip)
+        }
+        None => {
+            let base = default_branch(repo)?;
+            let tip = git(
+                repo,
+                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+            )?;
+            let tip = tip.trim().to_string();
+            (base, tip)
+        }
+    };
+    // A worktree deleted by hand stays registered, and git won't add one there.
+    git(repo, &["worktree", "prune"])?;
+    let path_str = path.to_str().context("worktree path is not UTF-8")?;
+    if !is_worktree(repo, &path)? {
+        let add = [
+            "worktree", "add", "--quiet", "--detach", path_str, &base_sha,
+        ];
+        git(repo, &[&NO_HOOKS[..], &add].concat())?;
+    } else if let Some(branch) = checked_out_branch(repo, &path)? {
+        bail!(
+            "refused: {} has branch {branch} checked out, so it isn't a gate's",
+            path.display()
+        );
+    }
+    // Gates run one at a time per lead, so a lock left here is a dead broker's.
+    let _ = std::fs::remove_file(git_dir(&path)?.join("index.lock"));
+    let in_worktree = |args: &[&str]| git_at(repo, &path, &[&NO_HOOKS[..], args].concat());
+    in_worktree(&["reset", "--quiet", "--hard"])?;
+    // Cleaned again after the checkout and the merge: a file the old
+    // checkout ignored is untracked, not ignored, once the new one doesn't.
+    let clean = || in_worktree(&["clean", "--quiet", "-ffd"]);
+    clean()?;
+    in_worktree(&["checkout", "--quiet", "--force", "--detach", sha])?;
+    clean()?;
+    let merge = [
+        "-c",
+        "user.name=loopherd",
+        "-c",
+        "user.email=loopherd@localhost",
+        "-c",
+        "merge.ff=true",
+        "merge",
+        "--quiet",
+        "--no-edit",
+        "--no-gpg-sign",
+        &base_sha,
+    ];
+    let merged = in_worktree(&merge);
+    let unmerged = in_worktree(&["diff", "--name-only", "--diff-filter=U"])?;
+    let conflicts: Vec<String> = unmerged.lines().map(str::to_string).collect();
+    match merged {
+        Ok(_) => {}
+        Err(_) if !conflicts.is_empty() => {
+            in_worktree(&["merge", "--abort"])?;
+        }
+        Err(e) => return Err(e),
+    }
+    clean()?;
+    Ok(Merged {
+        path,
+        base,
+        base_sha,
+        conflicts,
+    })
+}
+
 /// Removes the worktree at `path`, with whatever it holds.
 pub fn remove_worktree(repo: &Path, path: &Path) -> Result<()> {
     let path_str = path.to_str().context("worktree path is not UTF-8")?;

@@ -788,7 +788,11 @@ const TAIL_BYTES: usize = 4000;
 /// Runs `commands` in order in `repo`, stopping at the first failure,
 /// which it returns as the command and its exit, and the last lines of its
 /// output.
-fn run_commands(commands: &[String], repo: &Path, timeout: Duration) -> Option<(String, String)> {
+pub(crate) fn run_commands(
+    commands: &[String],
+    repo: &Path,
+    timeout: Duration,
+) -> Option<(String, String)> {
     // A file rather than a pipe, so a command killed at the timeout still leaves its output.
     let log = match tempfile::Builder::new()
         .prefix("loopherd-after-merge-")
@@ -1785,6 +1789,26 @@ mod tests {
             ledger.0["zpr-1"].unsandboxed.as_deref(),
             Some("it has no worktree of its own, and its sandbox won't open the main checkout")
         );
+    }
+
+    #[test]
+    fn a_broken_config_toml_doesnt_stop_a_feed_of_sandboxed_workers() {
+        let setup = worker_setup("printf '1\\n'", "sandbox = \"prefer\"");
+        let file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&file).unwrap() + "[lead]\nprompt = \"go\"\n";
+        fs::write(file, herd).unwrap();
+        fs::write(crate::herd::config_file(&setup.paths()), "[lead_defaults\n").unwrap();
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = FeedRequest {
+            sandbox: sandbox_unavailable,
+            ..setup.request(false, None)
+        };
+
+        let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        assert_eq!(fed.lines[0], "added zpr-1", "{:?}", fed.lines);
+        assert_eq!(fed.code, 0, "{:?}", fed.lines);
     }
 
     #[test]
