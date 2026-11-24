@@ -641,7 +641,7 @@ fn retire(ctx: &mut Ctx, name: &str, close: bool, force: bool, sink: &mut dyn Si
         let record = crate::retire::retire(ctx.ledger, name, now, Outcome::Retired)?;
         sink.out(&format!("retired {name}"));
         // The lead's Claude may still be running on its settings.
-        for line in ctx.guard().forget_launch(name, false) {
+        for line in ctx.guard().forget_launch(&record, false) {
             sink.out(&line);
         }
         let warnings = crate::notify::forget_marks(&mailboxes, name)
