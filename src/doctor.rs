@@ -968,9 +968,11 @@ fn recorded_after_moving(
 ) -> Option<crate::broker::Binary> {
     loop {
         let recorded = crate::broker::recorded_binary(paths, lead);
-        let waits = recorded
-            .as_ref()
-            .is_some_and(|r| !own.runs(r) && own.followed_by(r));
+        // A broker rewrites its record in place, so a read can land between truncate and write.
+        let waits = match &recorded {
+            Some(r) => !own.runs(r) && own.followed_by(r),
+            None => own.on_path,
+        };
         let moved_by = own
             .moved_by
             .get_or_init(|| std::time::Instant::now() + own.move_grace);
@@ -2918,7 +2920,24 @@ mod tests {
     fn a_broker_that_moves_onto_the_install_within_the_grace_draws_no_warning() {
         let mut m = machine(&ALL);
         let (_held, lock, moved) = lead_on_an_earlier_build(&mut m);
-        m.install.broker_move_grace = Duration::from_secs(5);
+        m.install.broker_move_grace = Duration::from_secs(30);
+        let moving = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(200));
+            std::fs::write(&lock, moved).unwrap();
+        });
+
+        let brokers = broker_problems(&m);
+
+        moving.join().unwrap();
+        assert_eq!(brokers, Vec::<String>::new());
+    }
+
+    #[test]
+    fn a_broker_read_mid_rewrite_of_its_record_draws_no_warning_once_it_moves() {
+        let mut m = machine(&ALL);
+        let (_held, lock, moved) = lead_on_an_earlier_build(&mut m);
+        std::fs::write(&lock, "").unwrap();
+        m.install.broker_move_grace = Duration::from_secs(30);
         let moving = std::thread::spawn(move || {
             std::thread::sleep(Duration::from_millis(200));
             std::fs::write(&lock, moved).unwrap();
