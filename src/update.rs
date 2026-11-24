@@ -116,6 +116,8 @@ fn run(
     }
     out.flush()?;
     install(&fetch, base, &target)?;
+    // A release whose installer predates the record wouldn't write it.
+    record_release(&places.config_dir, &target)?;
     if herdr_plugin_older(&places.installed) {
         writeln!(
             out,
@@ -143,6 +145,14 @@ fn recorded_tag(config_dir: &Path) -> Result<String> {
             path.display()
         ),
     }
+}
+
+fn record_release(config_dir: &Path, tag: &str) -> Result<()> {
+    let path = record_path(config_dir);
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, format!("kind = \"release\"\ntag = \"{tag}\"\n"))
+        .and_then(|()| std::fs::rename(&tmp, &path))
+        .with_context(|| format!("record {tag} in {}", path.display()))
 }
 
 /// Downloads `tag`'s own installer and runs it pinned to `tag`.
@@ -219,8 +229,17 @@ impl Fetch {
     fn latest_tag(&self, base: &str) -> Result<String> {
         let url = format!("{base}/latest");
         let output = match self {
+            // -q, first, skips a ~/.curlrc whose `location` would follow the redirect.
             Fetch::Curl => Command::new("curl")
-                .args(["-fsS", "-o", "/dev/null", "-w", "%{redirect_url}", &url])
+                .args([
+                    "-q",
+                    "-fsS",
+                    "-o",
+                    "/dev/null",
+                    "-w",
+                    "%{redirect_url}",
+                    &url,
+                ])
                 .output(),
             // wget exits nonzero on the redirect it was told not to follow.
             Fetch::Wget => Command::new("wget")
@@ -252,7 +271,7 @@ impl Fetch {
     fn download(&self, url: &str, to: &Path) -> Result<()> {
         let output = match self {
             Fetch::Curl => Command::new("curl")
-                .args(["-fsSL", "-o"])
+                .args(["-q", "-fsSL", "-o"])
                 .arg(to)
                 .arg(url)
                 .output(),

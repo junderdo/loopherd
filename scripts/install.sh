@@ -79,6 +79,7 @@ record_install() {
   [ -z "${LOOPHERD_RELEASE_BASE:-}" ] || return 0
   tag=$1
   [ -n "$tag" ] || tag=$("$bin_dir/loopherd" --version </dev/null | awk '{ print $2 }')
+  [ -n "$tag" ] || return 0
   case "$tag" in
     v*) ;;
     *) tag=v$tag ;;

@@ -195,6 +195,36 @@ fn behind_it_names_both_tags_then_runs_the_latest_release_s_installer_pinned_to_
 }
 
 #[test]
+fn after_installing_it_records_the_new_tag_whatever_the_installer_wrote() {
+    let releases = Releases::new();
+    releases.installed_at("v0.2.0");
+    releases.publish("v0.1.0");
+
+    let out = releases.run(&["--version", "v0.1.0"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        fs::read_to_string(releases.config().join("install.toml")).unwrap(),
+        "kind = \"release\"\ntag = \"v0.1.0\"\n"
+    );
+}
+
+#[test]
+fn a_failing_installer_leaves_the_record() {
+    let releases = Releases::new();
+    releases.installed_at("v0.1.0");
+    releases.latest("v0.2.0");
+    releases.publish_exiting("v0.2.0", 1);
+
+    releases.run(&[]);
+
+    assert_eq!(
+        fs::read_to_string(releases.config().join("install.toml")).unwrap(),
+        "kind = \"release\"\ntag = \"v0.1.0\"\n"
+    );
+}
+
+#[test]
 fn after_installing_it_says_to_restart_any_open_view() {
     let releases = Releases::new();
     releases.installed_at("v0.1.0");

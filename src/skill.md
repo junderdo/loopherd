@@ -979,8 +979,8 @@ What differs from the shepherd:
   too, so say so in your last message and end your turn.
   Your `watch` still calls herdr itself, not through your broker. Run
   `loopherd watch` bare, as its own Bash call, to run it outside the
-  sandbox (D104), and `scripts/install` or `loopherd update` too with `install`
-  on: a
+  sandbox (D104), and `scripts/install` or a bare `loopherd update` (no
+  flags) too with `install` on: a
   `cd x &&`, a redirect, `$(…)` or a path to the binary keeps it inside,
   where it can't write its files in `reports/`. Your watch refuses `--settings`. `revive` is the shepherd's
   or the human's. `tell`, `read`, `restart` and `prompt` reach only your
