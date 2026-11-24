@@ -88,7 +88,8 @@ loopherd's herdr plugin (below), each default no. `--with-agents`,
 `--with-skills` and `--with-herdr-plugin` install one without asking;
 `scripts/install --help` lists its flags.
 
-**Update:** `git pull && scripts/install`.
+**Update:** `loopherd update` (`--check` to only look), or
+`git pull && scripts/install --update` by hand.
 
 </td></tr>
 </table>

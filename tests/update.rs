@@ -471,24 +471,6 @@ fn without_a_record_it_refuses_naming_both_installers() {
 }
 
 #[test]
-fn a_source_record_is_refused_as_not_built_yet() {
-    let releases = Releases::new();
-    releases.record("kind = \"source\"\ncheckout = \"/home/me/src/loopherd\"\n");
-    releases.latest("v0.2.0");
-    releases.publish("v0.2.0");
-
-    let out = releases.run(&[]);
-
-    assert_eq!(out.status.code(), Some(1));
-    assert!(
-        stderr(&out).contains("source updates aren't built yet"),
-        "{}",
-        stderr(&out)
-    );
-    assert_eq!(releases.log(), "");
-}
-
-#[test]
 fn run_from_elsewhere_it_says_which_loopherd_it_updates() {
     let releases = Releases::new();
     releases.installed_at("v0.1.0");
@@ -545,4 +527,306 @@ fn a_current_herdr_plugin_isnt_mentioned() {
     let said = stdout(&releases.run(&[]));
 
     assert!(!said.contains("herdr plugin update"), "{said}");
+}
+
+/// A source install: a temp origin, the human's clone of it recorded in
+/// `install.toml`, and an upstream clone that pushes new commits. The
+/// clone's `scripts/install` logs how it ran and exits with `install-exit`.
+struct Source {
+    releases: Releases,
+}
+
+impl Source {
+    fn new() -> Source {
+        let source = Source {
+            releases: Releases::new(),
+        };
+        let upstream = source.upstream();
+        fs::create_dir_all(upstream.join("scripts")).unwrap();
+        executable(
+            &upstream.join("scripts/install"),
+            format!(
+                "#!/bin/sh\necho \"scripts/install $*\" >> '{log}'\nexit \"$(cat '{exit}' 2>/dev/null || echo 0)\"\n",
+                log = source.releases.log_file().display(),
+                exit = source.dir().join("install-exit").display(),
+            ),
+        );
+        source.git(&upstream, &["init", "-q", "-b", "main"]);
+        source.git(&upstream, &["add", "."]);
+        source.git(&upstream, &["commit", "-q", "-m", "first"]);
+        source.git(
+            source.dir(),
+            &["clone", "-q", "--bare", "upstream", "origin.git"],
+        );
+        source.git(&upstream, &["remote", "add", "origin", "../origin.git"]);
+        source.git(source.dir(), &["clone", "-q", "origin.git", "checkout"]);
+        source.releases.record(&format!(
+            "kind = \"source\"\ncheckout = \"{}\"\n",
+            source.checkout().display()
+        ));
+        source
+    }
+
+    fn dir(&self) -> &Path {
+        self.releases.dir.path()
+    }
+
+    fn upstream(&self) -> PathBuf {
+        self.dir().join("upstream")
+    }
+
+    fn checkout(&self) -> PathBuf {
+        self.dir().join("checkout")
+    }
+
+    fn git(&self, dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .current_dir(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(args)
+            .env_clear()
+            .env("HOME", self.releases.home())
+            .env("PATH", "/usr/bin:/bin")
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}: {out:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn head(&self, dir: &Path) -> String {
+        self.git(dir, &["rev-parse", "HEAD"])
+    }
+
+    fn short(&self, sha: &str) -> String {
+        self.git(&self.checkout(), &["rev-parse", "--short", sha])
+    }
+
+    /// Pushes `n` new commits to origin's main.
+    fn upstream_moves(&self, n: usize) {
+        for i in 0..n {
+            let upstream = self.upstream();
+            self.git(
+                &upstream,
+                &["commit", "-q", "--allow-empty", "-m", &format!("new {i}")],
+            );
+        }
+        self.git(&self.upstream(), &["push", "-q", "origin", "main"]);
+    }
+
+    fn install_exits(&self, code: i32) {
+        fs::write(self.dir().join("install-exit"), code.to_string()).unwrap();
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.releases.run(args)
+    }
+
+    fn log(&self) -> String {
+        self.releases.log()
+    }
+}
+
+fn refused_naming_the_manual_way(out: &Output, why: &str) {
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = stderr(out);
+    assert!(stderr.contains(why), "{stderr}");
+    assert!(stderr.contains("git pull && scripts/install"), "{stderr}");
+}
+
+#[test]
+fn a_source_install_behind_names_both_shas_then_pulls_and_runs_scripts_install_update() {
+    let source = Source::new();
+    let old = source.head(&source.checkout());
+    source.upstream_moves(2);
+    let new = source.head(&source.upstream());
+
+    let out = source.run(&[]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout(&out).starts_with(&format!(
+            "{} → {}, 2 commits\n",
+            source.short(&old),
+            source.short(&new)
+        )),
+        "{}",
+        stdout(&out)
+    );
+    assert_eq!(source.head(&source.checkout()), new);
+    assert_eq!(source.log(), "scripts/install --update\n");
+}
+
+#[test]
+fn after_a_source_install_it_says_to_restart_any_open_view() {
+    let source = Source::new();
+    source.upstream_moves(1);
+
+    let out = source.run(&[]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(
+        stdout(&out)
+            .trim_end()
+            .ends_with("restart any open `loopherd view`: a running view keeps the old binary"),
+        "{}",
+        stdout(&out)
+    );
+}
+
+#[test]
+fn a_source_install_up_to_date_says_so_and_runs_nothing() {
+    let source = Source::new();
+    let head = source.head(&source.checkout());
+
+    let out = source.run(&[]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        stdout(&out),
+        format!("loopherd is up to date ({})\n", source.short(&head))
+    );
+    assert_eq!(source.log(), "");
+}
+
+#[test]
+fn a_source_install_with_a_dirty_tracked_tree_is_refused_and_left_alone() {
+    let source = Source::new();
+    let old = source.head(&source.checkout());
+    source.upstream_moves(1);
+    fs::write(source.checkout().join("scripts/install"), "#!/bin/sh\n").unwrap();
+
+    let out = source.run(&[]);
+
+    refused_naming_the_manual_way(&out, "uncommitted changes");
+    assert_eq!(source.head(&source.checkout()), old);
+    assert_eq!(source.log(), "");
+}
+
+#[test]
+fn untracked_files_dont_stop_a_source_update() {
+    let source = Source::new();
+    source.upstream_moves(1);
+    fs::write(source.checkout().join("notes.txt"), "mine").unwrap();
+
+    let out = source.run(&[]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(source.log(), "scripts/install --update\n");
+}
+
+#[test]
+fn a_source_install_on_another_branch_is_refused_and_left_alone() {
+    let source = Source::new();
+    source.upstream_moves(1);
+    source.git(&source.checkout(), &["switch", "-q", "-c", "mine"]);
+    let old = source.head(&source.checkout());
+
+    let out = source.run(&[]);
+
+    refused_naming_the_manual_way(&out, "mine is checked out, not main");
+    assert_eq!(source.head(&source.checkout()), old);
+    assert_eq!(source.log(), "");
+}
+
+#[test]
+fn a_source_install_that_cant_fast_forward_is_refused_and_left_alone() {
+    let source = Source::new();
+    source.upstream_moves(1);
+    source.git(
+        &source.checkout(),
+        &["commit", "-q", "--allow-empty", "-m", "local"],
+    );
+    let old = source.head(&source.checkout());
+
+    let out = source.run(&[]);
+
+    refused_naming_the_manual_way(&out, "fast-forward");
+    assert_eq!(source.head(&source.checkout()), old);
+    assert_eq!(source.log(), "");
+}
+
+#[test]
+fn a_missing_recorded_checkout_is_refused() {
+    let source = Source::new();
+    fs::remove_dir_all(source.checkout()).unwrap();
+
+    let out = source.run(&[]);
+
+    refused_naming_the_manual_way(&out, "doesn't exist");
+}
+
+#[test]
+fn a_recorded_checkout_that_isnt_a_git_repo_is_refused() {
+    let source = Source::new();
+    fs::remove_dir_all(source.checkout().join(".git")).unwrap();
+
+    let out = source.run(&[]);
+
+    refused_naming_the_manual_way(&out, "isn't a git repository");
+}
+
+#[test]
+fn a_failing_scripts_install_fails_the_source_update_without_the_restart_line() {
+    let source = Source::new();
+    source.upstream_moves(1);
+    source.install_exits(3);
+
+    let out = source.run(&[]);
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr(&out).contains("scripts/install --update"), "{out:?}");
+    assert!(!stdout(&out).contains("restart"), "{}", stdout(&out));
+}
+
+#[test]
+fn version_is_refused_for_a_source_install() {
+    let source = Source::new();
+    source.upstream_moves(1);
+    let old = source.head(&source.checkout());
+
+    let out = source.run(&["--version", "v0.2.0"]);
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(stderr(&out).contains("--version"), "{}", stderr(&out));
+    assert_eq!(source.head(&source.checkout()), old);
+    assert_eq!(source.log(), "");
+}
+
+#[test]
+fn check_on_a_source_install_behind_reports_the_commits_and_exits_1() {
+    let source = Source::new();
+    let old = source.head(&source.checkout());
+    source.upstream_moves(3);
+
+    let out = source.run(&["--check"]);
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(
+        stdout(&out).contains("3 commits behind"),
+        "{}",
+        stdout(&out)
+    );
+    assert!(!stdout(&out).contains("restart"), "{}", stdout(&out));
+    assert_eq!(source.head(&source.checkout()), old);
+    assert_eq!(source.log(), "");
+}
+
+#[test]
+fn check_on_a_source_install_up_to_date_exits_0() {
+    let source = Source::new();
+
+    let out = source.run(&["--check"]);
+
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+    assert!(stdout(&out).contains("up to date"), "{}", stdout(&out));
+}
+
+#[test]
+fn check_exits_2_when_the_recorded_checkout_is_missing() {
+    let source = Source::new();
+    fs::remove_dir_all(source.checkout()).unwrap();
+
+    let out = source.run(&["--check"]);
+
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
 }
