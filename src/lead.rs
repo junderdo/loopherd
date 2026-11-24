@@ -1,6 +1,6 @@
 //! `loopherd lead`: start a herd's lead member (D17).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -47,6 +47,10 @@ pub fn lead(
     // Before the sandbox, so its checks read the worktree's project settings.
     let worktree = worktree_path(&spawn_req.repo, &spawn_req.name);
     let fresh = !worktree.exists();
+    let new_files: Vec<PathBuf> = sandbox::launch_files(paths, &spawn_req.name)
+        .into_iter()
+        .filter(|file| !file.exists())
+        .collect();
     ensure_detached_worktree(&spawn_req.repo, &spawn_req.name).context("worktree")?;
     let launch = match sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox) {
         Ok(launch) => launch,
@@ -65,7 +69,13 @@ pub fn lead(
     spawn_req.claude_args.extend(launch.args());
     let spawned = match spawn(herdr, ledger, &spawn_req, inherited_workspace) {
         Ok(spawned) => spawned,
-        Err(e) => return Err(discard_unstarted(herdr, paths, &spawn_req, fresh, e)),
+        Err(e) => {
+            let new = Created {
+                files: new_files,
+                worktree: fresh,
+            };
+            return Err(discard_unstarted(herdr, ledger, &spawn_req, new, e));
+        }
     };
     let name = spawn_req.name;
     // The lead already runs, so what can't be noted only adds to the warning.
@@ -108,25 +118,45 @@ pub fn lead(
     Ok((name, spawned, warnings))
 }
 
-/// `err`, after removing the launch files and, when `fresh`, the worktree
-/// that a failed spawn left. A live agent by the lead's name runs on them, so
-/// they stay, as they do when herdr can't say.
+/// What one `lead` call made before its spawn.
+struct Created {
+    files: Vec<PathBuf>,
+    worktree: bool,
+}
+
+/// `err`, after removing what this call `new`ly made for a lead whose spawn
+/// failed. A lead the ledger recorded, or one live in this herdr, may run on
+/// them, so they stay, as they do when either can't say.
 fn discard_unstarted(
     herdr: &dyn Herdr,
-    paths: &Paths,
+    ledger: &dyn Ledger,
     req: &SpawnRequest,
-    fresh: bool,
+    new: Created,
     err: anyhow::Error,
 ) -> anyhow::Error {
+    let recorded = ledger
+        .entries()
+        .map(|entries| entries.get(&req.name).is_some_and(|e| !e.retired));
     let live = herdr
         .agents()
         .map(|agents| agents.iter().any(|a| a.name.as_deref() == Some(&req.name)));
-    if live.unwrap_or(true) {
+    if recorded.unwrap_or(true) || live.unwrap_or(true) {
         return err;
     }
-    let mut left = sandbox::discard_launch(paths, &req.name);
+    let mut left: Vec<String> = new
+        .files
+        .iter()
+        .filter_map(|file| match std::fs::remove_file(file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Some(format!("{}: {e}", file.display()))
+            }
+            _ => None,
+        })
+        .collect();
     let worktree = worktree_path(&req.repo, &req.name);
-    if fresh && let Err(e) = remove_worktree(&req.repo, &worktree) {
+    if new.worktree
+        && let Err(e) = remove_worktree(&req.repo, &worktree)
+    {
         left.push(format!("its new worktree {}: {e:#}", worktree.display()));
     }
     match left.is_empty() {
@@ -459,6 +489,63 @@ mod tests {
         .unwrap_err();
 
         assert!(format!("{err:#}").contains("prompt refused"), "{err:#}");
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = setup.root.join("config/sandbox").join(file);
+            assert!(file.exists(), "{} was removed", file.display());
+        }
+        assert!(setup.worktree().exists(), "its worktree was removed");
+    }
+
+    #[test]
+    fn a_lead_recorded_before_its_spawn_fails_keeps_its_files_though_it_exited() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = std::sync::Arc::new_cyclic(|me: &std::sync::Weak<FakeHerdr>| {
+            let me = me.clone();
+            let mut herdr = herdr();
+            herdr.on_prompt = Some(Box::new(move |_| {
+                me.upgrade().unwrap().remove_agent("lead-h");
+            }));
+            herdr
+        });
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &*herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert!(result.is_err(), "its prompt found no agent");
+        assert!(!ledger.0["lead-h"].retired);
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = setup.root.join("config/sandbox").join(file);
+            assert!(file.exists(), "{} was removed", file.display());
+        }
+        assert!(setup.worktree().exists(), "its worktree was removed");
+    }
+
+    #[test]
+    fn a_failed_spawn_keeps_the_launch_files_and_worktree_a_retired_lead_left() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+        let paths = setup.paths();
+        lead(&herdr(), &mut ledger, &paths, &request(&[]), Some("w1")).unwrap();
+        ledger.0.get_mut("lead-h").unwrap().retired = true;
+        let mut other_session = herdr();
+        other_session.fail_create_tab = true;
+
+        let err = lead(
+            &other_session,
+            &mut ledger,
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("tab create refused"), "{err:#}");
         for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
             let file = setup.root.join("config/sandbox").join(file);
             assert!(file.exists(), "{} was removed", file.display());

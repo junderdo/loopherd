@@ -726,22 +726,13 @@ fn removed(files: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
         .collect()
 }
 
-/// Removes what [`prepare`] kept for lead `name`, which never ran. Returns
-/// a line per file it couldn't remove.
-pub fn discard_launch(paths: &Paths, name: &str) -> Vec<String> {
+/// The files [`prepare`] keeps for lead `name`.
+pub fn launch_files(paths: &Paths, name: &str) -> [PathBuf; 3] {
     [
         lead_file(paths, name),
         mcp_file(paths, name),
         settings_file(paths, name),
     ]
-    .into_iter()
-    .filter_map(|file| match std::fs::remove_file(&file) {
-        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
-            Some(format!("{}: {e}", file.display()))
-        }
-        _ => None,
-    })
-    .collect()
 }
 
 /// How a lead's Claude is started.
