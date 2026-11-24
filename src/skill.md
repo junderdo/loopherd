@@ -904,7 +904,10 @@ Shepherd section has the detail):
    Before you merge a passing PR or ask to, run `loopherd gate <full head
    sha>` when your herd file sets `[lead] gate`: your broker runs those
    checks outside your sandbox on that head merged with origin's default
-   branch, sockets and all, and prints `gate <sha> merged with origin/<base>
+   branch, sockets and all. For a PR into another branch (a stacked PR's
+   parent, a release branch), add `--base <branch>` from `gh pr view <n>
+   --json baseRefName`; the gate otherwise checks it against the default
+   branch, not its real base. It prints `gate <sha> merged with origin/<base>
    <base sha>: pass`, or `failed:` with the command and its output's tail
    (exit 1), which goes back to the member. It refuses a sha not on one of
    origin's branches, and without a `gate` ask the human to add one. It can

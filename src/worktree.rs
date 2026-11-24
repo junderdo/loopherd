@@ -707,16 +707,27 @@ pub fn pushed_commit(repo: &Path, rev: &str) -> Result<Option<String>> {
         return Ok(None);
     };
     let sha = sha.trim();
-    let heads = remote_git(repo, &["ls-remote", "--heads", "origin"])?;
-    for tip in heads
-        .lines()
-        .filter_map(|line| line.split_whitespace().next())
-    {
-        if has_commit(repo, tip) && is_ancestor(repo, sha, tip)? {
+    for (tip, _) in origin_heads(repo)? {
+        if has_commit(repo, &tip) && is_ancestor(repo, sha, &tip)? {
             return Ok(Some(sha.to_string()));
         }
     }
     Ok(None)
+}
+
+/// Each branch origin lists, as its tip's sha and its name.
+fn origin_heads(repo: &Path) -> Result<Vec<(String, String)>> {
+    let heads = remote_git(repo, &["ls-remote", "--heads", "origin"])?;
+    Ok(heads
+        .lines()
+        .filter_map(|line| {
+            let (sha, name) = line.split_once('\t')?;
+            Some((
+                sha.to_string(),
+                name.strip_prefix("refs/heads/")?.to_string(),
+            ))
+        })
+        .collect())
 }
 
 fn has_commit(repo: &Path, sha: &str) -> bool {
@@ -734,17 +745,33 @@ pub struct Merged {
 }
 
 /// Checks out `sha` in the detached worktree at `slug`'s path and merges
-/// origin's default branch into it, with no hooks. The worktree is reused,
-/// its ignored files kept as a build cache; one with a branch is refused.
-pub fn merge_with_base(repo: &Path, slug: &str, sha: &str) -> Result<Merged> {
+/// into it origin's `base` branch, which origin must list, else its default
+/// branch, with no hooks. The worktree is reused, its ignored files kept as a
+/// build cache, and holds nothing else; one with a branch is refused.
+pub fn merge_with_base(repo: &Path, slug: &str, sha: &str, base: Option<&str>) -> Result<Merged> {
     let path = worktree_path(repo, slug);
-    let base = default_branch(repo)?;
-    let base_sha = git(
-        repo,
-        &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
-    )?
-    .trim()
-    .to_string();
+    let (base, base_sha) = match base {
+        Some(branch) => {
+            let tip = origin_heads(repo)?
+                .into_iter()
+                .find(|(_, name)| name == branch)
+                .map(|(tip, _)| tip)
+                .filter(|tip| has_commit(repo, tip));
+            let Some(tip) = tip else {
+                bail!("refused: origin has no branch {branch} fetched here");
+            };
+            (format!("origin/{branch}"), tip)
+        }
+        None => {
+            let base = default_branch(repo)?;
+            let tip = git(
+                repo,
+                &["rev-parse", "--verify", &format!("{base}^{{commit}}")],
+            )?;
+            let tip = tip.trim().to_string();
+            (base, tip)
+        }
+    };
     // A worktree deleted by hand stays registered, and git won't add one there.
     git(repo, &["worktree", "prune"])?;
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
@@ -763,8 +790,12 @@ pub fn merge_with_base(repo: &Path, slug: &str, sha: &str) -> Result<Merged> {
     let _ = std::fs::remove_file(git_dir(&path)?.join("index.lock"));
     let in_worktree = |args: &[&str]| git_at(repo, &path, &[&NO_HOOKS[..], args].concat());
     in_worktree(&["reset", "--quiet", "--hard"])?;
-    in_worktree(&["clean", "--quiet", "-ffd"])?;
+    // Cleaned again after the checkout and the merge: a file the old
+    // checkout ignored is untracked, not ignored, once the new one doesn't.
+    let clean = || in_worktree(&["clean", "--quiet", "-ffd"]);
+    clean()?;
     in_worktree(&["checkout", "--quiet", "--force", "--detach", sha])?;
+    clean()?;
     let merge = [
         "-c",
         "user.name=loopherd",
@@ -788,6 +819,7 @@ pub fn merge_with_base(repo: &Path, slug: &str, sha: &str) -> Result<Merged> {
         }
         Err(e) => return Err(e),
     }
+    clean()?;
     Ok(Merged {
         path,
         base,

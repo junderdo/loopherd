@@ -368,6 +368,9 @@ enum Command {
     Gate {
         /// The commit to check, as a sha of 7 to 40 hex digits: a PR's head.
         sha: String,
+        /// The origin branch to merge, as a stacked PR's base; default: origin's default branch.
+        #[arg(long)]
+        base: Option<String>,
     },
     /// Give a member that wrote its handoff a fresh session in the same pane:
     /// sends it /clear, waits for the ledger to follow the new session, then
@@ -861,9 +864,9 @@ fn main() -> ExitCode {
                 },
             ),
         ),
-        Command::Gate { sha } => (
+        Command::Gate { sha, base } => (
             "gate",
-            run_op(own_broker().as_ref(), &broker::Op::Gate { rev: sha }),
+            run_op(own_broker().as_ref(), &broker::Op::Gate { rev: sha, base }),
         ),
         Command::Restart {
             name: Some(name),

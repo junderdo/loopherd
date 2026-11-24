@@ -41,8 +41,9 @@ ping the shepherd, then run
 `loopherd report "grill-<n> merged: LH-<n> closed out"` (D145).
 
 Before merging a verified PR, or asking the human to, run `loopherd gate
-<full head sha>`: your broker runs the herd's full check gate on that head
-merged with main, outside your sandbox; run it as a background task, as it
+<full head sha>`, with `--base <branch>` for a PR stacked on another
+branch: your broker runs the herd's full check gate on that head merged
+with its base (main by default), outside your sandbox; run it as a background task, as it
 takes minutes. Merge, or ask, only on its `pass`
 line, and put that line in a merge question; on `failed`, send the failing
 command and its tail back to the member.

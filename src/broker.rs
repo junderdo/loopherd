@@ -100,6 +100,9 @@ pub enum Op {
     /// origin, merged with origin's default branch.
     Gate {
         rev: String,
+        /// A branch of origin's to merge instead of its default, as a stacked PR's base.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
     },
 }
 
@@ -298,7 +301,7 @@ impl Op {
             Op::Status {
                 all, json, color, ..
             } => status(ctx, *all, *json, *color, sink),
-            Op::Gate { rev } => gate(ctx, rev, sink),
+            Op::Gate { rev, base } => gate(ctx, rev, base.as_deref(), sink),
             Op::Read { name, lines } => {
                 let read = crate::read::read(ctx.herdr, &*ctx.ledger, name, *lines)?;
                 // A reply drops empty output, so an empty screen prints nothing either way.
@@ -400,9 +403,9 @@ const GATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(60 * 60);
 /// How long a lead waits on its gate's commands, past fetching and merging.
 const GATE_WITHIN: Duration = Duration::from_secs(4 * 60 * 60);
 
-/// Runs the lead's herd's gate on `rev` merged with origin's default branch,
-/// in a worktree of the lead's own; exit 1 when a command fails or the merge conflicts.
-fn gate(ctx: &mut Ctx, rev: &str, sink: &mut dyn Sink) -> Result<i32> {
+/// Runs the lead's herd's gate on `rev` merged with origin's `base` branch,
+/// else its default branch, in a worktree of the lead's own; exit 1 when a command fails or the merge conflicts.
+fn gate(ctx: &mut Ctx, rev: &str, base: Option<&str>, sink: &mut dyn Sink) -> Result<i32> {
     let lead = ctx.caller.lead.as_ref().context(
         "gate runs in a lead's broker, from its pane; elsewhere run the checks directly",
     )?;
@@ -425,8 +428,8 @@ fn gate(ctx: &mut Ctx, rev: &str, sink: &mut dyn Sink) -> Result<i32> {
             repo.display()
         );
     };
-    let merged =
-        crate::worktree::merge_with_base(&repo, &format!("loopherd-gate-{}", lead.name), &sha)?;
+    let slug = format!("loopherd-gate-{}", lead.name);
+    let merged = crate::worktree::merge_with_base(&repo, &slug, &sha, base)?;
     let checked = format!("gate {sha} merged with {} {}", merged.base, merged.base_sha);
     if !merged.conflicts.is_empty() {
         let files = merged.conflicts.join("\n");
@@ -6365,10 +6368,15 @@ mod tests {
 
     /// Commits `file` on `branch` of the seed beside origin and pushes it there.
     fn push_file(world: &World, branch: &str, file: &str) -> String {
+        push_file_on(world, branch, "main", file)
+    }
+
+    /// [`push_file`] on a `branch` cut from `from`, as a stacked PR's is.
+    fn push_file_on(world: &World, branch: &str, from: &str, file: &str) -> String {
         use crate::worktree::testing::{git_in, head};
         let seed = world.repos.path().join("seed");
         let origin = world.repos.path().join("origin.git");
-        git_in(&seed, &["checkout", "--quiet", "-B", branch, "main"]);
+        git_in(&seed, &["checkout", "--quiet", "-B", branch, from]);
         std::fs::write(seed.join(file), format!("{file}\n")).unwrap();
         git_in(&seed, &["add", file]);
         crate::worktree::testing::commit(&seed, file);
@@ -6382,7 +6390,17 @@ mod tests {
     }
 
     fn gate(rev: &str) -> Op {
-        Op::Gate { rev: rev.into() }
+        Op::Gate {
+            rev: rev.into(),
+            base: None,
+        }
+    }
+
+    fn gate_onto(rev: &str, base: &str) -> Op {
+        Op::Gate {
+            rev: rev.into(),
+            base: Some(base.into()),
+        }
     }
 
     #[test]
@@ -6557,6 +6575,85 @@ mod tests {
 
         assert!(format!("{refused:#}").contains("refused: "), "{refused:#}");
         assert!(worktree.join("work").exists());
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    /// Pushes a commit on `branch`, cut from `from`, writing each file with its text.
+    fn push_files(world: &World, branch: &str, from: &str, files: &[(&str, &str)]) -> String {
+        use crate::worktree::testing::{git_in, head};
+        let seed = world.repos.path().join("seed");
+        let origin = world.repos.path().join("origin.git");
+        git_in(&seed, &["checkout", "--quiet", "-B", branch, from]);
+        for (file, text) in files {
+            std::fs::write(seed.join(file), text).unwrap();
+            git_in(&seed, &["add", file]);
+        }
+        crate::worktree::testing::commit(&seed, branch);
+        git_in(
+            &seed,
+            &["push", "--quiet", origin.to_str().unwrap(), branch],
+        );
+        let sha = head(&seed);
+        git_in(&seed, &["checkout", "--quiet", "main"]);
+        sha
+    }
+
+    #[test]
+    fn a_gate_drops_a_file_an_earlier_gate_s_checkout_ignored_and_its_own_doesn_t() {
+        let (world, _) = gating_world(&["test ! -f generated", "touch generated"]);
+        let ignoring = push_files(&world, "feat/a", "main", &[(".gitignore", "generated\n")]);
+        let plain = push_file(&world, "feat/b", "from-pr");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (_, _, first) = world.client().call(&gate(&ignoring)).unwrap();
+        let (out, _, second) = world.client().call(&gate(&plain)).unwrap();
+
+        assert_eq!((first, second), (0, 0), "{out}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_stacked_head_gates_against_the_base_branch_it_names() {
+        let (world, _) = gating_world(&["test -f parent", "test ! -f from-main"]);
+        let parent = push_file(&world, "feat/parent", "parent");
+        let child = push_file_on(&world, "feat/child", "feat/parent", "child");
+        push_file(&world, "main", "from-main");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (out, _, code) = world
+            .client()
+            .call(&gate_onto(&child, "feat/parent"))
+            .unwrap();
+
+        assert_eq!(
+            (out, code),
+            (
+                format!("gate {child} merged with origin/feat/parent {parent}: pass"),
+                0
+            )
+        );
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_gate_refuses_a_base_origin_has_no_branch_for_and_makes_no_worktree() {
+        let (world, repo) = gating_world(&["true"]);
+        let pr = push_file(&world, "feat/x", "from-pr");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        for base in ["feat/gone", "HEAD", "--help", "x"] {
+            let refused = world.client().call(&gate_onto(&pr, base)).unwrap_err();
+            assert!(
+                format!("{refused:#}").contains(&format!("refused: origin has no branch {base}")),
+                "{base}: {refused:#}"
+            );
+        }
+
+        let worktrees = crate::worktree::testing::worktree_list(&repo);
+        assert_eq!(worktrees.matches("worktree ").count(), 1, "{worktrees}");
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
     }
