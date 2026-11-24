@@ -3,7 +3,7 @@
 
 mod fakes;
 
-use fakes::executable;
+use fakes::{copied, executable};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
@@ -30,31 +30,26 @@ impl Sandbox {
         let root = dir.path().join("repo");
         fs::create_dir_all(root.join("scripts")).unwrap();
         fs::create_dir_all(root.join("agents")).unwrap();
-        fs::copy(
+        copied(
             format!("{REPO}/scripts/install-extras"),
             root.join("scripts/install-extras"),
-        )
-        .unwrap();
-        fs::copy(
+        );
+        copied(
             format!("{REPO}/scripts/install-agents.bash"),
             root.join("scripts/install-agents.bash"),
-        )
-        .unwrap();
-        fs::copy(
+        );
+        copied(
             format!("{REPO}/scripts/install-skills.bash"),
             root.join("scripts/install-skills.bash"),
-        )
-        .unwrap();
-        fs::copy(
+        );
+        copied(
             format!("{REPO}/scripts/install-herdr-plugin.bash"),
             root.join("scripts/install-herdr-plugin.bash"),
-        )
-        .unwrap();
-        fs::copy(
+        );
+        copied(
             format!("{REPO}/scripts/install-herdr-keys.bash"),
             root.join("scripts/install-herdr-keys.bash"),
-        )
-        .unwrap();
+        );
         executable(
             &root.join("scripts/install"),
             fs::read_to_string(format!("{REPO}/scripts/install")).unwrap(),

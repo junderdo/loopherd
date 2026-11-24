@@ -21,3 +21,15 @@ pub fn executable(path: &Path, contents: impl AsRef<[u8]>) {
         path.display()
     );
 }
+
+/// Copies `source` to `dest` from a child process, for the same reason as
+/// [`executable`].
+#[allow(dead_code)] // Not every test file that writes a fake copies one.
+pub fn copied(source: impl AsRef<Path>, dest: impl AsRef<Path>) {
+    let status = Command::new("cp")
+        .arg(source.as_ref())
+        .arg(dest.as_ref())
+        .status()
+        .unwrap();
+    assert!(status.success(), "copying to {}", dest.as_ref().display());
+}
