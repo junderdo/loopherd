@@ -5,7 +5,8 @@
 #   install-extras splash
 #   install-extras offers <agents> <skills> <herdr-plugin> <herdr-keys> <loopherd> [<settings file>]
 #
-# Each offer is ask, yes or no; ask reads its answer from stdin.
+# Each offer is ask, yes or no; ask reads its answer from stdin. Agents and
+# skills also take update, which refreshes only what is already installed.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -40,9 +41,13 @@ run_offers() {
       claude_dir="$PWD/${claude_dir#./}"
     fi
   fi
-  local status=0
+  local status=0 ledger="${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
+  if [[ "$agents" == update ]]; then
+    # The ledger exists once loopherd has installed agent types.
+    if [[ -e "$ledger" ]]; then agents=yes; else agents=no; fi
+  fi
   case "$agents" in yes) agents=--with-agents ;; no) agents=--no-extras ;; esac
-  offer_agents "$agents" "$root/agents" "$claude_dir/agents" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
+  offer_agents "$agents" "$root/agents" "$claude_dir/agents" "$ledger"
   # The plugin goes into the config dir beside --settings, like the hooks and agents (D27).
   # A failed install is reported, but the herdr offers still run before it fails the run.
   if [[ -n "$settings" ]]; then

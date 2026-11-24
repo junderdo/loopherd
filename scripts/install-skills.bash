@@ -51,14 +51,24 @@ skills_list_overlaps() {
   printf '%s\n' "${overlaps[@]}"
 }
 
-# Usage: offer_skills <ask|yes|no> <claude config dir> [--name-dir]
+skills_installed() {
+  command -v claude >/dev/null && claude plugin list --json 2>/dev/null | jq -e --arg id "$skills_id" \
+    'any(.[]; .id == $id and (.scope == "user" or .scope == "managed"))' >/dev/null 2>&1
+}
+
+# Usage: offer_skills <ask|yes|no|update> <claude config dir> [--name-dir]
 # --name-dir names the config dir in what it prints, for a dir that isn't the human's default.
+# update installs nothing: Claude updates its own plugins, so it only prints how.
 offer_skills() {
   local want=$1 skills_dir=$2/skills answer where=
   [[ "${3:-}" != --name-dir ]] || where=" in $2"
   [[ "$want" != no ]] || return 0
-  if command -v claude >/dev/null && claude plugin list --json 2>/dev/null | jq -e --arg id "$skills_id" \
-    'any(.[]; .id == $id and (.scope == "user" or .scope == "managed"))' >/dev/null 2>&1; then
+  if [[ "$want" == update ]]; then
+    skills_installed || return 0
+    echo "the $skills_plugin plugin$where updates through Claude: claude plugin update $skills_id"
+    return 0
+  fi
+  if skills_installed; then
     echo "the $skills_plugin plugin is already installed$where; left as is"
     return 0
   fi

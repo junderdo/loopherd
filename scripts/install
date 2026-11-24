@@ -3,7 +3,8 @@ set -euo pipefail
 
 usage() {
   cat <<'USAGE'
-Usage: scripts/install [--no-splash]
+Usage: scripts/install --update [--settings <file>] [install-hook args...]
+       scripts/install [--no-splash]
                        [[--with-agents] [--with-skills] [--with-herdr-plugin]
                         [--with-herdr-keys] [--lead-defaults [<switches>]]
                         [--context [<values>]]
@@ -42,6 +43,10 @@ Other arguments go to `loopherd install-hook`.
   scripts/install --revive-on-startup true
                                        set it (or: false), asking nothing else
   scripts/install --no-extras          install no extras and run no setup, without the questions
+  scripts/install --update             reinstall after a git pull: no splash and no fresh-install questions;
+                                       refreshes loopherd's agent types only if it installed them, prints the
+                                       update command for an installed mattpocock-skills plugin, then runs
+                                       plain loopherd setup, which asks only about settings still unset
   scripts/install -h, --help           print this and exit
 
 Values given with --lead-defaults, --context or --revive-on-startup are set right after the
@@ -62,6 +67,7 @@ herdr_plugin=ask
 herdr_keys=ask
 setup_args=()
 no_extras=
+updating=
 settings=
 removing=
 args=()
@@ -88,6 +94,7 @@ for arg in "$@"; do
     --with-herdr-plugin) herdr_plugin=yes ;;
     --with-herdr-keys) herdr_keys=yes ;;
     --no-extras) no_extras=1 ;;
+    --update) updating=1 ;;
     --lead-defaults | --context | --revive-on-startup) setup_args+=("$arg") want_value=$arg ;;
     --lead-defaults=*) setup_args+=("$arg") lead_set=1 lead_list=${arg#--lead-defaults=} ;;
     --context=* | --revive-on-startup=*) setup_args+=("$arg") ;;
@@ -100,7 +107,10 @@ done
 
 setup=ask
 [[ ${#setup_args[@]} -eq 0 ]] || setup=given
-if [[ -n "$no_extras" ]]; then
+if [[ -n "$updating" ]]; then
+  [[ -z "$no_extras$removing" && "$agents$skills$herdr_plugin$herdr_keys$setup" == askaskaskaskask ]] || { echo "install: --update can't go with --no-extras, --remove, --with-agents, --with-skills, --with-herdr-plugin, --with-herdr-keys, --lead-defaults, --context or --revive-on-startup" >&2; exit 2; }
+  splash= agents=update skills=update herdr_plugin=no herdr_keys=no
+elif [[ -n "$no_extras" ]]; then
   [[ "$agents$skills$herdr_plugin$herdr_keys$setup" == askaskaskaskask ]] || { echo "install: --no-extras can't go with --with-agents, --with-skills, --with-herdr-plugin, --with-herdr-keys, --lead-defaults, --context or --revive-on-startup" >&2; exit 2; }
   agents=no skills=no herdr_plugin=no herdr_keys=no setup=no
 elif [[ "$agents$skills$herdr_plugin$herdr_keys$setup" != askaskaskaskask ]]; then
