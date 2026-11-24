@@ -2797,12 +2797,17 @@ mod tests {
         let w = World::new();
         w.handed_off();
         let running = take(w.state.path(), "lh-1", "restart").unwrap().unwrap();
+        let (reached, restarting) = std::sync::mpsc::channel();
+        let reached_restart = move || reached.send(()).unwrap();
         let waited = std::thread::scope(|s| {
-            s.spawn(|| {
-                std::thread::sleep(Duration::from_millis(20));
+            s.spawn(move || {
+                // Timed from the waiter's own restart, so a slow first poll
+                // can't outlast the running restart and take the lock itself.
+                restarting.recv().unwrap();
+                std::thread::sleep(Duration::from_millis(500));
                 drop(running);
             });
-            w.wait(Duration::from_secs(5))
+            w.wait_with(Duration::from_secs(5), false, Some(&reached_restart))
         });
         assert!(matches!(waited.unwrap(), Waited::GaveUp));
         assert!(w.herdr.prompts().is_empty());

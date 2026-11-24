@@ -4138,21 +4138,21 @@ mod tests {
         let (world, herdr, entered, release) = slow_feed();
         let serving = world.serve(herdr);
         let client = Client {
-            answer_within: Some(Duration::from_millis(300)),
+            answer_within: Some(Duration::from_secs(2)),
             ..world.client()
         };
 
         let err = client.call(&feed("h")).unwrap_err();
 
-        assert!(
-            entered.try_recv().is_ok(),
-            "the feed never reached start_claude"
-        );
         assert_eq!(
             format!("{err:#}"),
-            "lead-h's broker didn't answer feed within 300ms; it may still be carrying it out, \
+            "lead-h's broker didn't answer feed within 2s; it may still be carrying it out, \
              so check before asking again, and check the broker with loopherd doctor"
         );
+        // Marked started, the feed still runs its queue source before start_claude.
+        entered
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the feed never reached start_claude");
         drop(release);
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
