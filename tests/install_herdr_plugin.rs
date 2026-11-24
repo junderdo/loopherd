@@ -31,9 +31,24 @@ fn path_without_herdr(dir: &Path) -> String {
     dir.display().to_string()
 }
 
+fn entry(version: &str, kind: &str) -> String {
+    format!(
+        r#"{{"plugin_id":"loopherd","enabled":true,"version":"{version}","plugin_root":"/plugins/loopherd","source":{{"kind":"{kind}"}}}}"#
+    )
+}
+
+fn github_entry(version: &str) -> String {
+    entry(version, "github")
+}
+
+fn plugin_list(entry: &str) -> String {
+    format!(r#"{{"id":"cli:plugin","result":{{"plugins":[{entry}],"type":"plugin_list"}}}}"#)
+}
+
 /// The installer under a temp root shipping a plugin at 0.3.0, with a temp
 /// HOME and state dir, a fake cargo, a `claude` reporting the skills plugin
-/// installed, and a `herdr` stub that logs its arguments.
+/// installed, a `herdr` stub that logs its arguments, and a `timeout` that
+/// logs what it wraps.
 struct Sandbox {
     dir: tempfile::TempDir,
     root: PathBuf,
@@ -111,13 +126,32 @@ impl Sandbox {
                 r#"#!/bin/sh
 echo "herdr $*" >> '{stub_dir}/log'
 case "$*" in
+  "--version")
+    [ ! -e '{stub_dir}/version-fails' ] || exit 1
+    cat '{stub_dir}/version' 2>/dev/null || echo 'herdr 0.9.5' ;;
   "plugin list --plugin loopherd --json")
     [ ! -e '{stub_dir}/list-fails' ] || exit 1
     cat '{stub_dir}/list.json' 2>/dev/null || echo '{{"id":"cli:plugin","result":{{"plugins":[],"type":"plugin_list"}}}}' ;;
   "plugin install"* | "plugin update"*)
     [ ! -e '{stub_dir}/fails' ] || {{ echo "herdr: no network" >&2; exit 1; }}
+    [ ! -e '{stub_dir}/updated.json' ] || mv '{stub_dir}/updated.json' '{stub_dir}/list.json'
     echo "herdr says: done" ;;
 esac
+"#
+            ),
+        );
+        // Logs what it wraps, then runs it, or with `expires` stands in for a
+        // timed-out install or update.
+        executable(
+            &fake_bin.join("timeout"),
+            format!(
+                r#"#!/bin/sh
+echo "timeout $*" >> '{stub_dir}/timeouts'
+case "$*" in
+  *"plugin install"* | *"plugin update"*) [ ! -e '{stub_dir}/expires' ] || exit 124 ;;
+esac
+shift
+exec "$@"
 "#
             ),
         );
@@ -133,20 +167,33 @@ esac
     /// Makes the stub list loopherd's plugin at `version`, from GitHub or,
     /// with `kind` "local", linked.
     fn installed(&self, version: &str, kind: &str) {
-        self.listed(&format!(
-            r#"{{"plugin_id":"loopherd","enabled":true,"version":"{version}","plugin_root":"/plugins/loopherd","source":{{"kind":"{kind}"}}}}"#
-        ));
+        self.listed(&entry(version, kind));
     }
 
     /// Makes the stub list `entry` as herdr's one plugin.
     fn listed(&self, entry: &str) {
+        fs::write(self.stub.join("list.json"), plugin_list(entry)).unwrap();
+    }
+
+    /// Makes the stub's `plugin update` leave the plugin at `version`.
+    fn updates_to(&self, version: &str) {
         fs::write(
-            self.stub.join("list.json"),
-            format!(
-                r#"{{"id":"cli:plugin","result":{{"plugins":[{entry}],"type":"plugin_list"}}}}"#
-            ),
+            self.stub.join("updated.json"),
+            plugin_list(&github_entry(version)),
         )
         .unwrap();
+    }
+
+    fn herdr_version(&self, version: &str) {
+        fs::write(self.stub.join("version"), format!("herdr {version}\n")).unwrap();
+    }
+
+    fn timed_out_runs(&self) -> Vec<String> {
+        fs::read_to_string(self.stub.join("timeouts"))
+            .unwrap_or_default()
+            .lines()
+            .map(String::from)
+            .collect()
     }
 
     fn herdr_calls(&self) -> Vec<String> {
@@ -169,7 +216,7 @@ esac
     fn changes(&self) -> Vec<String> {
         self.herdr_calls()
             .into_iter()
-            .filter(|c| !c.starts_with("herdr plugin list"))
+            .filter(|c| !c.starts_with("herdr plugin list") && c != "herdr --version")
             .collect()
     }
 
@@ -733,4 +780,144 @@ fn a_plugin_list_herdr_cant_answer_skips_the_keys_saying_so() {
         "{out}"
     );
     assert!(sandbox.key_installs().is_empty());
+}
+
+#[test]
+fn with_herdr_plugin_runs_herdr_under_a_timeout() {
+    let sandbox = Sandbox::new();
+
+    sandbox.install(&["--with-herdr-plugin"]);
+
+    let runs = sandbox.timed_out_runs();
+    assert!(
+        runs.iter()
+            .any(|r| r.starts_with("timeout ") && r.ends_with(&format!("{INSTALL} --yes"))),
+        "{runs:?}"
+    );
+}
+
+#[test]
+fn on_a_terminal_the_install_runs_without_a_timeout_so_ctrl_c_reaches_it() {
+    for (args, answers, run) in [
+        (&[][..], "n\ny\n", INSTALL.to_string()),
+        (&["--with-herdr-plugin"][..], "", format!("{INSTALL} --yes")),
+    ] {
+        let sandbox = Sandbox::new();
+
+        let Some(_) = sandbox.on_terminal_with_path(&sandbox.path(), args, answers) else {
+            return;
+        };
+
+        assert_eq!(sandbox.changes(), [run], "{args:?}");
+        let runs = sandbox.timed_out_runs();
+        assert!(
+            !runs.iter().any(|r| r.contains("plugin install")),
+            "{args:?}: {runs:?}"
+        );
+    }
+}
+
+#[test]
+fn a_herdr_whose_version_fails_is_told_to_reinstall_and_the_install_goes_on() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.2.9", "github");
+    fs::write(sandbox.stub.join("version-fails"), "").unwrap();
+
+    let out = sandbox.install(&["--with-herdr-plugin", "--with-herdr-keys"]);
+
+    assert!(out.contains("and this herdr has no plugin update"), "{out}");
+    assert!(sandbox.changes().is_empty(), "{:?}", sandbox.changes());
+    assert_eq!(sandbox.key_installs(), ["loopherd install-herdr-keys"]);
+}
+
+#[test]
+fn a_timed_out_plugin_install_is_said_and_the_install_goes_on() {
+    let sandbox = Sandbox::new();
+    fs::write(sandbox.stub.join("expires"), "").unwrap();
+
+    let out = sandbox.run(&["--with-herdr-plugin"]);
+
+    assert!(out.status.success(), "{out:?}");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("install: herdr plugin install timed out"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn a_herdr_without_plugin_update_is_not_offered_one() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.2.9", "github");
+    sandbox.herdr_version("0.9.3");
+
+    let Some(out) = sandbox.on_terminal("y") else {
+        return;
+    };
+
+    assert!(!out.contains("Update loopherd's herdr plugin"), "{out}");
+    assert!(
+        out.contains(
+            "loopherd's herdr plugin 0.2.9 is older than this checkout's 0.3.0, and herdr 0.9.3 has no plugin update (0.9.4 or later); reinstall it by hand: herdr plugin uninstall loopherd && herdr plugin install junderdo/loopherd/herdr-plugin"
+        ),
+        "{out}"
+    );
+    assert!(sandbox.changes().is_empty(), "{:?}", sandbox.changes());
+}
+
+#[test]
+fn with_herdr_plugin_a_herdr_without_plugin_update_updates_nothing() {
+    for version in ["0.9.3", "unknown"] {
+        let sandbox = Sandbox::new();
+        sandbox.installed("0.2.9", "github");
+        sandbox.herdr_version(version);
+
+        let out = sandbox.install(&["--with-herdr-plugin"]);
+
+        assert!(out.contains("reinstall it by hand"), "{version}: {out}");
+        assert!(sandbox.changes().is_empty(), "{:?}", sandbox.changes());
+    }
+}
+
+#[test]
+fn a_herdr_with_plugin_update_is_offered_one() {
+    for version in ["0.9.4", "0.10.0", "1.0.0"] {
+        let sandbox = Sandbox::new();
+        sandbox.installed("0.2.9", "github");
+        sandbox.herdr_version(version);
+
+        sandbox.install(&["--with-herdr-plugin"]);
+
+        assert_eq!(sandbox.changes(), [format!("{UPDATE} --yes")], "{version}");
+    }
+}
+
+#[test]
+fn an_update_that_leaves_the_version_is_said() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.2.9", "github");
+
+    let out = sandbox.install(&["--with-herdr-plugin"]);
+
+    assert!(
+        out.contains(
+            "loopherd's herdr plugin is still 0.2.9 after the update; herdr updates from the ref it installed, so reinstall it by hand: herdr plugin uninstall loopherd && herdr plugin install junderdo/loopherd/herdr-plugin"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn an_update_that_moves_the_version_says_the_new_one() {
+    let sandbox = Sandbox::new();
+    sandbox.installed("0.2.9", "github");
+    sandbox.updates_to("0.3.0");
+
+    let out = sandbox.install(&["--with-herdr-plugin"]);
+
+    assert!(
+        out.contains("loopherd's herdr plugin is now 0.3.0"),
+        "{out}"
+    );
+    assert!(!out.contains("still"), "{out}");
 }
