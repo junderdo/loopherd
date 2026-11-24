@@ -4,8 +4,9 @@
 #   ln -s <main checkout>/docs ~/.config/loopherd/herds/docs
 #
 # The shepherd starts a grill for a wayfinding:grilling card with
-# `loopherd add loopherd-cards grill <n> docs <slug>`, which focuses its pane
-# (D112). Never list it in [queue] templates: feed doesn't spawn attended
+# `loopherd add --no-focus loopherd-cards grill <n> docs <slug>`, sends its
+# background with `loopherd tell`, then focuses its pane with `herdr agent
+# focus` (D145; docs/agents/shepherd.md#grilling). Never list it in [queue] templates: feed doesn't spawn attended
 # templates. The herd's watch prints only its `merged` and `gone`; feed's
 # after_merge and this `done` check then reap it with `retire --close`.
 [template.grill]
