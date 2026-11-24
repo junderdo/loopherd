@@ -968,9 +968,12 @@ fn broker_check(paths: &Paths, lead: &str, own: &BrokersOwn) -> Option<Check> {
             format!("loopherd revive --name {lead}"),
         ));
     }
+    let failed = crate::broker::failed_install(paths, lead)
+        .is_some_and(|file| crate::broker::FileId::of(&own.path) == Some(file));
     let moving = || {
-        crate::broker::recorded_binary(paths, lead)
-            .is_some_and(|r| !own.runs(&r) && own.followed_by(&r))
+        !failed
+            && crate::broker::recorded_binary(paths, lead)
+                .is_some_and(|r| !own.runs(&r) && own.followed_by(&r))
     };
     if own.in_broker_of.as_deref() == Some(lead) && moving() {
         return Some(ok(
@@ -978,7 +981,11 @@ fn broker_check(paths: &Paths, lead: &str, own: &BrokersOwn) -> Option<Check> {
             format!("{lead}'s broker runs this check, and moves onto {own} once it is answered"),
         ));
     }
-    let runs = match recorded_after_moving(paths, lead, own) {
+    let recorded = match failed {
+        true => crate::broker::recorded_binary(paths, lead),
+        false => recorded_after_moving(paths, lead, own),
+    };
+    let runs = match recorded {
         Some(recorded) if own.runs(&recorded) => return None,
         Some(recorded) if own.is_at(&recorded.path) => format!(
             "an earlier build of {} (loopherd {})",
@@ -992,6 +999,16 @@ fn broker_check(paths: &Paths, lead: &str, own: &BrokersOwn) -> Option<Check> {
         ),
         None => format!("a loopherd from before brokers recorded their build, not {own}"),
     };
+    if failed {
+        return Some(warning(
+            &name,
+            format!(
+                "{lead}'s broker couldn't move onto {own}, which failed its startup check \
+                 (the lead's mailbox says why), so it serves on {runs}"
+            ),
+            format!("once the install is fixed, the shepherd runs loopherd broker-restart {lead}"),
+        ));
+    }
     // A lead's install also runs doctor, and a lead is refused broker-restart.
     Some(warning(
         &name,
@@ -2947,6 +2964,31 @@ mod tests {
 
         assert_eq!(brokers.len(), 1, "{brokers:?}");
         assert!(brokers[0].contains("/old/loopherd"), "{}", brokers[0]);
+    }
+
+    #[test]
+    fn a_broker_whose_check_of_the_install_failed_is_warned_about_without_a_wait_or_a_move() {
+        let mut m = machine(&ALL);
+        let (_held, lock, _) = lead_on_an_earlier_build(&mut m);
+        let install = std::fs::metadata(m.install.on_path.as_ref().unwrap()).unwrap();
+        let record = std::fs::read_to_string(&lock).unwrap();
+        let failed = format!("{record}failed {} {}\n", install.dev(), install.ino());
+        std::fs::write(&lock, failed).unwrap();
+        m.install.broker_move_grace = Duration::from_secs(5);
+        m.install.in_broker_of = Some("lead-h".into());
+
+        let started = std::time::Instant::now();
+        let brokers = broker_problems(&m);
+
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(brokers.len(), 1, "{brokers:?}");
+        assert!(
+            brokers[0].contains("lead-h's broker couldn't move onto the loopherd on PATH")
+                && brokers[0].contains("serves on an earlier build")
+                && !brokers[0].contains("moves onto"),
+            "{}",
+            brokers[0]
+        );
     }
 
     #[test]

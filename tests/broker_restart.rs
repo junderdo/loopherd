@@ -805,6 +805,9 @@ fn an_install_that_cant_serve_the_leads_config_is_noted_and_the_old_broker_serve
         "{}",
         notes[0]
     );
+    let (dev, ino) = file_id(&installed);
+    let lock = fs::read_to_string(world.config().join("broker/lead-k.lock")).unwrap();
+    assert!(lock.contains(&format!("\nfailed {dev} {ino}\n")), "{lock}");
     assert_eq!(world.recorded_file(), Some(running));
     assert_eq!(world.serving_pid(), broker.pid());
     assert_eq!(world.read_as_lead(), "served\n");

@@ -881,7 +881,7 @@ pub fn serve<L: Ledger + Clone + Send>(
             b.file.ino
         )
     });
-    let record = LockRecord {
+    let mut record = LockRecord {
         path: lock_file(paths, lead),
         text: format!("{remote}\n{MARKS}\n{binary}"),
     };
@@ -956,8 +956,9 @@ pub fn serve<L: Ledger + Clone + Send>(
             if let Some(installs) = installs.as_mut()
                 && in_flight.is_empty()
                 && (answered || installs.due())
+                && let Some(failed) = installs.move_onto_newer(paths, lead, &lock)
             {
-                installs.move_onto_newer(paths, lead, &lock);
+                record.failed(failed);
             }
             // Reopened each round: the lead can replace any folder on the way.
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
@@ -1004,17 +1005,14 @@ impl Installs<'_> {
 
     /// Re-execs the loopherd on PATH when it is another file than this
     /// broker runs and not one that already failed to take over. Returns
-    /// only when it didn't move, noting the lead's mailbox if it tried.
-    fn move_onto_newer(&mut self, paths: &Paths, lead: &str, lock: &Lock) {
+    /// only when it didn't move, noting the lead's mailbox and returning the
+    /// install if it tried.
+    fn move_onto_newer(&mut self, paths: &Paths, lead: &str, lock: &Lock) -> Option<FileId> {
         self.looked = Instant::now();
-        let Some(exe) = (self.follow.installed)() else {
-            return;
-        };
-        let Some(file) = FileId::of(&exe) else {
-            return;
-        };
+        let exe = (self.follow.installed)()?;
+        let file = FileId::of(&exe)?;
         if Some(file) == self.running || Some(file) == self.failed {
-            return;
+            return None;
         }
         let e = (self.follow.reexec)(&exe, lead, lock);
         self.failed = Some(file);
@@ -1026,6 +1024,7 @@ impl Installs<'_> {
         );
         let note = crate::report::Entry::new(SystemTime::now(), Body::Note { text });
         let _ = crate::report::append(&paths.state_dir().join("reports"), lead, &note);
+        Some(file)
     }
 }
 
@@ -1140,6 +1139,19 @@ impl LockRecord {
 
     fn clear(&self) {
         let _ = std::fs::write(&self.path, "");
+    }
+
+    /// Records `file` as the install this broker couldn't move onto, for doctor.
+    fn failed(&mut self, file: FileId) {
+        let mut text: String = self
+            .text
+            .lines()
+            .filter(|line| !line.starts_with(FAILED))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        text.push_str(&format!("{FAILED}{} {}\n", file.dev, file.ino));
+        self.text = text;
+        self.write();
     }
 }
 
@@ -2260,6 +2272,7 @@ const MARKS: &str = "marks";
 const VERSION: &str = "version ";
 const BINARY: &str = "binary ";
 const FILE: &str = "file ";
+const FAILED: &str = "failed ";
 
 /// A loopherd binary, which a broker records in its lock so a newer one can tell it is stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2315,6 +2328,19 @@ pub fn recorded_binary(paths: &Paths, lead: &str) -> Option<Binary> {
             dev: dev.parse().ok()?,
             ino: ino.parse().ok()?,
         },
+    })
+}
+
+/// The install `lead`'s broker last couldn't move onto, which it won't try again.
+pub fn failed_install(paths: &Paths, lead: &str) -> Option<FileId> {
+    let text = std::fs::read_to_string(lock_file(paths, lead)).ok()?;
+    let (dev, ino) = text
+        .lines()
+        .find_map(|line| line.strip_prefix(FAILED))?
+        .split_once(' ')?;
+    Some(FileId {
+        dev: dev.parse().ok()?,
+        ino: ino.parse().ok()?,
     })
 }
 
