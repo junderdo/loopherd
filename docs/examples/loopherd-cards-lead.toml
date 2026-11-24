@@ -34,3 +34,6 @@ follow_ups_ready = false
 # How many review rounds the lead runs on a PR before asking the human;
 # unset, it comes from config.toml's [lead_defaults], else 3.
 # review_rounds = 3
+# The checks `loopherd gate <sha>` runs in the lead's broker, outside its
+# sandbox, on a PR's head merged with main (D149).
+gate = ["cargo fmt --check", "cargo clippy --all-targets -- -D warnings", "cargo test"]
