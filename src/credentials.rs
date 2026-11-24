@@ -301,6 +301,8 @@ pub fn human_credentials(
         (home.join(".docker/config.json"), false),
         (home.join(".npmrc"), false),
         (home.join(".config/github-copilot"), true),
+        // Claude Code's minutely copies of `.claude.json`.
+        (home.join(".claude/backups"), true),
     ];
     let moved = [
         (config.join("gh"), true),
@@ -311,6 +313,7 @@ pub fn human_credentials(
     let named = [
         dir("GH_CONFIG_DIR").map(|d| (d, true)),
         dir("CLAUDE_CONFIG_DIR").map(|d| (d.join(".claude.json"), false)),
+        dir("CLAUDE_CONFIG_DIR").map(|d| (d.join("backups"), true)),
         dir("DOCKER_CONFIG").map(|d| (d.join("config.json"), false)),
         dir("NPM_CONFIG_USERCONFIG").map(|f| (f, false)),
     ];
@@ -349,7 +352,11 @@ fn store_file(home: &Path, helper: &str) -> Option<PathBuf> {
             break words.next()?;
         }
     };
-    match file.strip_prefix("~/") {
+    // git runs a helper through sh, which expands these.
+    let under_home = ["~/", "$HOME/", "${HOME}/"]
+        .iter()
+        .find_map(|prefix| file.strip_prefix(prefix));
+    match under_home {
         Some(under) => Some(home.join(under)),
         None => Path::new(file).is_absolute().then(|| PathBuf::from(file)),
     }
@@ -550,21 +557,22 @@ mod tests {
         let found = human_credentials(home, &env, "");
 
         assert_eq!(
-            found[10..],
+            found[11..],
             [
                 (PathBuf::from("/home/me/.xdg/gh"), true),
                 (PathBuf::from("/home/me/.xdg/git/credentials"), false),
                 (PathBuf::from("/home/me/.xdg/github-copilot"), true),
                 (PathBuf::from("/elsewhere/gh"), true),
                 (PathBuf::from("/elsewhere/claude/.claude.json"), false),
+                (PathBuf::from("/elsewhere/claude/backups"), true),
                 (PathBuf::from("/elsewhere/docker/config.json"), false),
                 (PathBuf::from("/elsewhere/npmrc"), false),
             ]
         );
-        assert_eq!(human_credentials(home, &|_| None, "").len(), 10);
+        assert_eq!(human_credentials(home, &|_| None, "").len(), 11);
         let cache_moved = |name: &str| (name == "XDG_CACHE_HOME").then(|| "/home/me/.c".into());
         assert_eq!(
-            human_credentials(home, &cache_moved, "")[10..],
+            human_credentials(home, &cache_moved, "")[11..],
             [(PathBuf::from("/home/me/.c/git/credential"), true)]
         );
     }
@@ -579,6 +587,8 @@ store --file ~/.my-credentials
 /usr/lib/git-core/git-credential-store --file=\"/srv/quoted\"
 store --file \"/srv/with space\"
 store --file '/srv/single quoted'
+store --file=$HOME/.dollar-home
+store --file \"${HOME}/.braced-home\"
 store
 store --file=relative
 !f() { echo; }; f
@@ -587,13 +597,15 @@ store --file=relative
         let found = human_credentials(home, &|_| None, helpers);
 
         assert_eq!(
-            found[10..],
+            found[11..],
             [
                 (PathBuf::from("/srv/tokens"), false),
                 (PathBuf::from("/home/me/.my-credentials"), false),
                 (PathBuf::from("/srv/quoted"), false),
                 (PathBuf::from("/srv/with space"), false),
                 (PathBuf::from("/srv/single quoted"), false),
+                (PathBuf::from("/home/me/.dollar-home"), false),
+                (PathBuf::from("/home/me/.braced-home"), false),
             ]
         );
     }
@@ -656,7 +668,7 @@ server:/share /mnt/nfs 9p rw,aname=other 0 0
 ";
         let denied = |mounts: &[u8]| {
             let confined = confined(&paths, "h", &machine(&on(mounts))).unwrap();
-            confined.deny_read[11..].to_vec()
+            confined.deny_read[12..].to_vec()
         };
 
         assert_eq!(
@@ -720,7 +732,7 @@ server:/share /mnt/nfs 9p rw,aname=other 0 0
         let confined = confined(&paths, "h", &machine(&none)).unwrap();
 
         assert_eq!(
-            confined.deny_read[10..12],
+            confined.deny_read[11..13],
             [
                 (paths.home.join(".claude.json.backup"), false),
                 (paths.home.join(".claude.json.tmp.12.ab"), false),

@@ -1630,9 +1630,10 @@ mod tests {
             "/home/me/.docker/config.json",
             "/home/me/.npmrc",
             "/home/me/.config/github-copilot",
+            "/home/me/.claude/backups",
             &config,
         ];
-        assert_eq!(deny_read[..11], hidden);
+        assert_eq!(deny_read[..12], hidden);
         let locks = h.paths.locks_dir().display().to_string();
         assert_eq!(deny_read.last(), Some(&locks));
         let deny = strings(&settings["permissions"]["deny"]);
@@ -1642,6 +1643,7 @@ mod tests {
             "Read(//home/me/.config/gh/**)",
             "Read(//home/me/.git-credentials)",
             "Read(//home/me/.claude.json)",
+            "Read(//home/me/.claude/backups/**)",
             &format!("Read(/{config}/**)"),
         ] {
             assert!(deny.contains(&rule.to_string()), "{rule}: {deny:?}");

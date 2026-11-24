@@ -2090,7 +2090,8 @@ pub fn entries_but(dir: &Path, skip: &str) -> Result<Vec<(PathBuf, bool)>> {
 
 /// `settings` without the denies naming paths in `<state>/broker/` and
 /// `<state>/handoffs/` one by one, which change as agents and herds come and
-/// go, not with the switches.
+/// go, nor the copies Claude Code leaves beside `.claude.json`, which come as
+/// it runs; neither changes with the switches.
 fn switch_settings(settings: &Value, paths: &Paths) -> Value {
     let dirs = ["broker", "handoffs"]
         .map(|dir| format!("Edit(/{}/", paths.state_dir().join(dir).display()));
@@ -2100,9 +2101,18 @@ fn switch_settings(settings: &Value, paths: &Paths) -> Value {
                 .is_some_and(|rest| !rest.trim_end_matches("/**)").contains('*'))
         })
     };
+    let copy = |path: &str| {
+        Path::new(path.trim_end_matches(')'))
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".claude.json."))
+    };
     let mut settings = settings.clone();
     if let Some(deny) = settings["permissions"]["deny"].as_array_mut() {
-        deny.retain(|rule| !rule.as_str().is_some_and(named));
+        deny.retain(|rule| !rule.as_str().is_some_and(|rule| named(rule) || copy(rule)));
+    }
+    if let Some(deny_read) = settings["sandbox"]["filesystem"]["denyRead"].as_array_mut() {
+        deny_read.retain(|path| !path.as_str().is_some_and(copy));
     }
     settings
 }
@@ -2443,11 +2453,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn a_credentials_leads_settings_hide_the_windows_drives_its_machine_mounts() {
-        let root = tempfile::tempdir().unwrap();
-        let paths = Paths::under(root.path());
-        let repo = root.path().join("repo");
+    /// Lead `lead-h` of credentials herd `h`, with its key and token, its home under `root`.
+    fn credentials_lead(root: &Path) -> Paths {
+        let mut paths = Paths::under(root);
+        paths.home = root.join("home");
+        std::fs::create_dir_all(&paths.home).unwrap();
+        let repo = root.join("repo");
         std::fs::create_dir_all(&repo).unwrap();
         crate::worktree::testing::git(&repo, &["init", "--quiet"]).unwrap();
         let url = "https://github.com/acme/widgets.git";
@@ -2465,6 +2476,13 @@ mod tests {
         std::fs::create_dir_all(&credentials).unwrap();
         std::fs::write(credentials.join("h.key"), "a private key\n").unwrap();
         std::fs::write(credentials.join("h.token"), "github_pat_1\n").unwrap();
+        paths
+    }
+
+    #[test]
+    fn a_credentials_leads_settings_hide_the_windows_drives_its_machine_mounts() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = credentials_lead(root.path());
         let machine = crate::credentials::Machine {
             env: &|_| None,
             mounts: &|| Ok(b"Z: /mnt/zz drvfs rw 0 0\n".to_vec()),
@@ -2479,6 +2497,28 @@ mod tests {
         assert!(deny_read.contains(&json!("/mnt/zz")), "{deny_read:?}");
         let deny = settings["permissions"]["deny"].as_array().unwrap();
         assert!(deny.contains(&json!("Read(//mnt/zz/**)")), "{deny:?}");
+    }
+
+    #[test]
+    fn a_claude_json_copy_made_after_the_settings_isnt_a_switch_change() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = credentials_lead(root.path());
+        std::fs::write(paths.home.join(".claude.json.tmp.1.ab"), "{}").unwrap();
+        let machine = crate::credentials::Machine {
+            env: &|_| None,
+            mounts: &|| Ok(vec![]),
+            credential_helpers: &|_| String::new(),
+        };
+        let built = settings_on(&paths, "lead-h", "h", &machine).unwrap();
+
+        std::fs::write(paths.home.join(".claude.json.tmp.2.cd"), "{}").unwrap();
+        let current = settings_on(&paths, "lead-h", "h", &machine).unwrap();
+
+        assert_ne!(built, current, "the new copy is denied");
+        assert_eq!(
+            switch_settings(&built, &paths),
+            switch_settings(&current, &paths)
+        );
     }
 
     #[test]

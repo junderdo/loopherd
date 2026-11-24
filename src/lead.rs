@@ -1695,7 +1695,7 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(
-            deny_read[..11],
+            deny_read[..12],
             serde_json::json!([
                 "/home/me/.ssh",
                 "/home/me/.netrc",
@@ -1707,6 +1707,7 @@ mod tests {
                 "/home/me/.docker/config.json",
                 "/home/me/.npmrc",
                 "/home/me/.config/github-copilot",
+                "/home/me/.claude/backups",
                 config,
             ])
             .as_array()
@@ -1720,7 +1721,7 @@ mod tests {
             .filter(|rule| rule.as_str().is_some_and(|r| r.starts_with("Read(")))
             .collect();
         assert_eq!(
-            reads[..11],
+            reads[..12],
             serde_json::json!([
                 "Read(//home/me/.ssh/**)",
                 "Read(//home/me/.netrc)",
@@ -1732,6 +1733,7 @@ mod tests {
                 "Read(//home/me/.docker/config.json)",
                 "Read(//home/me/.npmrc)",
                 "Read(//home/me/.config/github-copilot/**)",
+                "Read(//home/me/.claude/backups/**)",
                 format!("Read(/{config}/**)"),
             ])
             .as_array()
@@ -1740,7 +1742,7 @@ mod tests {
             .collect::<Vec<_>>()[..]
         );
         // The rest are this machine's drvfs mounts, each denied to both.
-        assert_eq!(reads.len() - 11, deny_read.len() - 12, "{deny_read:?}");
+        assert_eq!(reads.len() - 12, deny_read.len() - 13, "{deny_read:?}");
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the settings hold the token");
     }
