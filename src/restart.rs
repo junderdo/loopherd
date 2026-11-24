@@ -2882,11 +2882,17 @@ mod tests {
         let w = World::new();
         w.handed_off();
         let woken = || w.herdr.set_status("lh-1", AgentStatus::Working);
+        let paused = std::cell::Cell::new(false);
         let idles = || {
             assert!(w.herdr.prompts().is_empty(), "restarted while working");
+            paused.set(true);
             w.herdr.set_status("lh-1", AgentStatus::Idle);
         };
         let waited = w.wait_paced(Duration::from_secs(5), false, Some(&woken), &idles, &|| {});
+        assert!(
+            paused.get(),
+            "restarted without waiting out the busy member"
+        );
         assert!(matches!(waited.unwrap(), Waited::Restarted));
         assert!(w.notes().is_empty());
     }
