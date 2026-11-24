@@ -33,9 +33,12 @@ The human's shepherd only, never a lead or member: also at the start of
 each session, name your herdr agent so the herd view's `S` focuses you
 instead of starting a second shepherd: `herdr agent rename
 "$HERDR_PANE_ID" shepherd`. If herdr answers `agent_name_taken`, another
-shepherd already runs in the pane it names; stop and tell the human. On
-any other error, carry on and tell the human that `S` can't find you
-(D88).
+shepherd already runs in the pane it names; stop and tell the human. If
+it answers `agent_launch_pending`, find your entry in `herdr agent list`
+(its `pane_id` is `$HERDR_PANE_ID`): if its name is already `shepherd`,
+carry on without a warning, since `S` started you under that name;
+otherwise retry the rename once its `launch_pending` clears. On any other
+error, carry on and tell the human that `S` can't find you (D88, D145).
 
 ### Setting up a project
 
