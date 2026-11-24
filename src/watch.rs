@@ -26,6 +26,7 @@ use crate::process::{Procs, live};
 use crate::report::{
     Body, Filter, Mailbox, Pending, Stop, member_of_own_pane, peek_reports, unread_wakes,
 };
+use crate::stall;
 use crate::status;
 
 /// The kinds of line a watch prints after a member's name, besides report kinds.
@@ -38,6 +39,7 @@ pub mod line {
     pub const INTERRUPTED: &str = "interrupted";
     pub const BLOCKED: &str = "blocked";
     pub const GONE: &str = "gone";
+    pub const STALLED: &str = "stalled";
     /// After a herd's name, not a member's.
     pub const FAILING: &str = "failing";
     pub const RECOVERED: &str = "recovered";
@@ -50,7 +52,7 @@ pub mod line {
     /// After a lead's name.
     pub const NO_BROKER: &str = "no broker";
     #[cfg(test)]
-    pub const ALL: [&str; 14] = [
+    pub const ALL: [&str; 15] = [
         PAUSED,
         FINISHED,
         FAILED,
@@ -59,6 +61,7 @@ pub mod line {
         INTERRUPTED,
         BLOCKED,
         GONE,
+        STALLED,
         FAILING,
         RECOVERED,
         RUNNING_LOW,
@@ -226,6 +229,8 @@ pub fn watch(
     // Unlike `gone`, kept while herdr is unreadable: a member seen live and
     // now gone counts as in flight, though a restart may keep `gone` quiet.
     let mut seen_live: HashSet<String> = HashSet::new();
+    // When each member was last seen working or blocked, which restarts its stall clock.
+    let mut busy_at: HashMap<String, SystemTime> = HashMap::new();
     let mut code = 0;
     let mut own_questions_seen = HashSet::new();
     let mut own_no_broker = false;
@@ -320,6 +325,14 @@ pub fn watch(
             if member.status != AgentStatus::Unknown {
                 last.insert(member.name.clone(), member.status);
             }
+            if matches!(member.status, AgentStatus::Working | AgentStatus::Blocked) {
+                busy_at.insert(member.name.clone(), clock.now());
+                let fired = (checks.as_mut().map(|c| &mut c.fired))
+                    .or(unled.as_mut().map(|u| &mut u.fired));
+                if let Some(fired) = fired {
+                    fired.end_stall(&member.name)?;
+                }
+            }
         }
         // An empty filter means every mailbox.
         if !names.is_empty() {
@@ -364,7 +377,20 @@ pub fn watch(
         lines.extend(stopped.flat_map(stop_wakes));
         let mut fired = None;
         if let Some(checks) = checks.as_mut().filter(|c| clock.elapsed() >= c.next) {
-            let events = checks.run(ledger, warn)?;
+            let mut events = checks.run(ledger, warn)?;
+            let after = herd::stalled_after(checks.paths, &checks.herd);
+            let after = |_: &str| after.as_ref().map_or(stall::DEFAULT_AFTER, |a| *a);
+            let stalled = Stalls {
+                dir,
+                busy_at: &busy_at,
+                now: clock.now(),
+            }
+            .events(&mut checks.fired, ledger, &members, &after)?;
+            events.extend(
+                stalled
+                    .into_iter()
+                    .filter(|e| !checks.fired.keys.contains(&e.key)),
+            );
             checks.merges_due = true;
             checks.next = clock.elapsed() + CHECK_EVERY;
             if !events.is_empty() {
@@ -400,6 +426,20 @@ pub fn watch(
             // Not on a poll already waking it, so its commands don't hold those lines back.
             if lines.is_empty() && clock.elapsed() >= unled.next {
                 events = unled.run(ledger, warn)?;
+                let paths = unled.paths;
+                let after =
+                    |herd: &str| herd::stalled_after(paths, herd).unwrap_or(stall::DEFAULT_AFTER);
+                let stalled = Stalls {
+                    dir,
+                    busy_at: &busy_at,
+                    now: clock.now(),
+                }
+                .events(&mut unled.fired, ledger, &members, &after)?;
+                events.extend(
+                    stalled
+                        .into_iter()
+                        .filter(|e| !unled.fired.keys.contains(&e.key)),
+                );
                 unled.next = clock.elapsed() + CHECK_EVERY;
                 lines.extend(events.iter().map(|e| e.line.clone()));
             }
@@ -603,6 +643,65 @@ impl Flight<'_> {
             }
         }
         pending
+    }
+}
+
+/// What a watch needs to tell which of its members stalled.
+struct Stalls<'a> {
+    dir: &'a Path,
+    busy_at: &'a HashMap<String, SystemTime>,
+    now: SystemTime,
+}
+
+impl Stalls<'_> {
+    /// A `stalled` event for each unattended herd member parked for at least
+    /// its herd's `after`, keyed by its paused stop. Any other member's streak
+    /// ends, so it is said again once it next stalls.
+    fn events(
+        &self,
+        fired: &mut Fired,
+        ledger: &dyn Ledger,
+        members: &[Member],
+        after: &dyn Fn(&str) -> Duration,
+    ) -> Result<Vec<Event>> {
+        let entries = ledger.entries()?;
+        let mut events = vec![];
+        // Unknown is herdr unreadable, which neither starts nor ends a streak.
+        let read = |m: &&Member| !m.gone && !m.attended && m.status != AgentStatus::Unknown;
+        for member in members.iter().filter(read) {
+            let Some(herd) = entries.get(&member.name).and_then(|e| e.herd.as_deref()) else {
+                continue;
+            };
+            let name = &member.name;
+            if member.lead && lead_watch_running(self.dir, name).unwrap_or(false) {
+                fired.end_stall(name)?;
+                continue;
+            }
+            let busy_at = self.busy_at.get(name).copied();
+            let Ok(parked) = stall::parked(self.dir, name, member.status, busy_at, self.now) else {
+                continue;
+            };
+            let prefix = stall_prefix(name);
+            let event = parked.filter(|p| p.idle >= after(herd)).map(|p| Event {
+                key: format!("{prefix}{}", p.stop_at),
+                line: format!(
+                    "{name} {}  paused {}m: {}",
+                    line::STALLED,
+                    p.minutes(),
+                    p.pending
+                ),
+                covers: None,
+            });
+            let ended: Vec<String> = (fired.keys.iter())
+                .filter(|k| k.starts_with(&prefix) && event.as_ref().is_none_or(|e| e.key != **k))
+                .cloned()
+                .collect();
+            for key in ended {
+                fired.end(&key)?;
+            }
+            events.extend(event);
+        }
+        Ok(events)
     }
 }
 
@@ -1260,6 +1359,16 @@ impl Fired {
         }))
     }
 
+    /// Ends `name`'s `stalled` streak, if one is open.
+    fn end_stall(&mut self, name: &str) -> Result<()> {
+        let prefix = stall_prefix(name);
+        let open: Vec<String> = (self.keys.iter())
+            .filter(|k| k.starts_with(&prefix))
+            .cloned()
+            .collect();
+        open.iter().try_for_each(|key| self.end(key))
+    }
+
     fn end(&mut self, key: &str) -> Result<()> {
         if self.keys.remove(key) {
             append(&self.path, &format!("{key}{ENDED}\n"))?;
@@ -1316,6 +1425,10 @@ const RESUMED: &str = "resumed";
 
 /// Ends the `running low` or `out of work` key it follows in a fired file.
 const ENDED: &str = " ended";
+
+fn stall_prefix(name: &str) -> String {
+    format!("{name} {} since ", line::STALLED)
+}
 
 fn fired_path(dir: &Path, lead: &str) -> PathBuf {
     dir.join(format!("watch-{lead}.fired"))
@@ -6653,6 +6766,210 @@ mod tests {
         assert_eq!(
             herdr.label("w9:p1").as_deref(),
             Some("lead-cards asks: which DB?")
+        );
+    }
+
+    /// A worker of cards, idle in herdr since its paused stop at 09:00, which
+    /// a first lead's watch has already printed.
+    fn parked() -> Checked {
+        let world = Checked::new();
+        world.herdr.set_status("lh-1", AgentStatus::Idle);
+        put(&world.reports(), "lh-1", Body::Start { resumed: false });
+        put(&world.reports(), "lh-1", stop(1, 0));
+        assert_eq!(
+            world.lead_once_at("2026-11-01T09:00:00Z").unwrap(),
+            ["lh-1 paused  1 shell"]
+        );
+        world
+    }
+
+    impl Checked {
+        /// One poll of a fresh lead's watch at wall-clock `at`.
+        fn lead_once_at(&self, at: &str) -> Option<Vec<String>> {
+            run(
+                &self.herdr,
+                &self.ledger,
+                &self.reports(),
+                &self.request("w9:p0"),
+                &mut steps_from(at, |_| {}),
+            )
+        }
+    }
+
+    #[test]
+    fn a_leads_watch_says_a_worker_parked_past_the_default_30m_stalled_once() {
+        let world = parked();
+
+        assert_eq!(world.lead_once_at("2026-11-01T09:29:00Z"), None);
+        assert_eq!(
+            world.lead_once_at("2026-11-01T09:31:00Z").unwrap(),
+            ["lh-1 stalled  paused 31m: 1 shell"]
+        );
+        assert_eq!(world.lead_once_at("2026-11-01T10:15:00Z"), None);
+    }
+
+    fn put_at(dir: &Path, name: &str, at: &str, body: Body) {
+        let at = humantime::parse_rfc3339(at).unwrap();
+        append(dir, name, &Entry::new(at, body)).unwrap();
+    }
+
+    #[test]
+    fn a_new_stop_ends_a_stall_and_a_later_stall_is_said_again() {
+        let world = parked();
+        assert!(world.lead_once_at("2026-11-01T09:31:00Z").is_some());
+
+        put_at(&world.reports(), "lh-1", "2026-11-01T09:40:00Z", stop(2, 0));
+        assert_eq!(world.lead_once_at("2026-11-01T10:05:00Z"), None);
+        assert_eq!(
+            world.lead_once_at("2026-11-01T10:11:00Z").unwrap(),
+            ["lh-1 stalled  paused 31m: 2 shells"]
+        );
+    }
+
+    #[test]
+    fn a_report_after_the_paused_stop_means_no_stall() {
+        let world = parked();
+        put_at(&world.reports(), "lh-1", "2026-11-01T09:10:00Z", stop(0, 0));
+
+        assert_eq!(
+            world.lead_once_at("2026-11-01T10:00:00Z").unwrap(),
+            ["lh-1 finished  no report"]
+        );
+        assert_eq!(world.lead_once_at("2026-11-01T11:00:00Z"), None);
+    }
+
+    #[test]
+    fn herdr_showing_the_worker_busy_restarts_its_stall() {
+        let world = parked();
+        let req = Request {
+            timeout: None,
+            poll: Duration::from_secs(60),
+            ..world.request("w9:p0")
+        };
+        // Polls a minute apart from 09:20; busy for the second alone, at 09:21.
+        let mut clock = steps_from("2026-11-01T09:20:00Z", |poll| match poll {
+            1 => world.herdr.set_status("lh-1", AgentStatus::Working),
+            2 => world.herdr.set_status("lh-1", AgentStatus::Idle),
+            _ => {}
+        });
+        let reports = world.reports();
+
+        let woke = run(&world.herdr, &world.ledger, &reports, &req, &mut clock).unwrap();
+
+        assert_eq!(woke, ["lh-1 stalled  paused 30m: 1 shell"]);
+        let busy = humantime::parse_rfc3339("2026-11-01T09:21:00Z").unwrap();
+        assert_eq!(clock.now(), busy + Duration::from_secs(30 * 60));
+    }
+
+    #[test]
+    fn a_herd_files_stalled_after_sets_the_threshold() {
+        let world = parked();
+        world.edit_herd(|h| format!("stalled_after = 5\n{h}"));
+
+        assert_eq!(world.lead_once_at("2026-11-01T09:04:00Z"), None);
+        assert_eq!(
+            world.lead_once_at("2026-11-01T09:05:00Z").unwrap(),
+            ["lh-1 stalled  paused 5m: 1 shell"]
+        );
+    }
+
+    #[test]
+    fn the_shepherds_watch_says_a_lead_stalled_and_leaves_its_workers_to_it() {
+        let world = parked();
+        world.herdr.set_status("lead-cards", AgentStatus::Idle);
+        let reports = world.reports();
+        put(&reports, "lead-cards", Body::Start { resumed: false });
+        put(&reports, "lead-cards", stop(0, 1));
+        let shepherd = |at: &str| {
+            run(
+                &world.herdr,
+                &world.ledger,
+                &reports,
+                &world.request("w9:p9"),
+                &mut steps_from(at, |_| {}),
+            )
+        };
+        assert_eq!(
+            shepherd("2026-11-01T09:00:00Z").unwrap(),
+            ["lead-cards paused  1 cron"]
+        );
+
+        assert_eq!(
+            shepherd("2026-11-01T09:45:00Z").unwrap(),
+            ["lead-cards stalled  paused 45m: 1 cron"]
+        );
+        assert_eq!(shepherd("2026-11-01T09:50:00Z"), None);
+    }
+
+    #[test]
+    fn a_lead_parked_on_its_own_running_watch_is_not_stalled() {
+        let world = parked();
+        world.herdr.set_status("lead-cards", AgentStatus::Idle);
+        let reports = world.reports();
+        put(&reports, "lead-cards", Body::Start { resumed: false });
+        put(&reports, "lead-cards", stop(1, 0));
+        let file = File::create(lead_lock_path(&reports, "lead-cards")).unwrap();
+        let _watching = Lock::try_take(file).unwrap().unwrap();
+        let shepherd = |at: &str| {
+            run(
+                &world.herdr,
+                &world.ledger,
+                &reports,
+                &world.request("w9:p9"),
+                &mut steps_from(at, |_| {}),
+            )
+        };
+        assert_eq!(
+            shepherd("2026-11-01T09:00:00Z").unwrap(),
+            ["lead-cards paused  1 shell"]
+        );
+
+        assert_eq!(shepherd("2026-11-01T09:45:00Z"), None);
+    }
+
+    #[test]
+    fn herdr_unreadable_for_a_round_keeps_the_streak() {
+        let world = parked();
+        assert!(world.lead_once_at("2026-11-01T09:31:00Z").is_some());
+
+        world.herdr.set_status("lh-1", AgentStatus::Unknown);
+        assert_eq!(world.lead_once_at("2026-11-01T09:32:00Z"), None);
+        world.herdr.set_status("lh-1", AgentStatus::Idle);
+        assert_eq!(world.lead_once_at("2026-11-01T09:33:00Z"), None);
+    }
+
+    #[test]
+    fn a_busy_spell_between_rounds_ends_the_streak() {
+        let world = parked();
+        assert!(world.lead_once_at("2026-11-01T09:31:00Z").is_some());
+        let req = Request {
+            timeout: None,
+            ..world.request("w9:p0")
+        };
+        // Polls 2s apart from 09:40 and checks every 60s: busy on the second poll alone.
+        let mut clock = steps_from("2026-11-01T09:40:00Z", |poll| match poll {
+            1 => world.herdr.set_status("lh-1", AgentStatus::Working),
+            2 => world.herdr.set_status("lh-1", AgentStatus::Idle),
+            _ => {}
+        });
+        let reports = world.reports();
+        let woke = watch(
+            &world.herdr,
+            &world.ledger,
+            &reports,
+            &Request {
+                timeout: Some(Duration::from_secs(10)),
+                ..req
+            },
+            &mut clock,
+            &mut |_| {},
+        )
+        .unwrap();
+        assert!(woke.is_none());
+
+        assert_eq!(
+            world.lead_once_at("2026-11-01T10:15:00Z").unwrap(),
+            ["lh-1 stalled  paused 75m: 1 shell"]
         );
     }
 }

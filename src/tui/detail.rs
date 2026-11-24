@@ -241,6 +241,7 @@ mod tests {
             released: false,
             retired: None,
             subagents: vec![],
+            stalled: None,
         };
 
         let lines = member(&worker, &Mail::default(), "", Theme::from_env(None, true));

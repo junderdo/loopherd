@@ -37,6 +37,8 @@ struct HerdFile {
     /// Commands `feed` runs in `repo` once per member, after it merges.
     #[serde(default)]
     after_merge: Vec<String>,
+    /// Minutes a member may sit idle on a paused stop before a watch says it stalled.
+    stalled_after: Option<i64>,
 }
 
 /// A herd's lead member (D17).
@@ -1412,8 +1414,9 @@ fn describe(
 ) -> Vec<String> {
     let workspace = parsed.workspace.as_deref().unwrap_or("(current)");
     let header = format!(
-        "{herd}  repo {}  workspace {workspace}  {paused}",
-        parsed.repo
+        "{herd}  repo {}  workspace {workspace}  {paused}  stalled after {}m",
+        parsed.repo,
+        parsed.stalled_after().as_secs() / 60,
     );
     let usages = parsed.template.iter().map(|(template, t)| {
         let params: String = t.params.iter().map(|p| format!(" <{p}>")).collect();
@@ -1613,11 +1616,30 @@ fn parse(text: &str) -> Result<HerdFile> {
     if let Some(queue) = &parsed.queue {
         validate_queue(queue, &parsed.template).context("queue")?;
     }
+    if let Some(minutes) = parsed.stalled_after
+        && minutes < 1
+    {
+        bail!("stalled_after must be at least 1 minute, got {minutes}");
+    }
     if let Some(lead) = &parsed.lead {
         one_prompt(&lead.prompt, &lead.prompt_file).context("lead")?;
         crate::context::check_limit("context_limit", lead.context_limit).context("lead")?;
     }
     Ok(parsed)
+}
+
+impl HerdFile {
+    fn stalled_after(&self) -> Duration {
+        self.stalled_after
+            .map_or(crate::stall::DEFAULT_AFTER, |minutes| {
+                Duration::from_secs((minutes as u64).saturating_mul(60))
+            })
+    }
+}
+
+/// How long `herd`'s members may sit parked before a watch says they stalled.
+pub fn stalled_after(paths: &Paths, herd: &str) -> Result<Duration> {
+    Ok(load(&paths.herds, herd)?.stalled_after())
 }
 
 impl QueueFile {
@@ -2928,9 +2950,9 @@ args = ["--model", "opus"]
 
         assert_eq!(
             report,
-            "prs  repo /src/repo  workspace (current)  paused no\n\
+            "prs  repo /src/repo  workspace (current)  paused no  stalled after 30m\n\
              \x20 loopherd add prs pr <number>\n\
-             zissues  repo ~/src/z  workspace my-app  paused no\n\
+             zissues  repo ~/src/z  workspace my-app  paused no  stalled after 30m\n\
              \x20 loopherd add zissues chat\n\
              \x20 loopherd add zissues issue <key> <slug>"
         );
@@ -3014,12 +3036,34 @@ args = ["--model", "opus"]
         let lines: Vec<&str> = report.lines().collect();
         assert_eq!(
             lines[0],
-            "prs  repo /r  workspace (current)  paused (time unknown)"
+            "prs  repo /r  workspace (current)  paused (time unknown)  stalled after 30m"
         );
         let warning = "  warning: prs's pause is unreadable, counted as paused: parse ";
         assert!(lines[1].starts_with(warning), "{report}");
         assert_eq!(lines.len(), 2, "{report}");
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_shows_a_herds_stalled_after_and_rejects_one_below_a_minute() {
+        let config = Config::with(&[
+            ("a", "repo = \"/r\"\nstalled_after = 45\n"),
+            ("b", "repo = \"/r\"\nstalled_after = 0\n"),
+            ("c", "repo = \"/r\"\nstalled_after = -5\n"),
+        ]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        let report = report.replace(&config.path().display().to_string(), "CONFIG");
+        assert_eq!(
+            report.lines().collect::<Vec<_>>(),
+            [
+                "a  repo /r  workspace (current)  paused no  stalled after 45m",
+                "invalid b.toml: stalled_after must be at least 1 minute, got 0",
+                "invalid c.toml: stalled_after must be at least 1 minute, got -5",
+            ]
+        );
+        assert_eq!(code, 1);
     }
 
     #[test]
@@ -3029,7 +3073,7 @@ args = ["--model", "opus"]
         let headers: Vec<&str> = report.lines().filter(|l| !l.starts_with(' ')).collect();
         assert_eq!(
             headers[0],
-            "prs  repo /src/repo  workspace (current)  paused no"
+            "prs  repo /src/repo  workspace (current)  paused no  stalled after 30m"
         );
         assert!(headers[1].starts_with("prs-old  "), "{report}");
     }
@@ -3053,7 +3097,7 @@ args = ["--model", "opus"]
         assert_eq!(
             lines[lines.len() - 3..],
             [
-                "prs  repo /src/repo  workspace (current)  paused no",
+                "prs  repo /src/repo  workspace (current)  paused no  stalled after 30m",
                 "  loopherd add prs pr <number>",
                 "invalid z-bad.toml: template t: set one of prompt and prompt_file",
             ]
@@ -3153,7 +3197,7 @@ args = ["--model", "opus"]
         let (report, code) = herds_line(template, &[("t.md", prompt)]);
         assert_eq!(
             report,
-            "h  repo /r  workspace (current)  paused no\n  loopherd add h t <n>"
+            "h  repo /r  workspace (current)  paused no  stalled after 30m\n  loopherd add h t <n>"
         );
         assert_eq!(code, 0);
     }
@@ -3165,7 +3209,7 @@ args = ["--model", "opus"]
         let (report, code) = herds_line(template, &[]);
         assert_eq!(
             report,
-            "h  repo /r  workspace (current)  paused no\n  loopherd add h t <n>"
+            "h  repo /r  workspace (current)  paused no  stalled after 30m\n  loopherd add h t <n>"
         );
         assert_eq!(code, 0);
     }
@@ -3455,7 +3499,7 @@ args = ["--model", "opus"]
         );
         assert_eq!(
             report,
-            "h  repo /r  workspace (current)  paused no\n\
+            "h  repo /r  workspace (current)  paused no  stalled after 30m\n\
              \x20 loopherd add h t <n>\n\
              \x20 loopherd feed h  (template t, max 3)"
         );
@@ -3471,7 +3515,7 @@ args = ["--model", "opus"]
         );
         assert_eq!(
             report,
-            "h  repo /r  workspace (current)  paused no\n\
+            "h  repo /r  workspace (current)  paused no  stalled after 30m\n\
              \x20 loopherd add h t <n>\n\
              \x20 loopherd feed h  (template t, max 3)\n\
              \x20 backlog: cat unready"
@@ -3498,7 +3542,7 @@ args = ["--model", "opus"]
         );
         assert_eq!(
             report,
-            "h  repo /r  workspace (current)  paused no\n\
+            "h  repo /r  workspace (current)  paused no  stalled after 30m\n\
              \x20 loopherd add h t <n>\n\
              \x20 loopherd add h u\n\
              \x20 loopherd feed h  (templates u, t, max 3)"
@@ -4152,7 +4196,7 @@ args = ["--model", "opus"]
 
         assert_eq!(
             report,
-            "a  repo /r  workspace (current)  paused no\n\
+            "a  repo /r  workspace (current)  paused no  stalled after 30m\n\
              \x20 loopherd add a t\n\
              \x20 loopherd lead a\n\
              \x20 switches: merge off (built-in), install off (built-in), rebase off (built-in), \

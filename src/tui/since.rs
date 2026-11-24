@@ -93,6 +93,7 @@ mod tests {
             released: false,
             retired: None,
             subagents: vec![],
+            stalled: None,
         }
     }
 

@@ -45,7 +45,7 @@ fn herds_lists_herd_files_flags_invalid_ones_and_never_calls_herdr() {
     let ok = run_herds(config.path(), bin.path());
     assert_eq!(
         String::from_utf8_lossy(&ok.stdout),
-        "prs  repo /r  workspace (current)  paused no\n  loopherd add prs pr <number>\n"
+        "prs  repo /r  workspace (current)  paused no  stalled after 30m\n  loopherd add prs pr <number>\n"
     );
     assert_eq!(ok.status.code(), Some(0));
 
@@ -109,8 +109,8 @@ fn herds_shows_when_a_herd_was_paused() {
 
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "docs  repo /r  workspace (current)  paused no\n\
-         prs  repo /r  workspace (current)  paused since 2026-11-05T09:00:00Z\n"
+        "docs  repo /r  workspace (current)  paused no  stalled after 30m\n\
+         prs  repo /r  workspace (current)  paused since 2026-11-05T09:00:00Z  stalled after 30m\n"
     );
     assert_eq!(out.status.code(), Some(0));
 }
@@ -154,7 +154,7 @@ fn herds_warns_of_a_missing_prompt_hook_in_the_settings_it_is_given_until_instal
     let out = run_herds(config.path(), bin.path());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "prs  repo /r  workspace (current)  paused no\n"
+        "prs  repo /r  workspace (current)  paused no  stalled after 30m\n"
     );
     assert_eq!(out.status.code(), Some(0));
 }

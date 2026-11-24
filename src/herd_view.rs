@@ -53,6 +53,10 @@ pub struct Member {
     pub retired: Option<String>,
     /// Filled by the caller, since reading them is I/O.
     pub subagents: Vec<RunningSubagent>,
+    /// Minutes parked on a paused stop, once past its herd's `stalled_after`;
+    /// filled by the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stalled: Option<u64>,
 }
 
 /// A subagent a member's Claude started and hasn't finished.
@@ -297,6 +301,7 @@ pub(crate) fn member(
                 .unwrap_or_else(|| "unknown".into())
         }),
         subagents: vec![],
+        stalled: None,
     }
 }
 
