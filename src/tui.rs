@@ -979,7 +979,14 @@ impl App {
                     target: None,
                 }));
             }
-            let widest = rows.iter().map(|r| r.line.width()).max().unwrap_or(0);
+            // Subagent rows are free text, so only the heading and members set it.
+            let widest = rows
+                .iter()
+                .filter(|r| r.target.is_some())
+                .chain(rows.first())
+                .map(|r| r.line.width())
+                .max()
+                .unwrap_or(0);
             panels.push(Panel {
                 title: match view.herds.get(i) {
                     Some(herd) => self.outlines.title(herd, self.theme),
@@ -3276,6 +3283,29 @@ max = 3
     }
 
     #[test]
+    fn a_long_subagent_row_does_not_push_the_detail_under_the_table() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mail = quiet_mail(&ledger);
+        let subagent = report::Subagent {
+            id: "a1".into(),
+            agent_type: "general-purpose".into(),
+            description: Some("Investigate the flaky live test in the herdr socket".into()),
+            session: Some("sess-a".into()),
+            meta: None,
+        };
+        post_at(
+            mail.path(),
+            "a",
+            "2026-11-16T10:00:00Z",
+            Body::SubagentStart(subagent),
+        );
+        let app = app_with_mail(&herdr, &ledger, mail.path(), now);
+
+        let terminal = render_at(&app, now, 120, 20);
+        assert_eq!(pos(&terminal, "╭ b ").0, 66, "{:#?}", lines(&terminal));
+    }
+
+    #[test]
     fn too_narrow_for_the_tables_beside_it_the_detail_sits_under_the_selected_herd_at_full_width() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let app = app(&herdr, &ledger, now);
@@ -3324,7 +3354,7 @@ max = 3
             .position(|l| l.starts_with("│╭ c "))
             .unwrap_or_else(|| panic!("{roomy:#?}"));
         assert!(
-            roomy[detail..].iter().any(|l| l.starts_with("│╰─")),
+            roomy[detail + 5].starts_with("│╰─"),
             "the detail shows whole: {roomy:#?}"
         );
         assert!(roomy.iter().any(|l| l.contains(" ○ c ")), "{roomy:#?}");
