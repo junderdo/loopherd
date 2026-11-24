@@ -798,6 +798,7 @@ fn main() -> ExitCode {
             .exit();
     };
     if let Some((name, why)) = refused_to_leads(&command)
+        && !(matches!(command, Command::Update { .. }) && own_lead_installs())
         && let Err(e) = refuse_from_lead(why, by_pane(&command), ledger_free(&command))
     {
         eprintln!("loopherd {name}: {e:#}");
@@ -974,6 +975,11 @@ fn refused_to_leads(command: &Command) -> Option<(&'static str, &'static str)> {
         Command::RestartWait { .. } => {
             ("restart-wait", "a lead's broker starts its restart waiter")
         }
+        // --check changes nothing, as doctor doesn't.
+        Command::Update { check: false, .. } => (
+            "update",
+            "updating loopherd is the human's unless the lead's herd sets [lead] install = true",
+        ),
         _ => return None,
     })
 }
@@ -1001,6 +1007,23 @@ fn refuse_from_lead(why: &str, by_pane: bool, ledger_free: bool) -> Result<()> {
     broker::refuse_from_lead(lead.as_ref(), &ledger, &process::ProcFs, why, ledger_free)
 }
 
+/// Whether the lead in this pane may install, by its herd's `[lead] install`.
+fn own_lead_installs() -> bool {
+    let Some(lead) = own_lead() else {
+        return false;
+    };
+    let installs = || -> Result<bool> {
+        let ledger = FileLedger::new(FileLedger::default_path()?);
+        let herd = ledger
+            .entries()?
+            .remove(lead.lead())
+            .and_then(|record| record.herd)
+            .context("the lead's herd")?;
+        Ok(herd::lead_switches(&Paths::from_env()?, &herd)?.install)
+    };
+    installs().unwrap_or(false)
+}
+
 /// Refused commands that change only config or herd files, never the ledger.
 fn ledger_free(command: &Command) -> bool {
     matches!(
@@ -1012,6 +1035,7 @@ fn ledger_free(command: &Command) -> bool {
             | Command::Config { .. }
             | Command::Setup(_)
             | Command::MergeGuard { .. }
+            | Command::Update { .. }
     )
 }
 

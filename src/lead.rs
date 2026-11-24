@@ -1592,6 +1592,7 @@ mod tests {
                 "scripts/install *",
                 "./scripts/install",
                 "./scripts/install *",
+                "loopherd update",
             ])
         );
         assert_eq!(

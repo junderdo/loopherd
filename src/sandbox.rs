@@ -1935,6 +1935,7 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
             "scripts/install *",
             "./scripts/install",
             "./scripts/install *",
+            "loopherd update",
         ]);
     }
     sandbox["excludedCommands"] = json!(excluded);
