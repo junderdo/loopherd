@@ -673,7 +673,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `[lead].args`, else the herd's `args`, then the command line, may be
   only `--model`, `--effort`, `--verbose` and `--permission-mode` with
   `default`, `manual`, `auto` or `plan` (each also as `--flag=value`);
-  any other is treated as a loosening is, and `lead --dry-run` checks
+  any other is treated as a loosening is (`--settings`, `--mcp-config` and
+  `--strict-mcp-config`, loopherd's own launch flags, are refused under
+  both `require` and `prefer`), and `lead --dry-run` checks
   them too. To keep an arg the workers need from the lead, give it its
   own `[lead].args` rather than editing the herd's `args`. A lead has no MCP tools
   unless its herd's `[lead] mcp_servers` names servers from the human's

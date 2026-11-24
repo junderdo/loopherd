@@ -288,7 +288,9 @@ as its main checkout. Then, in order:
    A lead's Claude args (`[lead].args`, else the herd's `args`, then the
    command line) may be only `--model`, `--effort`, `--verbose` and
    `--permission-mode` with `default`, `manual`, `auto` or `plan`; any
-   other is refused or warned of the same way. Under `require`, a lead
+   other is refused or warned of the same way, but loopherd's own launch
+   flags, `--settings`, `--mcp-config` and `--strict-mcp-config`, are
+   refused under both `require` and `prefer`. Under `require`, a lead
    started with an arg now off that list can't be restarted or revived
    until you retire it and run `loopherd lead` again.
    A lead starts with no MCP servers; list the ones it may use, by the

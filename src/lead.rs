@@ -1449,6 +1449,66 @@ mod tests {
     }
 
     #[test]
+    fn refused_args_from_the_herds_args_and_the_command_line_each_get_their_own_fix() {
+        let setup = Setup::with_lead(PROMPT);
+        let file = setup.root.join("config/herds/h.toml");
+        let text = fs::read_to_string(&file).unwrap().replacen(
+            "args = [\"--model\", \"opus\"]",
+            "args = [\"--add-dir\", \"/srv\"]",
+            1,
+        );
+        fs::write(&file, text).unwrap();
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&["--frobnicate"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h can't run sandboxed: its args may loosen its sandbox or \
+             permissions: --add-dir /srv, from herd h's args; --frobnicate, from the command \
+             line; a lead takes only --model, --effort, --verbose and --permission-mode \
+             default, manual, auto or plan, so give herd h a [lead].args without those from \
+             its args, since its workers take the herd's args too, and drop those from the \
+             command line, or set [lead] sandbox = \"prefer\" in herd h to start it with them \
+             as warnings"
+        );
+    }
+
+    #[test]
+    fn a_launch_flag_in_the_herds_args_and_the_command_line_is_dropped_from_both() {
+        let setup = Setup::with_lead(PROMPT);
+        let file = setup.root.join("config/herds/h.toml");
+        let text = fs::read_to_string(&file).unwrap().replacen(
+            "args = [\"--model\", \"opus\"]",
+            "args = [\"--mcp-config\", \"workers-mcp.json\"]",
+            1,
+        );
+        fs::write(&file, text).unwrap();
+
+        let err = dry_run(
+            &herdr(),
+            &MemLedger::default(),
+            &setup.paths(),
+            &request(&["--mcp-config", "mine.json"]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "sandbox: lead-h's args pass --mcp-config, which its launch takes; give herd h a \
+             [lead].args without it, since its workers take the herd's args too, and drop it \
+             from the command line, and name the servers it may use in [lead] mcp_servers"
+        );
+    }
+
+    #[test]
     fn dry_run_refuses_a_disallowed_arg_under_require_and_warns_under_prefer() {
         let setup = Setup::with_lead(PROMPT);
         let err = dry_run(
