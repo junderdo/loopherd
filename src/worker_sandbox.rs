@@ -786,8 +786,15 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
         },
     });
     if herd::merge_guard(paths, herd)? == Some(MergeGuard::Credentials) {
-        confine_credentials(paths, name, herd, &mut settings, [])
-            .map_err(|e| NotStarted(format!("{e:#}")))?;
+        confine_credentials(
+            paths,
+            name,
+            herd,
+            &mut settings,
+            [],
+            &crate::sandbox::THIS_MACHINE,
+        )
+        .map_err(|e| NotStarted(format!("{e:#}")))?;
     }
     Ok(settings)
 }
@@ -1578,6 +1585,11 @@ mod tests {
                 "GITHUB_TOKEN": "",
                 "GH_ENTERPRISE_TOKEN": "",
                 "GITHUB_ENTERPRISE_TOKEN": "",
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "",
+                "GITHUB_PAT": "",
+                "GH_PAT": "",
+                "GITHUB_API_TOKEN": "",
+                "HOMEBREW_GITHUB_API_TOKEN": "",
                 "GIT_CONFIG_COUNT": "5",
                 "GIT_CONFIG_KEY_0": "credential.helper",
                 "GIT_CONFIG_VALUE_0": "",
@@ -1614,9 +1626,14 @@ mod tests {
             "/home/me/.git-credentials",
             "/home/me/.config/git/credentials",
             "/home/me/.cache/git/credential",
+            "/home/me/.claude.json",
+            "/home/me/.docker/config.json",
+            "/home/me/.npmrc",
+            "/home/me/.config/github-copilot",
+            "/home/me/.claude/backups",
             &config,
         ];
-        assert_eq!(deny_read[..7], hidden);
+        assert_eq!(deny_read[..12], hidden);
         let locks = h.paths.locks_dir().display().to_string();
         assert_eq!(deny_read.last(), Some(&locks));
         let deny = strings(&settings["permissions"]["deny"]);
@@ -1625,6 +1642,8 @@ mod tests {
             "Read(//home/me/.netrc)",
             "Read(//home/me/.config/gh/**)",
             "Read(//home/me/.git-credentials)",
+            "Read(//home/me/.claude.json)",
+            "Read(//home/me/.claude/backups/**)",
             &format!("Read(/{config}/**)"),
         ] {
             assert!(deny.contains(&rule.to_string()), "{rule}: {deny:?}");

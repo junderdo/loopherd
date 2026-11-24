@@ -493,6 +493,17 @@ fn mcp_server_checks(
         return vec![];
     }
     let file = crate::sandbox::user_mcp_file(paths);
+    // A credentials member's sandbox mounts /dev/null over the file, hiding the tokens it holds.
+    use std::os::unix::fs::FileTypeExt;
+    if std::fs::metadata(&file).is_ok_and(|meta| meta.file_type().is_char_device()) {
+        return vec![ok(
+            check,
+            format!(
+                "{} is hidden from this sandbox, so run loopherd doctor from your own shell to check",
+                file.display()
+            ),
+        )];
+    }
     let configured = match crate::sandbox::user_mcp_servers(paths) {
         Ok(configured) => configured,
         Err(e) => {
@@ -3537,6 +3548,22 @@ mod tests {
             )),
             "{problems:?}"
         );
+    }
+
+    #[test]
+    fn a_user_scope_hidden_by_a_credentials_sandbox_isnt_a_failure() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\n[lead]\nprompt = \"go\"\nmerge = true\nmcp_servers = [\"trello\"]\n",
+                repo.to_str().unwrap()
+            ),
+        );
+        std::os::unix::fs::symlink("/dev/null", m.paths().home.join(".claude.json")).unwrap();
+
+        assert_eq!(problems(&m, &herdr()), Vec::<String>::new());
     }
 
     #[test]
