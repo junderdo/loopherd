@@ -2781,6 +2781,7 @@ mod tests {
         let now = std::time::SystemTime::now();
         crate::retire::retire_and_close(
             &herdr,
+            &crate::process::FakeProcs::default(),
             &mut ledger,
             &crate::sandbox::Guard::new(setup.paths(), None),
             "lead-h",
@@ -2824,6 +2825,7 @@ mod tests {
         let mut out = vec![];
         crate::retire::retire_and_close(
             &elsewhere,
+            &crate::process::FakeProcs::default(),
             &mut ledger,
             &crate::sandbox::Guard::new(setup.paths(), None),
             "lead-h",
@@ -2865,6 +2867,7 @@ mod tests {
         let mut out = vec![];
         crate::retire::retire_and_close(
             &herdr,
+            &crate::process::FakeProcs::default(),
             &mut ledger,
             &crate::sandbox::Guard::new(setup.paths(), None),
             "lead-h",
