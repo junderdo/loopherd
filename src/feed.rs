@@ -3468,16 +3468,14 @@ mod tests {
             let feeding = scope.spawn(|| run_pending(&setup, feed));
             wait_for("ran", || ran() > 0);
             let file = fs::File::create(&lock).unwrap();
-            let deadline = std::time::Instant::now() + Duration::from_secs(10);
             // Spins rather than waits: a feed retaking the lock between members wins any waiter.
+            // Checked before the take, so a finished feed has already dropped its lock.
             let free_after = loop {
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "the lock never came free"
-                );
+                let finished = feeding.is_finished();
                 if let Some(_held) = Lock::try_take(file.try_clone().unwrap()).unwrap() {
                     break ran();
                 }
+                assert!(!finished, "the lock never came free");
             };
             feeding.join().unwrap();
             free_after
