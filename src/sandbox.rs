@@ -1043,6 +1043,13 @@ fn start(
     if let Some(refusal) = loosened_refusal(paths, name, &lead.herd, &loosened)? {
         return Err(refusal);
     }
+    let exposure = temp_dir_exposure(&worktree, claude_temp_root().as_deref());
+    if let Some(why) = &exposure {
+        let why = format!("{why}; move herd {}'s repo out of it", lead.herd);
+        if let Some(refusal) = refusal_by_mode(paths, name, &lead.herd, &why)? {
+            return Err(refusal);
+        }
+    }
     keep_launch()?;
     let file = settings_file(paths, name);
     let text = serde_json::to_string_pretty(&own)? + "\n";
@@ -1057,6 +1064,13 @@ fn start(
     }
     if let Some((why, fix)) = &sockets_unblocked {
         warnings.push(format!("{}; {fix}", sockets_unblocked_warning(name, why)));
+    }
+    if let Some(why) = exposure {
+        warnings.push(format!(
+            "{name}'s sandbox can't keep it out of herd {}'s other worktrees: {why}; move the \
+             repo out of it",
+            lead.herd
+        ));
     }
     Ok(Launch::Sandboxed {
         settings: file,
@@ -1155,6 +1169,36 @@ pub fn loosened(paths: &Paths, name: &str, herd: &str) -> Result<Vec<String>> {
     let own = settings(paths, name, herd).unwrap_or_else(|_| json!({}));
     let worktree = worktree_path(&herd::repo(paths, herd)?, name);
     Ok(loosenings(&paths.home, &worktree, &own))
+}
+
+/// Why lead `name`'s sandbox can't keep it out of its herd's other worktrees
+/// on this machine, if it can't.
+pub fn exposed(paths: &Paths, name: &str, herd: &str) -> Result<Option<String>> {
+    let worktree = worktree_path(&herd::repo(paths, herd)?, name);
+    Ok(temp_dir_exposure(&worktree, claude_temp_root().as_deref()))
+}
+
+/// The per-uid temp dir Claude Code's sandbox opens to every command's writes;
+/// `None` under unit tests, whose own temp dirs may sit inside it.
+fn claude_temp_root() -> Option<PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    let base = std::env::var_os("CLAUDE_CODE_TMPDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir);
+    // SAFETY: getuid can't fail and touches no memory.
+    Some(base.join(format!("claude-{}", unsafe { libc::getuid() })))
+}
+
+fn temp_dir_exposure(worktree: &Path, root: Option<&Path>) -> Option<String> {
+    let root = root.filter(|root| worktree.starts_with(root))?;
+    Some(format!(
+        "its worktree {} is inside {}, which Claude Code's sandbox opens to writes, so the \
+         herd's other worktrees and main checkout there are writable",
+        worktree.display(),
+        root.display()
+    ))
 }
 
 /// What a loosened sandbox does to a lead's start.
@@ -2787,6 +2831,39 @@ mod tests {
         );
         assert!(claude_new_enough("").is_err());
     }
+    #[test]
+    fn a_worktree_inside_claudes_temp_dir_is_exposed_to_its_siblings() {
+        let root = Path::new("/tmp/claude-1000");
+
+        assert_eq!(
+            temp_dir_exposure(
+                Path::new("/tmp/claude-1000/s/wt-worktrees/lead-h"),
+                Some(root)
+            ),
+            Some(
+                "its worktree /tmp/claude-1000/s/wt-worktrees/lead-h is inside /tmp/claude-1000, \
+                 which Claude Code's sandbox opens to writes, so the herd's other worktrees and \
+                 main checkout there are writable"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            temp_dir_exposure(
+                Path::new("/tmp/claude-10000/wt-worktrees/lead-h"),
+                Some(root)
+            ),
+            None
+        );
+        assert_eq!(
+            temp_dir_exposure(Path::new("/home/me/p/worktrees/lead-h"), Some(root)),
+            None
+        );
+        assert_eq!(
+            temp_dir_exposure(Path::new("/tmp/claude-1000/w"), None),
+            None
+        );
+    }
+
     #[test]
     fn a_unix_socket_allow_list_loosens_the_sandbox_unless_it_is_empty() {
         let home = Path::new("/home/me");
