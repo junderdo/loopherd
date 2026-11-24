@@ -1,5 +1,6 @@
-//! `loopherd update`: brings a release install up to date by running the
-//! target release's own `install.sh`, as recorded in `install.toml` (D122).
+//! `loopherd update`: brings an install up to date by the path recorded in
+//! `install.toml` (D122): a release runs the target release's own
+//! `install.sh`; a source checkout fast-forwards and runs `scripts/install --update`.
 
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -31,8 +32,15 @@ pub struct Places {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 enum Record {
-    Release { tag: String },
-    Source,
+    Release {
+        tag: String,
+    },
+    Source {
+        checkout: PathBuf,
+        /// The commit `scripts/install` last installed, which a record
+        /// written before it was recorded lacks.
+        commit: Option<String>,
+    },
 }
 
 /// Why a missing `install.toml` stops `update`, and its fix, as doctor
@@ -78,7 +86,19 @@ fn run(
     on_path: &dyn Fn(&str) -> bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let current = recorded_tag(&places.config_dir)?;
+    match read_record(&places.config_dir)? {
+        Record::Release { tag } => update_release(places, tag, want, on_path, out),
+        Record::Source { checkout, commit } => update_source(places, &checkout, commit, want, out),
+    }
+}
+
+fn update_release(
+    places: &Places,
+    current: String,
+    want: Want,
+    on_path: &dyn Fn(&str) -> bool,
+    out: &mut dyn Write,
+) -> Result<i32> {
     let base = places.base.as_deref().unwrap_or(RELEASES);
     let fetch = Fetch::find(on_path)?;
     let target = match want {
@@ -106,6 +126,187 @@ fn run(
             latest
         }
     };
+    say_which_loopherd(places, out)?;
+    install(&fetch, base, &target)?;
+    // A release whose installer predates the record wouldn't write it.
+    record_release(&places.config_dir, &target)?;
+    after_install(places, out)?;
+    Ok(0)
+}
+
+fn update_source(
+    places: &Places,
+    checkout: &Path,
+    installed: Option<String>,
+    want: Want,
+    out: &mut dyn Write,
+) -> Result<i32> {
+    let refuse = |why: String| {
+        anyhow!(
+            "refused: {why}; update by hand with `git pull && scripts/install` in {}",
+            checkout.display()
+        )
+    };
+    if matches!(want, Want::Version(_)) {
+        return Err(refuse(
+            "--version picks a release, and this is a source install".to_string(),
+        ));
+    }
+    if !checkout.is_dir() {
+        return Err(refuse(format!(
+            "the recorded checkout {} doesn't exist",
+            checkout.display()
+        )));
+    }
+    if !checkout.join(".git").exists() {
+        return Err(refuse(format!(
+            "the recorded checkout {} isn't a git repository",
+            checkout.display()
+        )));
+    }
+    let git = Git(checkout);
+    let default = default_branch(&git).map_err(|e| refuse(format!("{e:#}")))?;
+    let local = format!("refs/heads/{default}");
+    let upstream = format!("refs/remotes/origin/{default}");
+    let blocker = {
+        let branch = git
+            .output(&["symbolic-ref", "-q", "HEAD"])
+            .unwrap_or_default();
+        if branch != local {
+            let what = branch
+                .strip_prefix("refs/heads/")
+                .unwrap_or("a detached HEAD");
+            Some(format!("{what} is checked out, not {default}"))
+        } else if !git
+            .output(&["status", "--porcelain", "--untracked-files=no"])?
+            .is_empty()
+        {
+            Some("the checkout has uncommitted changes".to_string())
+        } else {
+            None
+        }
+    };
+    let checking = matches!(want, Want::Check);
+    if let Some(why) = &blocker
+        && !checking
+    {
+        return Err(refuse(why.clone()));
+    }
+    git.output(&["fetch", "-q", "origin"])?;
+    let target = git.output(&["rev-parse", "--verify", &format!("{upstream}^{{commit}}")])?;
+    // A failed install leaves the record on the commit before the pull.
+    let installed = match installed {
+        Some(commit) if git.succeeds(&["cat-file", "-e", &format!("{commit}^{{commit}}")])? => {
+            commit
+        }
+        _ => git.output(&["rev-parse", "--verify", &format!("{local}^{{commit}}")])?,
+    };
+    let short = |sha: &str| git.output(&["rev-parse", "--short", sha]);
+    let behind: usize = git
+        .output(&["rev-list", "--count", &format!("{installed}..{target}")])?
+        .parse()
+        .context("count the commits behind")?;
+    if behind == 0 {
+        writeln!(out, "loopherd is up to date ({})", short(&installed)?)?;
+        return Ok(0);
+    }
+    let commits = match behind {
+        1 => "1 commit".to_string(),
+        n => format!("{n} commits"),
+    };
+    let (old, new) = (short(&installed)?, short(&target)?);
+    if checking {
+        let next = match &blocker {
+            Some(why) => format!("loopherd update would refuse: {why}"),
+            None => "run loopherd update".to_string(),
+        };
+        writeln!(out, "{old} → {new}: {commits} behind; {next}")?;
+        return Ok(1);
+    }
+    if !git.succeeds(&["merge-base", "--is-ancestor", &local, &target])? {
+        return Err(refuse(format!(
+            "{default} has commits origin/{default} doesn't, so the pull isn't a fast-forward"
+        )));
+    }
+    writeln!(out, "{old} → {new}, {commits}")?;
+    say_which_loopherd(places, out)?;
+    // Not a refusal: a pull can fail partway, after rewriting some files.
+    git.output(&["pull", "-q", "--ff-only", "origin", &default])
+        .map_err(|e| {
+            anyhow!(
+                "{e:#}; the checkout {} may be partly updated: check `git status` there, \
+                 and `git checkout -- .` restores it",
+                checkout.display()
+            )
+        })?;
+    let status = Command::new(checkout.join("scripts/install"))
+        .arg("--update")
+        .current_dir(checkout)
+        .status()
+        .context("run scripts/install --update")?;
+    if !status.success() {
+        bail!(
+            "scripts/install --update failed ({status}) in {}; fix it and run loopherd update again",
+            checkout.display()
+        );
+    }
+    after_install(places, out)?;
+    Ok(0)
+}
+
+/// origin's default branch: from `origin/HEAD`, else by asking origin.
+fn default_branch(git: &Git) -> Result<String> {
+    if let Ok(head) = git.output(&["symbolic-ref", "-q", "refs/remotes/origin/HEAD"])
+        && let Some(branch) = head.strip_prefix("refs/remotes/origin/")
+    {
+        return Ok(branch.to_string());
+    }
+    git.output(&["ls-remote", "--symref", "origin", "HEAD"])?
+        .lines()
+        .find_map(|line| {
+            line.strip_prefix("ref: refs/heads/")?
+                .strip_suffix("\tHEAD")
+        })
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("can't tell origin's default branch"))
+}
+
+/// Runs git in one checkout.
+struct Git<'a>(&'a Path);
+
+impl Git<'_> {
+    fn command(&self, args: &[&str]) -> Command {
+        let mut command = Command::new("git");
+        command.arg("-C").arg(self.0).args(args);
+        command
+    }
+
+    /// Trimmed stdout, or an error naming the command and git's stderr.
+    fn output(&self, args: &[&str]) -> Result<String> {
+        let output = self
+            .command(args)
+            .output()
+            .with_context(|| format!("run git {}", args.join(" ")))?;
+        if !output.status.success() {
+            bail!(
+                "git {} failed: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&output.stderr).trim()
+            );
+        }
+        Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    }
+
+    fn succeeds(&self, args: &[&str]) -> Result<bool> {
+        let status = self
+            .command(args)
+            .status()
+            .with_context(|| format!("run git {}", args.join(" ")))?;
+        Ok(status.success())
+    }
+}
+
+fn say_which_loopherd(places: &Places, out: &mut dyn Write) -> Result<()> {
     if !same_file(&places.running, &places.installed) {
         writeln!(
             out,
@@ -115,9 +316,10 @@ fn run(
         )?;
     }
     out.flush()?;
-    install(&fetch, base, &target)?;
-    // A release whose installer predates the record wouldn't write it.
-    record_release(&places.config_dir, &target)?;
+    Ok(())
+}
+
+fn after_install(places: &Places, out: &mut dyn Write) -> Result<()> {
     if herdr_plugin_older(&places.installed) {
         writeln!(
             out,
@@ -125,10 +327,10 @@ fn run(
         )?;
     }
     writeln!(out, "{RESTART_VIEW}")?;
-    Ok(0)
+    Ok(())
 }
 
-fn recorded_tag(config_dir: &Path) -> Result<String> {
+fn read_record(config_dir: &Path) -> Result<Record> {
     let path = record_path(config_dir);
     let text = match std::fs::read_to_string(&path) {
         Err(e) if e.kind() == ErrorKind::NotFound => {
@@ -137,14 +339,7 @@ fn recorded_tag(config_dir: &Path) -> Result<String> {
         }
         text => text.with_context(|| format!("read {}", path.display()))?,
     };
-    match toml::from_str(&text).with_context(|| format!("read {}", path.display()))? {
-        Record::Release { tag } => Ok(tag),
-        Record::Source => bail!(
-            "refused: {} records a source install, and source updates aren't built yet; \
-             run `git pull && scripts/install` in its checkout",
-            path.display()
-        ),
-    }
+    toml::from_str(&text).with_context(|| format!("read {}", path.display()))
 }
 
 fn record_release(config_dir: &Path, tag: &str) -> Result<()> {
