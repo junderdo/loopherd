@@ -727,6 +727,15 @@ fn removed(files: impl IntoIterator<Item = PathBuf>) -> Vec<String> {
         .collect()
 }
 
+/// The files [`prepare`] keeps for lead `name`.
+pub fn launch_files(paths: &Paths, name: &str) -> [PathBuf; 3] {
+    [
+        lead_file(paths, name),
+        mcp_file(paths, name),
+        settings_file(paths, name),
+    ]
+}
+
 /// How a lead's Claude is started.
 pub enum Launch {
     Sandboxed {
