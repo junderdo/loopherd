@@ -788,7 +788,11 @@ const TAIL_BYTES: usize = 4000;
 /// Runs `commands` in order in `repo`, stopping at the first failure,
 /// which it returns as the command and its exit, and the last lines of its
 /// output.
-fn run_commands(commands: &[String], repo: &Path, timeout: Duration) -> Option<(String, String)> {
+pub(crate) fn run_commands(
+    commands: &[String],
+    repo: &Path,
+    timeout: Duration,
+) -> Option<(String, String)> {
     // A file rather than a pipe, so a command killed at the timeout still leaves its output.
     let log = match tempfile::Builder::new()
         .prefix("loopherd-after-merge-")

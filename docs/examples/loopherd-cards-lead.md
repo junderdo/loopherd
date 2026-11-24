@@ -40,6 +40,13 @@ For an attended `grill-<n>`, whose pane that feed's reap closes before it can
 ping the shepherd, then run
 `loopherd report "grill-<n> merged: LH-<n> closed out"` (D145).
 
+Before merging a verified PR, or asking the human to, run `loopherd gate
+<full head sha>`: your broker runs the herd's full check gate on that head
+merged with main, outside your sandbox; run it as a background task, as it
+takes minutes. Merge, or ask, only on its `pass`
+line, and put that line in a merge question; on `failed`, send the failing
+command and its tail back to the member.
+
 When you need the human, run `loopherd report --kind question "<the exact
 question>"` and end your turn. With merge off, a merge question carries the PR
 link, any PR that must merge first, and the line

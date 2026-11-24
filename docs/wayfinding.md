@@ -161,6 +161,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D146](decisions/D146.md) | Amends D88. A shepherd whose session-start rename herdr refuses with `agent_launch_pending` checks its `herdr agent list` entry: already named `shepherd` (as when `S` started it) carries on with no warning; otherwise it retries once `launch_pending` clears. |
 | [D147](decisions/D147.md) | The view keeps the detail panel beside the list while the list's 55% share fits the widest herd table, else draws it at full width under the selected member's table, scrolled in with the selected row but never past it; no detail box without a selection. |
 | [D148](decisions/D148.md) | `loopherd init` always writes an attended `[template.grill]` with a `<herd>-grill.md` prompt per tracker (decision where the repo says, else `docs/adr/`, via a PR that closes the issue; no post-merge close-out); `init --grill` adds it to an existing herd; `grill-batch` stays opt-in; the skill routes grill requests to `add` and tells grill from wayfinding. |
+| [D149](decisions/D149.md) | A lead gates a merge with `loopherd gate <sha>`: its broker runs the herd file's `[lead] gate` commands outside the sandbox, on a commit found on origin's branches merged with origin's default branch, in a reused `loopherd-gate-<lead>` worktree, answering the sha and pass or the failing command's tail. Chosen over socket tests that skip in the sandbox. Amends D98. |
 
 ## Emerging model
 

@@ -362,6 +362,13 @@ enum Command {
               value_parser = clap::value_parser!(u64).range(1..=read::MAX_READ_LINES as u64))]
         lines: u64,
     },
+    /// Run the herd file's `[lead] gate` commands on a commit pushed to origin,
+    /// merged with origin's default branch, in the lead's broker outside its
+    /// sandbox. Prints the sha checked and pass, or the failing command's tail.
+    Gate {
+        /// The commit to check, as a sha of 7 to 40 hex digits: a PR's head.
+        sha: String,
+    },
     /// Give a member that wrote its handoff a fresh session in the same pane:
     /// sends it /clear, waits for the ledger to follow the new session, then
     /// prompts it to read its handoff. Refuses unless its last stop is finished.
@@ -853,6 +860,10 @@ fn main() -> ExitCode {
                     lines: lines as usize,
                 },
             ),
+        ),
+        Command::Gate { sha } => (
+            "gate",
+            run_op(own_broker().as_ref(), &broker::Op::Gate { rev: sha }),
         ),
         Command::Restart {
             name: Some(name),
