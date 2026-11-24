@@ -852,6 +852,8 @@ fn a_workers_question_is_recorded_while_pane_labels_are_on_and_herdr_cant_be_rea
     .unwrap();
 
     assert_eq!(out.status.code(), Some(0), "{out:?}");
+    // Only a lead's question labels its pane, so a worker's tries no herdr call to warn of.
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
     let out = run(state.path(), None, &["reports"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.starts_with("lh-2 question 20"), "{stdout}");
