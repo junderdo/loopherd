@@ -821,6 +821,8 @@ pub struct Follow<'a> {
     /// How long an idle broker goes between looks; it also looks after each
     /// request, but never while one is in flight.
     pub every: Duration,
+    /// The install this broker last moved onto, which it counts as running.
+    pub moved_onto: Option<FileId>,
 }
 
 /// Serves lead `lead`'s requests, polling every `poll`, until it is retired.
@@ -864,7 +866,9 @@ pub fn serve<L: Ledger + Clone + Send>(
     let running = Binary::running();
     let mut installs = host.follow.as_ref().map(|follow| Installs {
         follow,
-        running: running.as_ref().map(|b| b.file),
+        running: follow
+            .moved_onto
+            .or_else(|| running.as_ref().map(|b| b.file)),
         failed: None,
         looked: Instant::now(),
     });
@@ -877,7 +881,7 @@ pub fn serve<L: Ledger + Clone + Send>(
             b.file.ino
         )
     });
-    let record = LockRecord {
+    let mut record = LockRecord {
         path: lock_file(paths, lead),
         text: format!("{remote}\n{MARKS}\n{binary}"),
     };
@@ -952,8 +956,9 @@ pub fn serve<L: Ledger + Clone + Send>(
             if let Some(installs) = installs.as_mut()
                 && in_flight.is_empty()
                 && (answered || installs.due())
+                && let Some(failed) = installs.move_onto_newer(paths, lead, &lock)
             {
-                installs.move_onto_newer(paths, lead, &lock);
+                record.failed(failed);
             }
             // Reopened each round: the lead can replace any folder on the way.
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
@@ -1000,17 +1005,14 @@ impl Installs<'_> {
 
     /// Re-execs the loopherd on PATH when it is another file than this
     /// broker runs and not one that already failed to take over. Returns
-    /// only when it didn't move, noting the lead's mailbox if it tried.
-    fn move_onto_newer(&mut self, paths: &Paths, lead: &str, lock: &Lock) {
+    /// only when it didn't move, noting the lead's mailbox and returning the
+    /// install if it tried.
+    fn move_onto_newer(&mut self, paths: &Paths, lead: &str, lock: &Lock) -> Option<FileId> {
         self.looked = Instant::now();
-        let Some(exe) = (self.follow.installed)() else {
-            return;
-        };
-        let Some(file) = FileId::of(&exe) else {
-            return;
-        };
+        let exe = (self.follow.installed)()?;
+        let file = FileId::of(&exe)?;
         if Some(file) == self.running || Some(file) == self.failed {
-            return;
+            return None;
         }
         let e = (self.follow.reexec)(&exe, lead, lock);
         self.failed = Some(file);
@@ -1022,6 +1024,7 @@ impl Installs<'_> {
         );
         let note = crate::report::Entry::new(SystemTime::now(), Body::Note { text });
         let _ = crate::report::append(&paths.state_dir().join("reports"), lead, &note);
+        Some(file)
     }
 }
 
@@ -1136,6 +1139,19 @@ impl LockRecord {
 
     fn clear(&self) {
         let _ = std::fs::write(&self.path, "");
+    }
+
+    /// Records `file` as the install this broker couldn't move onto, for doctor.
+    fn failed(&mut self, file: FileId) {
+        let mut text: String = self
+            .text
+            .lines()
+            .filter(|line| !line.starts_with(FAILED))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        text.push_str(&format!("{FAILED}{} {}\n", file.dev, file.ino));
+        self.text = text;
+        self.write();
     }
 }
 
@@ -1788,10 +1804,57 @@ pub fn runnable_exe() -> Result<PathBuf> {
 }
 
 fn runnable(exe: PathBuf) -> PathBuf {
-    match exe.to_string_lossy().ends_with(" (deleted)") {
+    match exe.to_string_lossy().ends_with(DELETED) {
         true => PathBuf::from("loopherd"),
         false => exe,
     }
+}
+
+/// What Linux appends to `current_exe` once a reinstall renamed over the running file.
+const DELETED: &str = " (deleted)";
+
+/// Names the install a broker re-execed, as `<dev> <ino> <path>`, which the
+/// new image can't learn from its own once another install lands while it starts.
+const STARTED_FROM_ENV: &str = "LOOPHERD_BROKER_STARTED_FROM";
+
+/// Where a broker was started from.
+pub struct Origin {
+    /// The path it was started at, as it was before any reinstall.
+    pub path: PathBuf,
+    /// The install a moving broker re-execed, which may be a script that execs another.
+    pub moved_onto: Option<FileId>,
+}
+
+/// Where this broker was started from: the install a moving broker
+/// re-execed, else this binary. Call before any thread starts.
+pub fn origin() -> Option<Origin> {
+    let passed = std::env::var_os(STARTED_FROM_ENV);
+    // SAFETY: no thread runs yet to read the environment.
+    unsafe { std::env::remove_var(STARTED_FROM_ENV) };
+    let moved = passed.filter(|_| std::env::var_os(LOCK_FD_ENV).is_some());
+    if let Some(moved) = moved.as_deref().and_then(moved_from) {
+        return Some(moved);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let path = match exe.to_string_lossy().strip_suffix(DELETED) {
+        Some(path) => path.into(),
+        None => exe,
+    };
+    Some(Origin {
+        path,
+        moved_onto: None,
+    })
+}
+
+fn moved_from(passed: &std::ffi::OsStr) -> Option<Origin> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut fields = passed.as_bytes().splitn(3, |&b| b == b' ');
+    let mut number = || std::str::from_utf8(fields.next()?).ok()?.parse().ok();
+    let (dev, ino) = (number()?, number()?);
+    Some(Origin {
+        path: std::ffi::OsStr::from_bytes(fields.next()?).into(),
+        moved_onto: Some(FileId { dev, ino }),
+    })
 }
 
 fn start_with(
@@ -1906,27 +1969,34 @@ fn serving_once_started(
 /// Names the descriptor of the lock a broker hands the loopherd it re-execs.
 pub const LOCK_FD_ENV: &str = "LOOPHERD_BROKER_LOCK_FD";
 
-/// How long a new install has to answer `--version` before a broker moves onto it.
+/// How long a new install has to pass its startup check before a broker moves onto it.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Replaces this process with `exe` serving `lead`, handing it `lock` so no
-/// client sees the lead without a broker. First runs `exe --version`, so a
-/// binary that is missing, can't run or exits at once leaves this one
-/// serving. Returns only when `exe` couldn't take over.
+/// client sees the lead without a broker. First runs `exe broker <lead>
+/// --check`, so a binary that is missing, can't run, or can't serve `lead`'s
+/// config leaves this one serving. Returns only when `exe` couldn't take over.
 pub fn reexec(exe: &Path, lead: &str, lock: &Lock) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
-    if let Err(e) = probe(exe) {
+    let probed = FileId::of(exe);
+    if let Err(e) = probe(exe, lead) {
         return e;
     }
+    let Some(file) = probed.filter(|&file| FileId::of(exe) == Some(file)) else {
+        return anyhow!("{} changed during its startup check", exe.display());
+    };
     let fd = lock.as_raw_fd();
     // SAFETY: fcntl only changes close-on-exec on a descriptor `lock` keeps open.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
         return anyhow!(std::io::Error::last_os_error()).context("hand over the broker's lock");
     }
-    let e = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .args(["broker", lead])
-        .env(LOCK_FD_ENV, fd.to_string())
-        .exec();
+        .env(LOCK_FD_ENV, fd.to_string());
+    let mut origin = std::ffi::OsString::from(format!("{} {} ", file.dev, file.ino));
+    origin.push(exe);
+    let e = command.env(STARTED_FROM_ENV, origin).exec();
     // SAFETY: as above; children started later must not hold the lock.
     unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     // A failed exec leaves SIGPIPE at its default, which Rust's runtime had ignored.
@@ -1935,27 +2005,46 @@ pub fn reexec(exe: &Path, lead: &str, lock: &Lock) -> anyhow::Error {
     anyhow!(e).context(format!("exec {}", exe.display()))
 }
 
-fn probe(exe: &Path) -> Result<()> {
+fn probe(exe: &Path, lead: &str) -> Result<()> {
     let mut child = std::process::Command::new(exe)
-        .arg("--version")
+        .args(["broker", lead, "--check"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("run {}", exe.display()))?;
+    // Read aside: a child leaving its stderr to a process of its own must not block the broker.
+    let (said_tx, said_rx) = mpsc::channel();
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut said = String::new();
+            let _ = stderr.take(4096).read_to_string(&mut said);
+            let _ = said_tx.send(said);
+        });
+    }
     let given_up = Instant::now() + PROBE_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait()? {
-            if !status.success() {
-                bail!("{} --version exited at once ({status})", exe.display());
+            if status.success() {
+                return Ok(());
             }
-            return Ok(());
+            let said = said_rx
+                .recv_timeout(Duration::from_millis(500))
+                .unwrap_or_default();
+            let said = match said.trim() {
+                "" => String::new(),
+                said => format!(": {said}"),
+            };
+            bail!(
+                "{} failed its startup check ({status}){said}",
+                exe.display()
+            );
         }
         if Instant::now() >= given_up {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "{} --version didn't answer within {}",
+                "{}'s startup check didn't finish within {}",
                 exe.display(),
                 humantime::format_duration(PROBE_TIMEOUT)
             );
@@ -2184,6 +2273,7 @@ const MARKS: &str = "marks";
 const VERSION: &str = "version ";
 const BINARY: &str = "binary ";
 const FILE: &str = "file ";
+const FAILED: &str = "failed ";
 
 /// A loopherd binary, which a broker records in its lock so a newer one can tell it is stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2239,6 +2329,19 @@ pub fn recorded_binary(paths: &Paths, lead: &str) -> Option<Binary> {
             dev: dev.parse().ok()?,
             ino: ino.parse().ok()?,
         },
+    })
+}
+
+/// The install `lead`'s broker last couldn't move onto, which it won't try again.
+pub fn failed_install(paths: &Paths, lead: &str) -> Option<FileId> {
+    let text = std::fs::read_to_string(lock_file(paths, lead)).ok()?;
+    let (dev, ino) = text
+        .lines()
+        .find_map(|line| line.strip_prefix(FAILED))?
+        .split_once(' ')?;
+    Some(FileId {
+        dev: dev.parse().ok()?,
+        ino: ino.parse().ok()?,
     })
 }
 
@@ -4058,6 +4161,7 @@ mod tests {
             installed: &installed_now,
             reexec: &reexec,
             every: Duration::from_millis(20),
+            moved_onto: None,
         });
         let ledger = world.ledger();
         std::thread::scope(|scope| {
@@ -5628,6 +5732,7 @@ mod tests {
             installed: &installed_now,
             reexec: &reexec,
             every: Duration::from_millis(50),
+            moved_onto: None,
         });
 
         let served = serve(&host, &world.ledger(), &world.paths, "lead-h", POLL, None);

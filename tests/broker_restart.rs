@@ -555,6 +555,10 @@ fn a_broker_moves_onto_a_reinstalled_loopherd_after_its_next_request_keeping_its
 
 #[test]
 fn a_broker_keeps_its_lock_held_through_the_exec_onto_a_reinstall() {
+    if Command::new("flock").arg("--version").output().is_err() {
+        eprintln!("skipped: no flock(1) on PATH to probe the broker's lock with");
+        return;
+    }
     let world = World::new();
     let installed = world.install();
     let _broker = world.broker_from(&installed);
@@ -566,8 +570,8 @@ fn a_broker_keeps_its_lock_held_through_the_exec_onto_a_reinstall() {
         &wrapper,
         format!(
             "#!/bin/sh\n\
-             if [ \"$1\" = broker ]; then\n\
-             if flock -n {lock} true; then echo free; else echo held; fi >> {seen}\n\
+             if [ \"$1\" = broker ] && [ $# -eq 2 ]; then\n\
+             flock -n {lock} true; case $? in 0) echo free ;; 1) echo held ;; *) echo \"flock failed $?\" ;; esac >> {seen}\n\
              fi\n\
              exec {dev_build} \"$@\"\n",
             lock = world.config().join("broker/lead-k.lock").display(),
@@ -683,26 +687,22 @@ fn an_install_that_exits_at_once_is_noted_once_and_the_old_broker_serves_until_t
     world.install_from(&broken);
 
     assert_eq!(world.read_as_lead(), "served\n");
-    let given_up = Instant::now() + Duration::from_secs(10);
-    while notes(&world).is_empty() {
-        assert!(
-            Instant::now() < given_up,
-            "no note reached the lead's mailbox"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    wait_for_a_note(&world);
     assert_eq!(world.read_as_lead(), "served\n");
     std::thread::sleep(Duration::from_millis(300));
 
     let notes = notes(&world);
     assert_eq!(notes.len(), 1, "{notes:?}");
     assert!(
-        notes[0].contains("exited at once")
+        notes[0].contains("failed its startup check (exit status: 1)")
             && notes[0].contains("the shepherd runs loopherd broker-restart lead-k"),
         "{}",
         notes[0]
     );
-    assert_eq!(fs::read_to_string(&probes).unwrap(), "--version\n");
+    assert_eq!(
+        fs::read_to_string(&probes).unwrap(),
+        "broker lead-k --check\n"
+    );
     assert_eq!(world.recorded_file(), Some(running));
     assert_eq!(world.serving_pid(), broker.pid());
 
@@ -725,4 +725,143 @@ fn a_broker_started_from_another_loopherd_than_paths_stays_on_it() {
 
     assert_eq!(world.recorded_file(), Some(file_id(dev_build)));
     assert_eq!(world.read_as_lead(), "served\n");
+}
+
+/// Waits until the lead's mailbox holds a note, failing after 10 seconds.
+fn wait_for_a_note(world: &World) {
+    let given_up = Instant::now() + Duration::from_secs(10);
+    while notes(world).is_empty() {
+        assert!(
+            Instant::now() < given_up,
+            "no note reached the lead's mailbox"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+#[test]
+fn an_install_landing_while_the_new_image_starts_still_ends_with_the_newest_serving() {
+    let world = World::new();
+    let installed = world.install();
+    let _broker = world.broker_from(&installed);
+    world.wait_until_runs(file_id(&installed));
+    let dev_build = Path::new(env!("CARGO_BIN_EXE_loopherd"));
+    let first = world.root.path().join("first");
+    // Copied by a child, as `install_from` does, so no fork holds it open for writing.
+    assert!(
+        Command::new("cp")
+            .arg(dev_build)
+            .arg(&first)
+            .status()
+            .unwrap()
+            .success()
+    );
+    let starting = world.root.path().join("starting");
+    let part = installed.with_extension("part");
+    executable(
+        &starting,
+        format!(
+            "#!/bin/sh\n\
+             if [ \"$1\" = broker ] && [ $# -eq 2 ]; then\n\
+             cp {dev_build} {part} && mv {part} {installed}\n\
+             fi\n\
+             exec {first} \"$@\"\n",
+            dev_build = dev_build.display(),
+            part = part.display(),
+            installed = installed.display(),
+            first = first.display(),
+        ),
+    );
+
+    world.install_from(&starting);
+    assert_eq!(world.read_as_lead(), "served\n");
+
+    let given_up = Instant::now() + Duration::from_secs(10);
+    while world.recorded_file() != Some(file_id(&installed)) {
+        assert!(Instant::now() < given_up, "the newest install never served");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert_ne!(file_id(&installed), file_id(&starting));
+    assert_eq!(world.read_as_lead(), "served\n");
+}
+
+#[test]
+fn an_install_that_cant_serve_the_leads_config_is_noted_and_the_old_broker_serves_on() {
+    let world = World::new();
+    let installed = world.install();
+    let broker = world.broker_from(&installed);
+    let running = file_id(&installed);
+    fs::write(world.config().join("herds/k.toml"), "repo = = \"/\"\n").unwrap();
+
+    world.install();
+    assert_eq!(world.read_as_lead(), "served\n");
+    wait_for_a_note(&world);
+    std::thread::sleep(Duration::from_millis(300));
+
+    let notes = notes(&world);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(
+        notes[0].contains("failed its startup check") && notes[0].contains("herd k"),
+        "{}",
+        notes[0]
+    );
+    let (dev, ino) = file_id(&installed);
+    let lock = fs::read_to_string(world.config().join("broker/lead-k.lock")).unwrap();
+    assert!(lock.contains(&format!("\nfailed {dev} {ino}\n")), "{lock}");
+    assert_eq!(world.recorded_file(), Some(running));
+    assert_eq!(world.serving_pid(), broker.pid());
+    assert_eq!(world.read_as_lead(), "served\n");
+}
+
+#[test]
+fn a_non_executable_install_is_noted_once_and_the_old_broker_serves_on() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    let installed = world.install();
+    let broker = world.broker_from(&installed);
+    let running = file_id(&installed);
+    let unrunnable = world.root.path().join("unrunnable");
+    fs::write(&unrunnable, "#!/bin/sh\n").unwrap();
+    fs::set_permissions(&unrunnable, fs::Permissions::from_mode(0o644)).unwrap();
+
+    world.install_from(&unrunnable);
+    assert_eq!(world.read_as_lead(), "served\n");
+    wait_for_a_note(&world);
+    assert_eq!(world.read_as_lead(), "served\n");
+    std::thread::sleep(Duration::from_millis(1500));
+
+    let notes = notes(&world);
+    assert_eq!(notes.len(), 1, "{notes:?}");
+    assert!(notes[0].contains("Permission denied"), "{}", notes[0]);
+    assert_eq!(world.recorded_file(), Some(running));
+    assert_eq!(world.serving_pid(), broker.pid());
+}
+
+#[test]
+fn a_non_executable_loopherd_earlier_on_path_doesnt_stop_the_broker_following() {
+    use std::os::unix::fs::PermissionsExt;
+    let world = World::new();
+    let stray = world.root.path().join("stray");
+    fs::create_dir(&stray).unwrap();
+    fs::write(stray.join("loopherd"), "#!/bin/sh\n").unwrap();
+    fs::set_permissions(stray.join("loopherd"), fs::Permissions::from_mode(0o644)).unwrap();
+    let installed = world.install();
+    let mut loopherd = world.loopherd_at(&installed, None, &[]);
+    loopherd.env(
+        "PATH",
+        format!(
+            "{}:{}:/usr/bin:/bin",
+            stray.display(),
+            world.root.path().join("bin").display()
+        ),
+    );
+    let _broker = Broker::start(loopherd, &world.config(), "lead-k", "k");
+    world.wait_until_runs(file_id(&installed));
+
+    world.install();
+    let reinstalled = file_id(&installed);
+    assert_eq!(world.read_as_lead(), "served\n");
+
+    world.wait_until_runs(reinstalled);
+    assert!(notes(&world).is_empty(), "{:?}", notes(&world));
 }
