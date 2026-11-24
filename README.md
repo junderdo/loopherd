@@ -103,9 +103,10 @@ checks the herd file. Run `loopherd lead` yourself, or ask the shepherd to.
 **When you're unsure how to do something, ask your shepherd.** The shepherd
 is the Claude session you work in beside the herd. `s` in `loopherd view`
 focuses it, or starts one beside the view when there's none; with the herdr
-plugin's key bindings, `prefix+shift+m` opens the view beside it. It reads loopherd's guide
-(`loopherd --skill`), so ask it things like "how do I pause a herd?" or "why
-didn't feed spawn anything?", and it can run the commands for you.
+plugin's key bindings, `prefix+shift+m` opens the view beside it. It reads
+loopherd's guide (`loopherd --skill`), so ask it things like "how do I pause
+a herd?" or "why didn't feed spawn anything?", and it can run the commands
+for you.
 
 [docs/setup.md](docs/setup.md) walks these steps with the detail: what
 `init` writes, the trust dialog, the lead's sandbox, and writing a herd file

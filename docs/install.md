@@ -135,9 +135,9 @@ source, `scripts/install --with-herdr-keys`) adds them without asking:
 shepherd. Both are unbound in herdr 0.9.5's defaults
 (`herdr --default-config`). It writes them as `[[keys.command]]` entries
 at the end of the `config.toml` herdr reads, after backing it up beside
-itself, and reloads a running server. A key your
-config or herdr's defaults already hold, or an action you already bound, is
-skipped with a line saying why. herdr's keybinds help (`prefix+?`) lists
+itself, and reloads a running server. A key your config or herdr's
+defaults already hold, or an action you already bound, is skipped with a
+line saying why. herdr's keybinds help (`prefix+?`) lists
 them under "custom" by their descriptions. `loopherd install-herdr-keys
 --remove` takes out only those entries, matched by command and description,
 so a binding you wrote by hand from the snippet below, or an earlier
