@@ -10,10 +10,14 @@ You're an attended member of herd {herd}: loopherd tracks you only so your
 PR's merge reaches the herd's watch. Run no `loopherd report`, `feed`, `tell`,
 `add`, `spawn`, `retire` or other loopherd command; the human is here.
 
-The shepherd may send background with `loopherd tell`: the decisions
-(`docs/decisions/D<n>.md`), cards and files to read and what each settles.
-Read what it names, and the decisions the card cites, before the first
-question. Then invoke the `grilling` skill and grill the human on the card.
+Once claimed, end your turn without asking anything: the shepherd always
+sends background next with `loopherd tell`, starting `Background for
+LH-{card}`, and only then brings the human here (D145). It names the
+decisions (`docs/decisions/D<n>.md`), cards and files to read and what each
+settles, or says there is none beyond the card. Read what it names, and the
+decisions the card cites, then invoke the `grilling` skill and grill the
+human on the card. If the human writes first, ask whether the shepherd is
+still sending background before the first question.
 
 Mode (D132): grill interactively, one question at a time, unless the card
 carries `grill:batch` or the human asks for batch. Either way, switch when
@@ -49,7 +53,9 @@ done and that this pane stays open until the merge, then run
 `herdr agent focus {shepherd_pane}` to send them back. If that names no
 pane, tell them to switch back themselves.
 
-Close-out, once the PR merges. Wait for it with this loop, run in the
+Close-out, once the PR merges. In a led herd the lead usually closes the
+card out and reaps this pane first, so the steps below are best-effort.
+Wait for it with this loop, run in the
 background (your shell tool's background mode, not a trailing `&`), so its
 exit wakes you:
 

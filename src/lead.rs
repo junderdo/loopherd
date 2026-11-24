@@ -1658,6 +1658,11 @@ mod tests {
                 "GITHUB_TOKEN": "",
                 "GH_ENTERPRISE_TOKEN": "",
                 "GITHUB_ENTERPRISE_TOKEN": "",
+                "GITHUB_PERSONAL_ACCESS_TOKEN": "",
+                "GITHUB_PAT": "",
+                "GH_PAT": "",
+                "GITHUB_API_TOKEN": "",
+                "HOMEBREW_GITHUB_API_TOKEN": "",
                 "GIT_CONFIG_COUNT": "5",
                 "GIT_CONFIG_KEY_0": "credential.helper",
                 "GIT_CONFIG_VALUE_0": "",
@@ -1690,7 +1695,7 @@ mod tests {
             .as_array()
             .unwrap();
         assert_eq!(
-            deny_read[..7],
+            deny_read[..12],
             serde_json::json!([
                 "/home/me/.ssh",
                 "/home/me/.netrc",
@@ -1698,6 +1703,11 @@ mod tests {
                 "/home/me/.git-credentials",
                 "/home/me/.config/git/credentials",
                 "/home/me/.cache/git/credential",
+                "/home/me/.claude.json",
+                "/home/me/.docker/config.json",
+                "/home/me/.npmrc",
+                "/home/me/.config/github-copilot",
+                "/home/me/.claude/backups",
                 config,
             ])
             .as_array()
@@ -1711,7 +1721,7 @@ mod tests {
             .filter(|rule| rule.as_str().is_some_and(|r| r.starts_with("Read(")))
             .collect();
         assert_eq!(
-            reads[..7],
+            reads[..12],
             serde_json::json!([
                 "Read(//home/me/.ssh/**)",
                 "Read(//home/me/.netrc)",
@@ -1719,6 +1729,11 @@ mod tests {
                 "Read(//home/me/.git-credentials)",
                 "Read(//home/me/.config/git/credentials)",
                 "Read(//home/me/.cache/git/credential/**)",
+                "Read(//home/me/.claude.json)",
+                "Read(//home/me/.docker/config.json)",
+                "Read(//home/me/.npmrc)",
+                "Read(//home/me/.config/github-copilot/**)",
+                "Read(//home/me/.claude/backups/**)",
                 format!("Read(/{config}/**)"),
             ])
             .as_array()
@@ -1727,7 +1742,7 @@ mod tests {
             .collect::<Vec<_>>()[..]
         );
         // The rest are this machine's drvfs mounts, each denied to both.
-        assert_eq!(reads.len() - 7, deny_read.len() - 8, "{deny_read:?}");
+        assert_eq!(reads.len() - 12, deny_read.len() - 13, "{deny_read:?}");
         let mode = fs::metadata(&path).unwrap().permissions().mode();
         assert_eq!(mode & 0o777, 0o600, "the settings hold the token");
     }
@@ -2766,6 +2781,7 @@ mod tests {
         let now = std::time::SystemTime::now();
         crate::retire::retire_and_close(
             &herdr,
+            &crate::process::FakeProcs::default(),
             &mut ledger,
             &crate::sandbox::Guard::new(setup.paths(), None),
             "lead-h",
@@ -2809,6 +2825,7 @@ mod tests {
         let mut out = vec![];
         crate::retire::retire_and_close(
             &elsewhere,
+            &crate::process::FakeProcs::default(),
             &mut ledger,
             &crate::sandbox::Guard::new(setup.paths(), None),
             "lead-h",
@@ -2850,6 +2867,7 @@ mod tests {
         let mut out = vec![];
         crate::retire::retire_and_close(
             &herdr,
+            &crate::process::FakeProcs::default(),
             &mut ledger,
             &crate::sandbox::Guard::new(setup.paths(), None),
             "lead-h",

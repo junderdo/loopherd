@@ -96,28 +96,39 @@ whose prompt is [grill-prompt.md](grill-prompt.md). When the human asks to
 grill a card, run from your own pane:
 
 ```bash
-loopherd add loopherd-cards grill <n> docs <slug>
+loopherd add --no-focus loopherd-cards grill <n> docs <slug>
 ```
 
 `add` makes the tab, worktree and branch, starts and prompts the grill, and
-takes the human there; the grill sends them back to your pane when the
-conversation ends. Send background beyond the card, one line each for the
-decisions (`docs/decisions/D<n>.md`), cards and files it should read and what
-each settles, from a file:
+prints its `pane <id>`. The grill claims the card and waits for your
+background before its first question, so always send it, then take the human
+there (D145). Sending it before the focus keeps `tell` out of an input box
+the human is typing in. The background starts `Background for LH-<n>`, then
+one line each for the decisions (`docs/decisions/D<n>.md`), cards and files
+it should read and what each settles, or `none beyond the card`:
 
 ```bash
 background=$(mktemp)
 cat > "$background" <<'LOOPHERD_GRILL_BACKGROUND_END'
+Background for LH-<n>
 <the background>
 LOOPHERD_GRILL_BACKGROUND_END
 loopherd tell grill-<n> --text-file "$background"
 rm -f "$background"
+herdr agent focus <pane>
 ```
 
 The quoted heredoc keeps the background's backticks and `$(…)` from running in
 your shell; never pass it inline in double quotes. A line of the background
 that is exactly the delimiter would end it early and run the rest as shell, so
-check for one before sending.
+check for one before sending. The grill sends the human back to your pane
+when the conversation ends.
+
+- **`add` printed `blocked: answer it in pane <p>, …`**: the grill was never
+  prompted. Focus that pane for the human to answer the dialog, run
+  `loopherd prompt grill-<n>`, then the block above.
+- **`tell` failed after a prompted start**: still focus the pane, and have
+  the human give the grill the background themselves.
 
 ### Interactive or batch
 
@@ -148,17 +159,29 @@ A grill runs in one of two modes (D132), picked by the human with the
   Never restart it without the human's answer on the card. `loopherd stats`
   doesn't compare the two modes (D132).
 
-After its PR merges, the grill moves the card to Done, runs
-`scripts/trello unblock` and sends you `LH-<n> merged and closed out: …`. The
-herd's watch prints `grill-<n> merged`. Close out either way below; feed's
-`after_merge` and the reap (`retire --close grill-<n>`, once the card is in
-Done) then close its pane, worktree and branch.
+After its PR merges, the herd's watch prints `grill-<n> merged`. The grill
+moves the card to Done, runs `scripts/trello unblock` and sends you
+`LH-<n> merged and closed out: …`, but only if it notices the merge first.
+In a led herd the lead's watch usually wins: the lead moves the card to Done,
+feeds, and its reap (`retire --close grill-<n>`) closes the grill's pane,
+worktree and branch before the grill runs its close-out. The lead then leaves
+you a note, `grill-<n> merged: LH-<n> closed out`, which your watch prints as
+`lead-loopherd-cards note …`; take that as the close-out and do nothing more.
+The lead runs its own copy of its prompt
+(`~/.config/loopherd/herds/loopherd-cards-lead.md`), so once D145 lands, have
+the human carry its after-merge note sentence from
+[examples/loopherd-cards-lead.md](../examples/loopherd-cards-lead.md) into
+that copy by hand (a copy-over drops their local edits), then restart the
+lead. For an unled herd, close out either way below; feed's `after_merge` and
+the reap (once the card is in Done) then close the grill's pane, worktree and
+branch.
 
 - **On the grill's line**: check
   `GH_TOKEN=$(gh auth token --user junderdo) gh pr view <pr> --json state --jq .state`
   reads MERGED, then run `loopherd feed loopherd-cards`.
-- **If the grill's pane closed before its close-out**, or the human reports
-  the merge with no line from the grill: find the branch in grill-<n>'s row under
+- **On your watch's `grill-<n> merged`** with no line from the grill, or the
+  human reports the merge with no line from the grill or note from the lead:
+  find the branch in grill-<n>'s row under
   loopherd-cards in `loopherd status` (or `git worktree list | grep LH-<n>`) and
   its PR with
   `GH_TOKEN=$(gh auth token --user junderdo) gh pr list --head <branch> --state all`.
@@ -166,8 +189,19 @@ Done) then close its pane, worktree and branch.
   the card to Done, run `scripts/trello unblock`, then
   `loopherd feed loopherd-cards`.
 
-Neither path needs the tab ID: the reap finds grill-<n>'s tab from its record.
+- **grill-<n> gone from `loopherd status`** with no line from the grill or
+  note from the lead (a lead prompt without the D145 note, or a pane closed
+  before its close-out): check its PR as above. When it reads MERGED and the
+  card isn't in Done, close out as in the bullet above; when the card is in
+  Done, the lead already did.
+
+Check grill-<n>'s row in `loopherd status` on each watch wake until one of
+these closes it out. Neither path needs the tab ID: the reap finds grill-<n>'s tab from its record.
 If the PR reads anything but MERGED, close nothing out.
+
+Closing a grill tab by hand (`herdr tab close`) while the human is in it
+lets herdr focus the next tab, often a worker's. Focus your own pane first:
+`herdr agent focus "$HERDR_PANE_ID"`. The reap does this itself.
 
 ## Lead
 

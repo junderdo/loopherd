@@ -14,6 +14,7 @@ use crate::process::{Procs, is_ancestor, live};
 use crate::report::{Body, history, member_in};
 use crate::revive::find_workspace;
 use crate::sandbox::Guard;
+use crate::shepherd_pane::{Live, live_shepherd};
 use crate::tool_hook::Pane as OwnPane;
 use crate::usage;
 use crate::worktree::{Gone, Removal, remove_if_gone, remove_if_merged, same_dir};
@@ -190,6 +191,7 @@ fn retired_since(record: &AgentRecord) -> String {
 #[allow(clippy::too_many_arguments)]
 pub fn retire_and_close(
     herdr: &dyn Herdr,
+    procs: &dyn Procs,
     ledger: &mut dyn Ledger,
     guard: &Guard,
     name: &str,
@@ -229,7 +231,13 @@ pub fn retire_and_close(
             None
         }
         TabFate::Ours { tab_id, pane_id } => {
-            out.extend(return_focus(herdr, &record, &pane_id));
+            out.extend(return_focus(
+                herdr,
+                procs,
+                guard.state_dir(),
+                &record,
+                &pane_id,
+            ));
             herdr.close_tab(&tab_id)?;
             out.push(format!("closed tab {tab_id}"));
             None
@@ -305,21 +313,71 @@ pub fn retire_and_close(
     Ok(())
 }
 
-/// Focuses an attended member's return pane if the human is looking at its
-/// pane `pane_id`: a reap hours after the merge mustn't pull them off other work.
-fn return_focus(herdr: &dyn Herdr, record: &AgentRecord, pane_id: &str) -> Option<String> {
-    let back = record.attended.as_ref()?.return_pane.as_deref()?;
-    let focused = match herdr.focused_pane() {
-        Ok(focused) => focused,
-        Err(e) => return Some(format!("warning: read the focused pane: {e:#}")),
+/// Focuses the live shepherd's pane, as the herd view's `S` finds it in
+/// `state`, else the attended member's return pane, if the human is looking
+/// at its pane `pane_id`: a reap hours after the merge mustn't pull them off
+/// other work. When neither takes focus, herdr picks the next tab, and the
+/// last line warns why.
+fn return_focus(
+    herdr: &dyn Herdr,
+    procs: &dyn Procs,
+    state: &Path,
+    record: &AgentRecord,
+    pane_id: &str,
+) -> Vec<String> {
+    let Some(attended) = record.attended.as_ref() else {
+        return vec![];
     };
-    if focused.as_deref() != Some(pane_id) {
-        return None;
+    match herdr.focused_pane() {
+        Ok(focused) if focused.as_deref() == Some(pane_id) => {}
+        Ok(_) => return vec![],
+        Err(e) => return vec![format!("warning: read the focused pane: {e:#}")],
     }
-    Some(match herdr.focus(back) {
-        Ok(()) => format!("focused {back}"),
-        Err(e) => format!("warning: focus {back}: {e:#}"),
-    })
+    let mut why = vec![];
+    let shepherd = match live_shepherd(herdr, procs, state) {
+        Ok(Live::Here(pane)) => Some(pane),
+        Ok(Live::Elsewhere(place)) => {
+            why.push(format!(
+                "the shepherd runs outside this herdr, in pane {}",
+                place.pane
+            ));
+            None
+        }
+        Ok(Live::Gone) => {
+            why.push("no live shepherd".to_string());
+            None
+        }
+        Err(e) => {
+            why.push(format!("find the shepherd: {e:#}"));
+            None
+        }
+    };
+    let back = attended.return_pane.clone();
+    if back.is_none() {
+        why.push("no return pane recorded".to_string());
+    }
+    let mut failed: Vec<(String, String)> = vec![];
+    for pane in shepherd.into_iter().chain(back) {
+        if failed.iter().any(|(tried, _)| *tried == pane) {
+            continue;
+        }
+        match herdr.focus(&pane) {
+            Ok(()) => {
+                return failed
+                    .into_iter()
+                    .map(|(pane, e)| format!("warning: focus {pane}: {e}"))
+                    .chain([format!("focused {pane}")])
+                    .collect();
+            }
+            Err(e) => failed.push((pane, format!("{e:#}"))),
+        }
+    }
+    why.extend(
+        failed
+            .into_iter()
+            .map(|(pane, e)| format!("focus {pane}: {e}")),
+    );
+    vec![format!("warning: left focus to herdr: {}", why.join("; "))]
 }
 
 /// The command that closes `record`'s tab, commented with why it may still
@@ -1002,6 +1060,7 @@ mod tests {
         let mut out = vec![];
         retire_and_close(
             herdr,
+            &FakeProcs::default(),
             ledger,
             &open_guard(),
             "a",
@@ -1020,6 +1079,12 @@ mod tests {
     fn spawned_attended() -> (FakeHerdr, MemLedger, String) {
         let herdr = FakeHerdr::new(&[("w1", "loopherd")]).with_agent("shepherd");
         let shepherd = herdr.agents().unwrap()[0].pane_id.clone();
+        let ledger = attended_member(&herdr, Some(&shepherd));
+        (herdr, ledger, shepherd)
+    }
+
+    /// Spawns `a` in `herdr` as an attended member returning to `return_pane`.
+    fn attended_member(herdr: &FakeHerdr, return_pane: Option<&str>) -> MemLedger {
         let mut ledger = MemLedger::default();
         let req = SpawnRequest {
             repo: "/src/repo".into(),
@@ -1032,16 +1097,153 @@ mod tests {
             claude_args: vec![],
             member_of: None,
         };
-        spawn(&herdr, &mut ledger, &req, Some("w1")).unwrap();
+        spawn(herdr, &mut ledger, &req, Some("w1")).unwrap();
         ledger
             .update("a", &mut |r| {
                 r.attended = Some(Attended {
-                    return_pane: Some(shepherd.clone()),
+                    return_pane: return_pane.map(String::from),
                 });
                 Ok(())
             })
             .unwrap();
-        (herdr, ledger, shepherd)
+        ledger
+    }
+
+    /// Closes the focused attended `a`, returning its pane and the output.
+    fn close_focused(herdr: &FakeHerdr, ledger: &mut MemLedger) -> (String, Vec<String>) {
+        let pane = ledger.0["a"].pane_id.clone();
+        herdr.focus(&pane).unwrap();
+        let out = close(herdr, ledger);
+        assert!(herdr.tabs().iter().all(|t| t.id != "w1:t2"), "{out:?}");
+        (pane, out)
+    }
+
+    #[test]
+    fn close_of_a_focused_attended_member_focuses_the_live_shepherd_over_its_return_pane() {
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")])
+            .with_live_agent(Some("lead"), None, "w8:p8")
+            .with_agent("shepherd");
+        let mut ledger = attended_member(&herdr, Some("w8:p8"));
+
+        let (pane, out) = close_focused(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [pane, "w9:p9".to_string()]);
+        assert!(out.contains(&"focused w9:p9".to_string()), "{out:?}");
+    }
+
+    #[test]
+    fn close_of_a_focused_attended_member_focuses_an_unnamed_shepherd_found_by_its_record() {
+        let state = tempfile::tempdir().unwrap();
+        let place = crate::shepherd_resume::Place {
+            pane: "w7:p7".into(),
+            socket: FAKE_SOCKET.into(),
+            process: Process {
+                pid: 4242,
+                start: 7,
+            },
+        };
+        crate::shepherd_resume::record(state.path(), &place, None, "s1", halloween_noon()).unwrap();
+        let mut procs = FakeProcs::default();
+        procs.add(4242, CLAUDE, 1, 7);
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")])
+            .with_live_agent(Some("lead"), None, "w8:p8")
+            .with_live_agent(None, None, "w7:p7");
+        let mut ledger = attended_member(&herdr, Some("w8:p8"));
+        let pane = ledger.0["a"].pane_id.clone();
+        herdr.focus(&pane).unwrap();
+
+        let mut out = vec![];
+        retire_and_close(
+            &herdr,
+            &procs,
+            &mut ledger,
+            &Guard::new(crate::herd::Paths::under(state.path()), None),
+            "a",
+            halloween_noon(),
+            Outcome::Retired,
+            Path::new("/nonexistent/reports"),
+            None,
+            None,
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(herdr.focused(), [pane, "w7:p7".to_string()]);
+        assert!(out.contains(&"focused w7:p7".to_string()), "{out:?}");
+    }
+
+    #[test]
+    fn close_of_a_focused_attended_member_with_no_shepherd_focuses_its_return_pane() {
+        let herdr =
+            FakeHerdr::new(&[("w1", "loopherd")]).with_live_agent(Some("lead"), None, "w8:p8");
+        let mut ledger = attended_member(&herdr, Some("w8:p8"));
+
+        let (pane, out) = close_focused(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [pane, "w8:p8".to_string()]);
+        assert!(out.contains(&"focused w8:p8".to_string()), "{out:?}");
+    }
+
+    #[test]
+    fn close_of_a_focused_attended_member_with_no_shepherd_or_return_pane_warns_and_closes() {
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
+        let mut ledger = attended_member(&herdr, Some("w8:p8"));
+
+        let (pane, out) = close_focused(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [pane]);
+        let warning = out
+            .iter()
+            .find(|l| l.starts_with("warning: left focus to herdr"))
+            .unwrap_or_else(|| panic!("{out:?}"));
+        assert!(warning.contains("no live shepherd"), "{warning}");
+        assert!(warning.contains("focus w8:p8"), "{warning}");
+    }
+
+    #[test]
+    fn close_of_a_focused_attended_member_with_neither_recorded_warns_why() {
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")]);
+        let mut ledger = attended_member(&herdr, None);
+
+        let (pane, out) = close_focused(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [pane]);
+        assert!(
+            out.contains(
+                &"warning: left focus to herdr: no live shepherd; no return pane recorded"
+                    .to_string()
+            ),
+            "{out:?}"
+        );
+    }
+
+    #[test]
+    fn close_of_a_focused_attended_member_falls_through_when_the_shepherd_wont_focus() {
+        let mut herdr = FakeHerdr::new(&[("w1", "loopherd")])
+            .with_live_agent(Some("lead"), None, "w8:p8")
+            .with_agent("shepherd");
+        herdr.fail_focus_of = Some("w9:p9".into());
+        let mut ledger = attended_member(&herdr, Some("w8:p8"));
+
+        let (pane, out) = close_focused(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [pane, "w8:p8".to_string()]);
+        assert!(
+            out.iter().any(|l| l.starts_with("warning: focus w9:p9")),
+            "{out:?}"
+        );
+        assert!(out.contains(&"focused w8:p8".to_string()), "{out:?}");
+    }
+
+    #[test]
+    fn close_of_a_non_attended_member_makes_no_focus_call() {
+        let herdr = FakeHerdr::new(&[("w1", "loopherd")]).with_agent("shepherd");
+        let mut ledger = attended_member(&herdr, None);
+        ledger.0.get_mut("a").unwrap().attended = None;
+
+        let (pane, _) = close_focused(&herdr, &mut ledger);
+
+        assert_eq!(herdr.focused(), [pane]);
     }
 
     #[test]
@@ -1550,6 +1752,7 @@ mod tests {
         let mut out = vec![];
         retire_and_close(
             herdr,
+            &FakeProcs::default(),
             ledger,
             guard,
             "a",
@@ -1695,6 +1898,7 @@ mod tests {
         let mut out = vec![];
         let err = retire_and_close(
             &herdr,
+            &FakeProcs::default(),
             &mut ledger,
             &guard,
             "a",
@@ -1782,6 +1986,7 @@ mod tests {
         let mut out = vec![];
         let result = retire_and_close(
             &herdr,
+            &FakeProcs::default(),
             &mut ledger,
             &open_guard(),
             "a",
@@ -1881,6 +2086,7 @@ mod tests {
         let mut out = vec![];
         retire_and_close(
             &herdr,
+            &FakeProcs::default(),
             &mut ledger,
             &open_guard(),
             "a",
@@ -2174,6 +2380,7 @@ mod tests {
 
         let err = retire_and_close(
             &herdr,
+            &FakeProcs::default(),
             &mut ledger,
             &open_guard(),
             "a",
@@ -2201,6 +2408,7 @@ mod tests {
         herdr.fail_close_tab = true;
         retire_and_close(
             &herdr,
+            &FakeProcs::default(),
             &mut ledger,
             &open_guard(),
             "a",
@@ -2218,6 +2426,7 @@ mod tests {
 
         retire_and_close(
             &herdr,
+            &FakeProcs::default(),
             &mut ledger,
             &open_guard(),
             "a",
@@ -2432,6 +2641,7 @@ mod tests {
 
         retire_and_close(
             &herdr,
+            &FakeProcs::default(),
             &mut ledger,
             &open_guard(),
             "a",
@@ -2458,6 +2668,7 @@ mod tests {
 
         retire_and_close(
             &herdr,
+            &FakeProcs::default(),
             &mut ledger,
             &open_guard(),
             "a",
@@ -2510,6 +2721,7 @@ mod tests {
         let mut out = vec![];
         retire_and_close(
             herdr,
+            &FakeProcs::default(),
             ledger,
             &open_guard(),
             "a",

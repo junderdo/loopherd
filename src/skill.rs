@@ -519,6 +519,45 @@ mod tests {
     }
 
     #[test]
+    fn a_leads_handoff_stops_every_background_shell_not_only_its_watch() {
+        let handoffs = section("\n### Handoffs\n", "\n### Your own handoff\n");
+        let own = section("- **Your own handoff.**", "- **Your checkout**");
+        let step = section("6. **Handoff:**", "What differs from the shepherd:");
+        let restarts = section("**A lead restarts itself.**", "\n\n");
+        for (name, text) in [
+            ("A lead restarts itself", restarts),
+            ("Handoffs", handoffs),
+            ("Your own handoff", own),
+            ("Handoff step", step),
+        ] {
+            assert!(
+                text.contains("every background shell and Monitor"),
+                "{name} names only the watch: {text}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_leads_wait_on_a_process_runs_in_the_call_that_started_it() {
+        let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
+        for rule in [
+            "Each Bash call also has its own pid namespace: `pgrep` or `kill` sees only \
+             processes that same call started, so polling from another call reads done at once, \
+             and only TaskStop stops another call's shell.",
+            "Run the long command itself as the background task and act on its completion \
+             notification.",
+            "A wait inside that one call uses `cmd & pid=$!; …; wait $pid`",
+            "`pgrep -f <pattern>`, that matches the waiting shell's own command line",
+            "`pgrep -f \"[t]arget-…\"`",
+        ] {
+            assert!(skill.contains(rule), "the skill misses {rule:?}");
+        }
+        for wrong in ["kill -0", "or kill it"] {
+            assert!(!skill.contains(wrong), "the skill still says {wrong:?}");
+        }
+    }
+
+    #[test]
     fn names_nothing_from_this_repo() {
         // init writes these into any repo, so the skill may name them.
         let skill = ["docs/agents/issue-tracker.md", "docs/agents/loopherd.md"]

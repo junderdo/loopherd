@@ -595,6 +595,7 @@ fn retire(ctx: &mut Ctx, name: &str, close: bool, force: bool, sink: &mut dyn Si
     let mut lines = vec![];
     let result = retire_and_close(
         ctx.herdr,
+        ctx.procs,
         ctx.ledger,
         &guard,
         name,
@@ -821,6 +822,8 @@ pub struct Follow<'a> {
     /// How long an idle broker goes between looks; it also looks after each
     /// request, but never while one is in flight.
     pub every: Duration,
+    /// The install this broker last moved onto, which it counts as running.
+    pub moved_onto: Option<FileId>,
 }
 
 /// Serves lead `lead`'s requests, polling every `poll`, until it is retired.
@@ -864,7 +867,9 @@ pub fn serve<L: Ledger + Clone + Send>(
     let running = Binary::running();
     let mut installs = host.follow.as_ref().map(|follow| Installs {
         follow,
-        running: running.as_ref().map(|b| b.file),
+        running: follow
+            .moved_onto
+            .or_else(|| running.as_ref().map(|b| b.file)),
         failed: None,
         looked: Instant::now(),
     });
@@ -877,7 +882,7 @@ pub fn serve<L: Ledger + Clone + Send>(
             b.file.ino
         )
     });
-    let record = LockRecord {
+    let mut record = LockRecord {
         path: lock_file(paths, lead),
         text: format!("{remote}\n{MARKS}\n{binary}"),
     };
@@ -952,8 +957,9 @@ pub fn serve<L: Ledger + Clone + Send>(
             if let Some(installs) = installs.as_mut()
                 && in_flight.is_empty()
                 && (answered || installs.due())
+                && let Some(failed) = installs.move_onto_newer(paths, lead, &lock)
             {
-                installs.move_onto_newer(paths, lead, &lock);
+                record.failed(failed);
             }
             // Reopened each round: the lead can replace any folder on the way.
             if let Ok(requests) = Dir::open(paths.state_dir(), &["broker", lead, "requests"]) {
@@ -1000,17 +1006,14 @@ impl Installs<'_> {
 
     /// Re-execs the loopherd on PATH when it is another file than this
     /// broker runs and not one that already failed to take over. Returns
-    /// only when it didn't move, noting the lead's mailbox if it tried.
-    fn move_onto_newer(&mut self, paths: &Paths, lead: &str, lock: &Lock) {
+    /// only when it didn't move, noting the lead's mailbox and returning the
+    /// install if it tried.
+    fn move_onto_newer(&mut self, paths: &Paths, lead: &str, lock: &Lock) -> Option<FileId> {
         self.looked = Instant::now();
-        let Some(exe) = (self.follow.installed)() else {
-            return;
-        };
-        let Some(file) = FileId::of(&exe) else {
-            return;
-        };
+        let exe = (self.follow.installed)()?;
+        let file = FileId::of(&exe)?;
         if Some(file) == self.running || Some(file) == self.failed {
-            return;
+            return None;
         }
         let e = (self.follow.reexec)(&exe, lead, lock);
         self.failed = Some(file);
@@ -1022,6 +1025,7 @@ impl Installs<'_> {
         );
         let note = crate::report::Entry::new(SystemTime::now(), Body::Note { text });
         let _ = crate::report::append(&paths.state_dir().join("reports"), lead, &note);
+        Some(file)
     }
 }
 
@@ -1136,6 +1140,19 @@ impl LockRecord {
 
     fn clear(&self) {
         let _ = std::fs::write(&self.path, "");
+    }
+
+    /// Records `file` as the install this broker couldn't move onto, for doctor.
+    fn failed(&mut self, file: FileId) {
+        let mut text: String = self
+            .text
+            .lines()
+            .filter(|line| !line.starts_with(FAILED))
+            .map(|line| format!("{line}\n"))
+            .collect();
+        text.push_str(&format!("{FAILED}{} {}\n", file.dev, file.ino));
+        self.text = text;
+        self.write();
     }
 }
 
@@ -1364,9 +1381,14 @@ impl Broker<'_> {
             Some(other) if other != herd => Some(format!("{target} is in herd {other}; {reach}")),
             Some(_) if record.is_lead() => Some(format!("{target} is a lead; {reach}")),
             Some(_) if record.attended.is_some() && !matches!(op, Op::Read { .. }) => {
+                let what_remains = if record.retired {
+                    "it is retired, so its release is the shepherd's or the human's"
+                } else {
+                    "once merged, its done check reaps it, or the shepherd or the human retires it"
+                };
                 Some(format!(
                     "{target} is attended: the human works in its pane, so {lead} leaves it to them \
-                 until its merge (D112)"
+                 for its whole life; {what_remains} (D112)"
                 ))
             }
             Some(_) if record.may_be_lead() => Some(format!(
@@ -1787,10 +1809,57 @@ pub fn runnable_exe() -> Result<PathBuf> {
 }
 
 fn runnable(exe: PathBuf) -> PathBuf {
-    match exe.to_string_lossy().ends_with(" (deleted)") {
+    match exe.to_string_lossy().ends_with(DELETED) {
         true => PathBuf::from("loopherd"),
         false => exe,
     }
+}
+
+/// What Linux appends to `current_exe` once a reinstall renamed over the running file.
+const DELETED: &str = " (deleted)";
+
+/// Names the install a broker re-execed, as `<dev> <ino> <path>`, which the
+/// new image can't learn from its own once another install lands while it starts.
+const STARTED_FROM_ENV: &str = "LOOPHERD_BROKER_STARTED_FROM";
+
+/// Where a broker was started from.
+pub struct Origin {
+    /// The path it was started at, as it was before any reinstall.
+    pub path: PathBuf,
+    /// The install a moving broker re-execed, which may be a script that execs another.
+    pub moved_onto: Option<FileId>,
+}
+
+/// Where this broker was started from: the install a moving broker
+/// re-execed, else this binary. Call before any thread starts.
+pub fn origin() -> Option<Origin> {
+    let passed = std::env::var_os(STARTED_FROM_ENV);
+    // SAFETY: no thread runs yet to read the environment.
+    unsafe { std::env::remove_var(STARTED_FROM_ENV) };
+    let moved = passed.filter(|_| std::env::var_os(LOCK_FD_ENV).is_some());
+    if let Some(moved) = moved.as_deref().and_then(moved_from) {
+        return Some(moved);
+    }
+    let exe = std::env::current_exe().ok()?;
+    let path = match exe.to_string_lossy().strip_suffix(DELETED) {
+        Some(path) => path.into(),
+        None => exe,
+    };
+    Some(Origin {
+        path,
+        moved_onto: None,
+    })
+}
+
+fn moved_from(passed: &std::ffi::OsStr) -> Option<Origin> {
+    use std::os::unix::ffi::OsStrExt;
+    let mut fields = passed.as_bytes().splitn(3, |&b| b == b' ');
+    let mut number = || std::str::from_utf8(fields.next()?).ok()?.parse().ok();
+    let (dev, ino) = (number()?, number()?);
+    Some(Origin {
+        path: std::ffi::OsStr::from_bytes(fields.next()?).into(),
+        moved_onto: Some(FileId { dev, ino }),
+    })
 }
 
 fn start_with(
@@ -1905,27 +1974,34 @@ fn serving_once_started(
 /// Names the descriptor of the lock a broker hands the loopherd it re-execs.
 pub const LOCK_FD_ENV: &str = "LOOPHERD_BROKER_LOCK_FD";
 
-/// How long a new install has to answer `--version` before a broker moves onto it.
+/// How long a new install has to pass its startup check before a broker moves onto it.
 const PROBE_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// Replaces this process with `exe` serving `lead`, handing it `lock` so no
-/// client sees the lead without a broker. First runs `exe --version`, so a
-/// binary that is missing, can't run or exits at once leaves this one
-/// serving. Returns only when `exe` couldn't take over.
+/// client sees the lead without a broker. First runs `exe broker <lead>
+/// --check`, so a binary that is missing, can't run, or can't serve `lead`'s
+/// config leaves this one serving. Returns only when `exe` couldn't take over.
 pub fn reexec(exe: &Path, lead: &str, lock: &Lock) -> anyhow::Error {
     use std::os::unix::process::CommandExt;
-    if let Err(e) = probe(exe) {
+    let probed = FileId::of(exe);
+    if let Err(e) = probe(exe, lead) {
         return e;
     }
+    let Some(file) = probed.filter(|&file| FileId::of(exe) == Some(file)) else {
+        return anyhow!("{} changed during its startup check", exe.display());
+    };
     let fd = lock.as_raw_fd();
     // SAFETY: fcntl only changes close-on-exec on a descriptor `lock` keeps open.
     if unsafe { libc::fcntl(fd, libc::F_SETFD, 0) } != 0 {
         return anyhow!(std::io::Error::last_os_error()).context("hand over the broker's lock");
     }
-    let e = std::process::Command::new(exe)
+    let mut command = std::process::Command::new(exe);
+    command
         .args(["broker", lead])
-        .env(LOCK_FD_ENV, fd.to_string())
-        .exec();
+        .env(LOCK_FD_ENV, fd.to_string());
+    let mut origin = std::ffi::OsString::from(format!("{} {} ", file.dev, file.ino));
+    origin.push(exe);
+    let e = command.env(STARTED_FROM_ENV, origin).exec();
     // SAFETY: as above; children started later must not hold the lock.
     unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
     // A failed exec leaves SIGPIPE at its default, which Rust's runtime had ignored.
@@ -1934,27 +2010,46 @@ pub fn reexec(exe: &Path, lead: &str, lock: &Lock) -> anyhow::Error {
     anyhow!(e).context(format!("exec {}", exe.display()))
 }
 
-fn probe(exe: &Path) -> Result<()> {
+fn probe(exe: &Path, lead: &str) -> Result<()> {
     let mut child = std::process::Command::new(exe)
-        .arg("--version")
+        .args(["broker", lead, "--check"])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
         .spawn()
         .with_context(|| format!("run {}", exe.display()))?;
+    // Read aside: a child leaving its stderr to a process of its own must not block the broker.
+    let (said_tx, said_rx) = mpsc::channel();
+    if let Some(stderr) = child.stderr.take() {
+        std::thread::spawn(move || {
+            let mut said = String::new();
+            let _ = stderr.take(4096).read_to_string(&mut said);
+            let _ = said_tx.send(said);
+        });
+    }
     let given_up = Instant::now() + PROBE_TIMEOUT;
     loop {
         if let Some(status) = child.try_wait()? {
-            if !status.success() {
-                bail!("{} --version exited at once ({status})", exe.display());
+            if status.success() {
+                return Ok(());
             }
-            return Ok(());
+            let said = said_rx
+                .recv_timeout(Duration::from_millis(500))
+                .unwrap_or_default();
+            let said = match said.trim() {
+                "" => String::new(),
+                said => format!(": {said}"),
+            };
+            bail!(
+                "{} failed its startup check ({status}){said}",
+                exe.display()
+            );
         }
         if Instant::now() >= given_up {
             let _ = child.kill();
             let _ = child.wait();
             bail!(
-                "{} --version didn't answer within {}",
+                "{}'s startup check didn't finish within {}",
                 exe.display(),
                 humantime::format_duration(PROBE_TIMEOUT)
             );
@@ -2183,6 +2278,7 @@ const MARKS: &str = "marks";
 const VERSION: &str = "version ";
 const BINARY: &str = "binary ";
 const FILE: &str = "file ";
+const FAILED: &str = "failed ";
 
 /// A loopherd binary, which a broker records in its lock so a newer one can tell it is stale.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2238,6 +2334,19 @@ pub fn recorded_binary(paths: &Paths, lead: &str) -> Option<Binary> {
             dev: dev.parse().ok()?,
             ino: ino.parse().ok()?,
         },
+    })
+}
+
+/// The install `lead`'s broker last couldn't move onto, which it won't try again.
+pub fn failed_install(paths: &Paths, lead: &str) -> Option<FileId> {
+    let text = std::fs::read_to_string(lock_file(paths, lead)).ok()?;
+    let (dev, ino) = text
+        .lines()
+        .find_map(|line| line.strip_prefix(FAILED))?
+        .split_once(' ')?;
+    Some(FileId {
+        dev: dev.parse().ok()?,
+        ino: ino.parse().ok()?,
     })
 }
 
@@ -2763,7 +2872,8 @@ mod tests {
         world.add(grill("grill-1"));
         let serving = world.serve(telling_herdr());
         let why = "grill-1 is attended: the human works in its pane, so lead-h leaves it to them \
-                   until its merge (D112)";
+                   for its whole life; once merged, its done check reaps it, or the shepherd or \
+                   the human retires it (D112)";
 
         for op in [
             tell("grill-1", "hi"),
@@ -2799,6 +2909,35 @@ mod tests {
         );
 
         assert!(!world.ledger().entries().unwrap()["grill-1"].retired);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.calls(), 0);
+    }
+
+    #[test]
+    fn a_lead_s_broker_still_refuses_an_attended_member_once_it_is_retired() {
+        let world = World::new();
+        with_grill(&world);
+        let mut retired = grill("grill-1");
+        retired.retired = true;
+        world.add(retired);
+        let serving = world.serve(telling_herdr());
+
+        for op in [
+            retire_op("grill-1", true, false),
+            release_op("grill-1", false),
+        ] {
+            assert_eq!(
+                format!("{:#}", world.client().call(&op).unwrap_err()),
+                format!(
+                    "lead-h's broker refused {}: grill-1 is attended: the human works in its \
+                     pane, so lead-h leaves it to them for its whole life; it is retired, so its \
+                     release is the shepherd's or the human's (D112)",
+                    op.command()
+                )
+            );
+        }
+
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.calls(), 0);
@@ -4027,6 +4166,7 @@ mod tests {
             installed: &installed_now,
             reexec: &reexec,
             every: Duration::from_millis(20),
+            moved_onto: None,
         });
         let ledger = world.ledger();
         std::thread::scope(|scope| {
@@ -4788,6 +4928,10 @@ mod tests {
         world.add(g_retired);
         let own = checked_out(&repo, "ours");
         world.add(worker_at("b-ours", "h", &repo, &own));
+        let released = checked_out(&repo, "kept");
+        let mut retired = worker_at("b-kept", "h", &repo, &released);
+        retired.retired = true;
+        world.add(retired);
         let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
 
         for (n, worktree) in [("mine", &human_s), ("theirs", &g_s)] {
@@ -4801,10 +4945,12 @@ mod tests {
                 assert!(format!("{err:#}").ends_with(&why), "{n}: {err:#}");
             }
         }
-        let (out, _, code) = world.client().call(&add_branch("ours", true)).unwrap();
+        for n in ["ours", "kept"] {
+            let (out, _, code) = world.client().call(&add_branch(n, true)).unwrap();
 
-        assert_eq!(code, 0, "{out}");
-        assert!(out.lines().any(|l| l == "name b-ours"), "{out}");
+            assert_eq!(code, 0, "{n}: {out}");
+            assert!(out.lines().any(|l| l == format!("name b-{n}")), "{out}");
+        }
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.tabs().is_empty());
@@ -4851,24 +4997,31 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_s_feed_won_t_start_a_task_in_a_worktree_the_human_checked_out() {
+    fn a_lead_s_feed_won_t_start_a_task_in_a_worktree_the_human_or_another_herd_checked_out() {
         let world = World::new();
         let (_root, repo) = branch_herd(&world);
         let herd_file = world.paths.herds.join("h.toml");
         let text = std::fs::read_to_string(&herd_file).unwrap();
-        std::fs::write(&herd_file, text.replace("echo lead-h", "echo mine")).unwrap();
+        let source = text.replace("echo lead-h", "echo mine; echo theirs");
+        std::fs::write(&herd_file, source).unwrap();
         let human_s = checked_out(&repo, "mine");
+        let g_s = checked_out(&repo, "theirs");
+        let mut g_retired = worker_at("g-theirs", "g", &repo, &g_s);
+        g_retired.retired = true;
+        world.add(g_retired);
         let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
 
         let (out, _, code) = world.client().call(&feed("h")).unwrap();
 
         assert_eq!(code, 1, "{out}");
-        let refused = format!(
-            "error: mine: refused: adding b-mine would reuse worktree {}, which no ledger \
-             entry of herd h records",
-            human_s.display()
-        );
-        assert!(out.lines().any(|l| l == refused), "{out}");
+        for (n, worktree) in [("mine", &human_s), ("theirs", &g_s)] {
+            let refused = format!(
+                "error: {n}: refused: adding b-{n} would reuse worktree {}, which no \
+                 ledger entry of herd h records",
+                worktree.display()
+            );
+            assert!(out.lines().any(|l| l == refused), "{n}: {out}");
+        }
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.tabs().is_empty());
@@ -4913,26 +5066,32 @@ mod tests {
         serving.join().unwrap().0.unwrap();
     }
 
-    #[test]
-    fn a_lead_s_add_of_a_detached_worktree_named_like_its_lead_is_refused() {
-        let world = World::new();
-        let (_root, repo) = branch_herd(&world);
+    /// Adds herd h a `[template.d]` with a detached worktree slugged `{n}`,
+    /// and returns the dry-run add of it with `n`.
+    fn add_detached(world: &World, n: &str) -> Op {
         let herd_file = world.paths.herds.join("h.toml");
         let mut text = std::fs::read_to_string(&herd_file).unwrap();
         text.push_str(
             "[template.d]\nparams = [\"n\"]\nname = \"d-{n}\"\nworktree = \"{n}\"\nprompt = \"go\"\n",
         );
         std::fs::write(&herd_file, text).unwrap();
-        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
-        let detached = Op::Add {
+        Op::Add {
             herd: "h".into(),
             template: "d".into(),
-            params: vec!["lead-h".into()],
+            params: vec![n.into()],
             claude_args: vec![],
             dry_run: true,
             ready_timeout_secs: 60,
             no_focus: false,
-        };
+        }
+    }
+
+    #[test]
+    fn a_lead_s_add_of_a_detached_worktree_named_like_its_lead_is_refused() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let detached = add_detached(&world, "lead-h");
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
 
         let err = world.client().call(&detached).unwrap_err();
 
@@ -4944,6 +5103,69 @@ mod tests {
         assert!(format!("{err:#}").ends_with(&why), "{err:#}");
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_s_add_of_a_detached_worktree_won_t_reuse_one_the_human_checked_out() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let human_s = checked_out(&repo, "mine");
+        let detached = add_detached(&world, "mine");
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+        let err = world.client().call(&detached).unwrap_err();
+
+        let why = format!(
+            "adding d-mine would reuse worktree {}, which no ledger entry of herd h records",
+            human_s.display()
+        );
+        assert!(format!("{err:#}").ends_with(&why), "{err:#}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_s_add_won_t_reuse_a_worktree_a_live_entry_outside_its_herd_names_any_way() {
+        let links = tempfile::tempdir().unwrap();
+        for (holder, herd, recorded) in [
+            ("lh-loose", None, "as is"),
+            ("g-shared", Some("g"), "through a symlink"),
+            ("g-shared", Some("g"), "with a trailing slash"),
+        ] {
+            let world = World::new();
+            let (_root, repo) = branch_herd(&world);
+            let shared = checked_out(&repo, "shared");
+            let mut retired = worker_at("b-earlier", "h", &repo, &shared);
+            retired.retired = true;
+            world.add(retired);
+            let named = match recorded {
+                "through a symlink" => {
+                    let link = links.path().join("shared");
+                    std::os::unix::fs::symlink(&shared, &link).unwrap();
+                    link
+                }
+                "with a trailing slash" => PathBuf::from(format!("{}/", shared.display())),
+                _ => shared.clone(),
+            };
+            let mut live = worker_at(holder, "g", &repo, &named);
+            live.herd = herd.map(Into::into);
+            world.add(live);
+            let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+            let err = world
+                .client()
+                .call(&add_branch("shared", true))
+                .unwrap_err();
+
+            let of = herd.map_or("no herd's".into(), |h| format!("herd {h}'s"));
+            let why = format!(
+                "adding b-shared would reuse worktree {}, which {of} {holder} holds",
+                shared.display()
+            );
+            assert!(format!("{err:#}").ends_with(&why), "{recorded}: {err:#}");
+            world.retire("lead-h");
+            serving.join().unwrap().0.unwrap();
+        }
     }
 
     #[test]
@@ -5597,6 +5819,7 @@ mod tests {
             installed: &installed_now,
             reexec: &reexec,
             every: Duration::from_millis(50),
+            moved_onto: None,
         });
 
         let served = serve(&host, &world.ledger(), &world.paths, "lead-h", POLL, None);
