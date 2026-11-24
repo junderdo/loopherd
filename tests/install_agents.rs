@@ -74,6 +74,8 @@ impl Sandbox {
         let built = dir.path().join("built-loopherd");
         // Does nothing, setup included, so a run on a terminal asks nothing about config.toml.
         executable(&built, "#!/bin/sh\n");
+        // Stands in for herdr, so no run can reach the human's plugin registry.
+        executable(&fake_bin.join("herdr"), "#!/bin/sh\nexit 1\n");
         executable(
             &fake_bin.join("cargo"),
             format!(
@@ -138,6 +140,7 @@ impl Sandbox {
             .env("PATH", &self.path)
             .env("LOOPHERD_CONFIG_DIR", self.home.join(".config/loopherd"))
             .env("LOOPHERD_NO_SPLASH", "1")
+            .env("HERDR_SOCKET_PATH", self.home.join("no-herdr.sock"))
             .env_remove("CLAUDE_CONFIG_DIR");
     }
 

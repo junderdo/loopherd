@@ -96,6 +96,14 @@ pub enum Op {
         name: String,
         lines: usize,
     },
+    /// The herd file's `[lead] gate` commands, run on a commit pushed to
+    /// origin, merged with origin's default branch.
+    Gate {
+        rev: String,
+        /// A branch of origin's to merge instead of its default, as a stacked PR's base.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        base: Option<String>,
+    },
 }
 
 /// What an operation acts on, for the broker's reach rule.
@@ -160,6 +168,7 @@ impl Op {
             Op::Report { .. } => "report",
             Op::Status { .. } => "status",
             Op::Read { .. } => "read",
+            Op::Gate { .. } => "gate",
         }
     }
 
@@ -171,7 +180,9 @@ impl Op {
             | Op::Read { name, .. } => Reach::Member(name),
             Op::Feed { herd, .. } | Op::Add { herd, .. } => Reach::Herd(herd),
             // Status reads the herd the launch record names, never one a request does.
-            Op::RestartSelf | Op::Report { .. } | Op::Status { .. } => Reach::Lead,
+            Op::RestartSelf | Op::Report { .. } | Op::Status { .. } | Op::Gate { .. } => {
+                Reach::Lead
+            }
             Op::Retire { name, .. } | Op::Release { name, .. } => Reach::AnyMember(name),
         }
     }
@@ -191,6 +202,7 @@ impl Op {
             | Op::RestartSelf
             | Op::Report { .. } => Lane::Quick,
             Op::Status { .. } => Lane::Status,
+            Op::Gate { .. } => Lane::Gate,
         }
     }
 
@@ -208,6 +220,7 @@ impl Op {
             // Its settle timeout, with room for herdr and the member's view.
             Op::Restart { .. } => Duration::from_secs(300),
             Op::Retire { .. } | Op::Release { .. } => origin_wait(remote),
+            Op::Gate { .. } => GATE_WITHIN + origin_wait(remote),
             // Each member may take its ready timeout, then after_merge its own.
             Op::Feed { .. } => FEED_WITHIN,
             Op::Add {
@@ -288,6 +301,7 @@ impl Op {
             Op::Status {
                 all, json, color, ..
             } => status(ctx, *all, *json, *color, sink),
+            Op::Gate { rev, base } => gate(ctx, rev, base.as_deref(), sink),
             Op::Read { name, lines } => {
                 let read = crate::read::read(ctx.herdr, &*ctx.ledger, name, *lines)?;
                 // A reply drops empty output, so an empty screen prints nothing either way.
@@ -382,6 +396,58 @@ fn report(ctx: &mut Ctx, kind: Kind, text: &str, sink: &mut dyn Sink) -> Result<
         sink.err(&format!("loopherd report: warning: {e:#}"));
     }
     Ok(0)
+}
+
+/// How long each of a gate's commands may run.
+const GATE_COMMAND_TIMEOUT: Duration = Duration::from_secs(60 * 60);
+/// How long a lead waits on its gate's commands, past fetching and merging.
+const GATE_WITHIN: Duration = Duration::from_secs(4 * 60 * 60);
+
+/// Runs the lead's herd's gate on `rev` merged with origin's `base` branch,
+/// else its default branch, in a worktree of the lead's own; exit 1 when a command fails or the merge conflicts.
+fn gate(ctx: &mut Ctx, rev: &str, base: Option<&str>, sink: &mut dyn Sink) -> Result<i32> {
+    let lead = ctx.caller.lead.as_ref().context(
+        "gate runs in a lead's broker, from its pane; elsewhere run the checks directly",
+    )?;
+    let commands = crate::herd::lead_gate(ctx.paths, &lead.herd)?;
+    if commands.is_empty() {
+        bail!(
+            "refused: herd {} sets no [lead] gate, the commands to check a merge with; \
+             ask the human to add them",
+            lead.herd
+        );
+    }
+    let is_sha = (7..=40).contains(&rev.len()) && rev.bytes().all(|b| b.is_ascii_hexdigit());
+    if !is_sha {
+        bail!("refused: {rev:?} is not a commit sha");
+    }
+    let repo = crate::herd::repo(ctx.paths, &lead.herd)?;
+    let Some(sha) = crate::worktree::pushed_commit(&repo, rev)? else {
+        bail!(
+            "refused: {rev} is on none of origin's branches in {}; push it, then gate it",
+            repo.display()
+        );
+    };
+    let slug = format!("loopherd-gate-{}", lead.name);
+    let merged = crate::worktree::merge_with_base(&repo, &slug, &sha, base)?;
+    let checked = format!("gate {sha} merged with {} {}", merged.base, merged.base_sha);
+    if !merged.conflicts.is_empty() {
+        let files = merged.conflicts.join("\n");
+        sink.out(&format!(
+            "{checked}: failed: it doesn't merge cleanly; conflicts in:\n{files}"
+        ));
+        return Ok(1);
+    }
+    match crate::feed::run_commands(&commands, &merged.path, GATE_COMMAND_TIMEOUT) {
+        None => {
+            sink.out(&format!("{checked}: pass"));
+            Ok(0)
+        }
+        Some((why, tail)) => {
+            sink.out(&format!("{checked}: failed: {why}{tail}"));
+            Ok(1)
+        }
+    }
 }
 
 /// How long a lead waits on an operation that asks origin a few things in
@@ -575,7 +641,7 @@ fn retire(ctx: &mut Ctx, name: &str, close: bool, force: bool, sink: &mut dyn Si
         let record = crate::retire::retire(ctx.ledger, name, now, Outcome::Retired)?;
         sink.out(&format!("retired {name}"));
         // The lead's Claude may still be running on its settings.
-        for line in ctx.guard().forget_launch(name, false) {
+        for line in ctx.guard().forget_launch(&record, false) {
             sink.out(&line);
         }
         let warnings = crate::notify::forget_marks(&mailboxes, name)
@@ -830,8 +896,8 @@ pub struct Follow<'a> {
 /// Its herd comes from the record `loopherd lead` kept in the config dir,
 /// never from a request or the ledger.
 ///
-/// Requests run in three lanes, each one at a time: herd changes (feed,
-/// add, restart, retire, release), status, and everything else, so a long
+/// Requests run in four lanes, each one at a time: herd changes (feed,
+/// add, restart, retire, release), status, gates, and everything else, so a long
 /// feed holds up no tell, except while a restart drains the broker. A lane
 /// holds at most [`LANE_WAITING`] requests waiting and refuses more as busy.
 /// While its lead reads retired it refuses every request it hasn't started,
@@ -904,7 +970,7 @@ pub fn serve<L: Ledger + Clone + Send>(
     std::thread::scope(|scope| {
         let (done_tx, done) = mpsc::channel::<String>();
         let mut senders = vec![];
-        for _ in [Lane::Quick, Lane::Herd, Lane::Status] {
+        for _ in [Lane::Quick, Lane::Herd, Lane::Status, Lane::Gate] {
             let (tx, jobs) = mpsc::channel::<Job>();
             let (mut ledger, done_tx) = (ledger.clone(), done_tx.clone());
             let (broker, replies) = (&broker, &replies);
@@ -1049,6 +1115,7 @@ enum Lane {
     Quick = 0,
     Herd = 1,
     Status = 2,
+    Gate = 3,
 }
 
 impl Lane {
@@ -1057,6 +1124,7 @@ impl Lane {
             Lane::Quick => "quick requests",
             Lane::Herd => "herd changes",
             Lane::Status => "status",
+            Lane::Gate => "gates",
         };
         format!(
             "its queue for {queue} already holds {LANE_WAITING} waiting requests; ask again later"
@@ -6285,5 +6353,308 @@ mod tests {
 
         let live: usize = probing.into_iter().map(|p| p.join().unwrap()).sum();
         assert_eq!(live, 0);
+    }
+
+    /// A repo cloned from a bare origin, herd `h`'s, whose `[lead]` gates with `gate`.
+    fn gating_world(gate: &[&str]) -> (World, PathBuf) {
+        let world = World::new();
+        let repo = crate::worktree::testing::repo_with_origin(world.repos.path());
+        let text = format!(
+            "repo = {repo:?}\n[lead]\nprompt = \"go\"\nsandbox = \"prefer\"\ngate = {gate:?}\n"
+        );
+        std::fs::write(world.paths.herds.join("h.toml"), text).unwrap();
+        (world, repo)
+    }
+
+    /// Commits `file` on `branch` of the seed beside origin and pushes it there.
+    fn push_file(world: &World, branch: &str, file: &str) -> String {
+        push_file_on(world, branch, "main", file)
+    }
+
+    /// [`push_file`] on a `branch` cut from `from`, as a stacked PR's is.
+    fn push_file_on(world: &World, branch: &str, from: &str, file: &str) -> String {
+        use crate::worktree::testing::{git_in, head};
+        let seed = world.repos.path().join("seed");
+        let origin = world.repos.path().join("origin.git");
+        git_in(&seed, &["checkout", "--quiet", "-B", branch, from]);
+        std::fs::write(seed.join(file), format!("{file}\n")).unwrap();
+        git_in(&seed, &["add", file]);
+        crate::worktree::testing::commit(&seed, file);
+        git_in(
+            &seed,
+            &["push", "--quiet", origin.to_str().unwrap(), branch],
+        );
+        let sha = head(&seed);
+        git_in(&seed, &["checkout", "--quiet", "main"]);
+        sha
+    }
+
+    fn gate(rev: &str) -> Op {
+        Op::Gate {
+            rev: rev.into(),
+            base: None,
+        }
+    }
+
+    fn gate_onto(rev: &str, base: &str) -> Op {
+        Op::Gate {
+            rev: rev.into(),
+            base: Some(base.into()),
+        }
+    }
+
+    #[test]
+    fn a_lead_gates_a_pushed_head_merged_with_origin_s_moved_base() {
+        let (world, _) = gating_world(&["test -f from-pr", "test -f from-main"]);
+        let pr = push_file(&world, "feat/x", "from-pr");
+        let base = push_file(&world, "main", "from-main");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (out, err, code) = world.client().call(&gate(&pr[..12])).unwrap();
+
+        assert_eq!(
+            (out.as_str(), err.as_str(), code),
+            (
+                format!("gate {pr} merged with origin/main {base}: pass").as_str(),
+                "",
+                0
+            )
+        );
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_failing_gate_names_its_command_and_the_output_s_tail() {
+        let (world, _) =
+            gating_world(&["true", "echo checking; echo broke >&2; exit 3", "touch ran"]);
+        let pr = push_file(&world, "feat/x", "from-pr");
+        let base = crate::worktree::testing::head_of(&world.repos.path().join("seed"), "main");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (out, _, code) = world.client().call(&gate(&pr)).unwrap();
+
+        assert_eq!(code, 1);
+        assert_eq!(
+            out,
+            format!(
+                "gate {pr} merged with origin/main {base}: failed: \
+                 `echo checking; echo broke >&2; exit 3` exit 3\nchecking\nbroke"
+            )
+        );
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_head_that_conflicts_with_the_base_fails_its_gate_unrun() {
+        let (world, repo) = gating_world(&["touch ran"]);
+        let pr = push_file(&world, "feat/x", "same");
+        let seed = world.repos.path().join("seed");
+        std::fs::write(seed.join("same"), "other\n").unwrap();
+        crate::worktree::testing::git_in(&seed, &["add", "same"]);
+        crate::worktree::testing::commit(&seed, "same, differently");
+        let origin = world.repos.path().join("origin.git");
+        crate::worktree::testing::git_in(
+            &seed,
+            &["push", "--quiet", origin.to_str().unwrap(), "main"],
+        );
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (out, _, code) = world.client().call(&gate(&pr)).unwrap();
+
+        assert_eq!(code, 1);
+        assert!(
+            out.ends_with(": failed: it doesn't merge cleanly; conflicts in:\nsame"),
+            "{out}"
+        );
+        let worktree = crate::worktree::worktree_path(&repo, "loopherd-gate-lead-h");
+        assert!(!worktree.join("ran").exists());
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_gate_refuses_a_rev_not_on_origin_and_makes_no_worktree() {
+        let (world, repo) = gating_world(&["touch ran"]);
+        std::fs::write(repo.join("local"), "").unwrap();
+        crate::worktree::testing::git_in(&repo, &["add", "local"]);
+        crate::worktree::testing::commit(&repo, "never pushed");
+        let local = crate::worktree::testing::head(&repo);
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        for rev in [local.as_str(), "deadbeefdeadbeef", "HEAD", "--help"] {
+            let refused = world.client().call(&gate(rev)).unwrap_err();
+            assert!(
+                format!("{refused:#}").contains("refused: "),
+                "{rev}: {refused:#}"
+            );
+        }
+
+        let worktrees = crate::worktree::testing::worktree_list(&repo);
+        assert_eq!(worktrees.matches("worktree ").count(), 1, "{worktrees}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_herd_with_no_gate_refuses_one() {
+        let (world, _) = gating_world(&[]);
+        let pr = push_file(&world, "feat/x", "from-pr");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let refused = world.client().call(&gate(&pr)).unwrap_err();
+
+        assert!(
+            format!("{refused:#}").contains("refused: herd h sets no [lead] gate"),
+            "{refused:#}"
+        );
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_refused_gate_leaves_origin_s_stale_branches_alone() {
+        let (world, repo) = gating_world(&["true"]);
+        let origin = world.repos.path().join("origin.git");
+        crate::worktree::testing::git_in(&origin, &["branch", "-D", "feature/existing"]);
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        world.client().call(&gate("deadbeefdeadbeef")).unwrap_err();
+
+        assert!(
+            crate::worktree::testing::git(
+                &repo,
+                &["rev-parse", "--verify", "origin/feature/existing"]
+            )
+            .is_ok()
+        );
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_gate_reuses_its_worktree_and_recovers_one_deleted_by_hand() {
+        let (world, repo) = gating_world(&["test -f from-pr", "test ! -f stray"]);
+        let failing = push_file(&world, "feat/a", "other");
+        let passing = push_file(&world, "feat/b", "from-pr");
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let worktree = crate::worktree::worktree_path(&repo, "loopherd-gate-lead-h");
+
+        let (_, _, first) = world.client().call(&gate(&failing)).unwrap();
+        std::fs::write(worktree.join("stray"), "").unwrap();
+        let (_, _, second) = world.client().call(&gate(&passing)).unwrap();
+        std::fs::remove_dir_all(&worktree).unwrap();
+        let (out, _, third) = world.client().call(&gate(&passing)).unwrap();
+
+        assert_eq!((first, second, third), (1, 0, 0), "{out}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_gate_won_t_take_over_a_branch_s_worktree_at_its_path() {
+        let (world, repo) = gating_world(&["true"]);
+        let pr = push_file(&world, "feat/x", "from-pr");
+        let worktree = crate::worktree::worktree_path(&repo, "loopherd-gate-lead-h");
+        crate::worktree::testing::git_in(
+            &repo,
+            &[
+                "worktree",
+                "add",
+                "--quiet",
+                "-b",
+                "loopherd/gate-lead-h",
+                worktree.to_str().unwrap(),
+            ],
+        );
+        std::fs::write(worktree.join("work"), "").unwrap();
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let refused = world.client().call(&gate(&pr)).unwrap_err();
+
+        assert!(format!("{refused:#}").contains("refused: "), "{refused:#}");
+        assert!(worktree.join("work").exists());
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    /// Pushes a commit on `branch`, cut from `from`, writing each file with its text.
+    fn push_files(world: &World, branch: &str, from: &str, files: &[(&str, &str)]) -> String {
+        use crate::worktree::testing::{git_in, head};
+        let seed = world.repos.path().join("seed");
+        let origin = world.repos.path().join("origin.git");
+        git_in(&seed, &["checkout", "--quiet", "-B", branch, from]);
+        for (file, text) in files {
+            std::fs::write(seed.join(file), text).unwrap();
+            git_in(&seed, &["add", file]);
+        }
+        crate::worktree::testing::commit(&seed, branch);
+        git_in(
+            &seed,
+            &["push", "--quiet", origin.to_str().unwrap(), branch],
+        );
+        let sha = head(&seed);
+        git_in(&seed, &["checkout", "--quiet", "main"]);
+        sha
+    }
+
+    #[test]
+    fn a_gate_drops_a_file_an_earlier_gate_s_checkout_ignored_and_its_own_doesn_t() {
+        let (world, _) = gating_world(&["test ! -f generated", "touch generated"]);
+        let ignoring = push_files(&world, "feat/a", "main", &[(".gitignore", "generated\n")]);
+        let plain = push_file(&world, "feat/b", "from-pr");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (_, _, first) = world.client().call(&gate(&ignoring)).unwrap();
+        let (out, _, second) = world.client().call(&gate(&plain)).unwrap();
+
+        assert_eq!((first, second), (0, 0), "{out}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_stacked_head_gates_against_the_base_branch_it_names() {
+        let (world, _) = gating_world(&["test -f parent", "test ! -f from-main"]);
+        let parent = push_file(&world, "feat/parent", "parent");
+        let child = push_file_on(&world, "feat/child", "feat/parent", "child");
+        push_file(&world, "main", "from-main");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        let (out, _, code) = world
+            .client()
+            .call(&gate_onto(&child, "feat/parent"))
+            .unwrap();
+
+        assert_eq!(
+            (out, code),
+            (
+                format!("gate {child} merged with origin/feat/parent {parent}: pass"),
+                0
+            )
+        );
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_gate_refuses_a_base_origin_has_no_branch_for_and_makes_no_worktree() {
+        let (world, repo) = gating_world(&["true"]);
+        let pr = push_file(&world, "feat/x", "from-pr");
+        let serving = world.serve(FakeHerdr::new(&[]));
+
+        for base in ["feat/gone", "HEAD", "--help", "x"] {
+            let refused = world.client().call(&gate_onto(&pr, base)).unwrap_err();
+            assert!(
+                format!("{refused:#}").contains(&format!("refused: origin has no branch {base}")),
+                "{base}: {refused:#}"
+            );
+        }
+
+        let worktrees = crate::worktree::testing::worktree_list(&repo);
+        assert_eq!(worktrees.matches("worktree ").count(), 1, "{worktrees}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
     }
 }

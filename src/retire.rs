@@ -265,7 +265,7 @@ pub fn retire_and_close(
     };
     // Another session's herdr can't see the lead's tab, so it can't tell it has ended.
     let here = record.socket.is_none() || record.socket == herdr.socket();
-    out.extend(guard.forget_launch(name, here && tab_open.is_none()));
+    out.extend(guard.forget_launch(&record, here && tab_open.is_none()));
     if let Some(path) = &record.worktree {
         if let Some(other) = other_user(ledger, name, path)? {
             out.push(format!("kept {}: in use by {other}", path.display()));
@@ -735,7 +735,7 @@ mod tests {
 
     use super::*;
     use crate::herdr::fake::{FAKE_SOCKET, FakeHerdr};
-    use crate::ledger::{Attended, MemLedger, Process};
+    use crate::ledger::{Attended, MemLedger, Process, Role};
     use crate::process::{CLAUDE, FakeProcs};
     use crate::spawn::{SpawnRequest, spawn};
     use crate::worktree::testing::{
@@ -2027,6 +2027,74 @@ mod tests {
             )
         );
         assert!(worktree_list(&repo).contains("feat-new"));
+    }
+
+    /// Closes `lead-h`, whose tab is gone, after a role-`role` entry replaced
+    /// a retired lead of that name. Returns the launch files left.
+    fn close_over_a_retired_lead(role: Option<Role>) -> Vec<&'static str> {
+        let root = tempfile::tempdir().unwrap();
+        let config = root.path().join("loopherd");
+        let sandbox = config.join("sandbox");
+        std::fs::create_dir_all(&sandbox).unwrap();
+        let files = ["lead-h.json", "lead-h.mcp.json", "lead-h.lead.json"];
+        for file in files {
+            std::fs::write(sandbox.join(file), "{}").unwrap();
+        }
+        let mut ledger = MemLedger::default();
+        ledger
+            .record(AgentRecord {
+                role: Some(Role::Lead),
+                retired: true,
+                retired_at: Some("2026-10-30T00:00:00Z".into()),
+                created: "2026-10-29T00:00:00Z".into(),
+                ..record("lead-h")
+            })
+            .unwrap();
+        ledger
+            .record(AgentRecord {
+                role,
+                ..record("lead-h")
+            })
+            .unwrap();
+        let guard = Guard::new(crate::herd::Paths::under(&config), None);
+        let mut out = vec![];
+
+        retire_and_close(
+            &two_workspaces(),
+            &FakeProcs::default(),
+            &mut ledger,
+            &guard,
+            "lead-h",
+            halloween_noon(),
+            Outcome::Retired,
+            &root.path().join("reports"),
+            None,
+            None,
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(ledger.0["lead-h"].earlier.len(), 1, "{out:?}");
+        files
+            .into_iter()
+            .filter(|file| sandbox.join(file).exists())
+            .collect()
+    }
+
+    #[test]
+    fn closing_a_member_that_replaced_a_retired_lead_of_its_name_leaves_the_leads_files() {
+        assert_eq!(
+            close_over_a_retired_lead(None),
+            ["lead-h.json", "lead-h.mcp.json", "lead-h.lead.json"]
+        );
+    }
+
+    #[test]
+    fn closing_a_lead_whose_tab_is_gone_leaves_only_its_lead_record() {
+        assert_eq!(
+            close_over_a_retired_lead(Some(Role::Lead)),
+            ["lead-h.lead.json"]
+        );
     }
 
     #[test]
