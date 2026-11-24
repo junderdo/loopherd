@@ -141,6 +141,8 @@ pub struct FakeHerdr {
     pub fail_close_tab: bool,
     pub fail_prompt: bool,
     pub fail_focus: bool,
+    /// `focus` fails for this one pane.
+    pub fail_focus_of: Option<String>,
     pub fail_dock: bool,
     pub fail_wait: bool,
     pub fail_visible_text: bool,
@@ -194,6 +196,7 @@ impl FakeHerdr {
             fail_close_tab: false,
             fail_prompt: false,
             fail_focus: false,
+            fail_focus_of: None,
             fail_dock: false,
             fail_wait: false,
             fail_visible_text: false,
@@ -933,7 +936,7 @@ impl Herdr for FakeHerdr {
         if self.is_down() {
             bail!("herdr server not running");
         }
-        if self.fail_focus {
+        if self.fail_focus || self.fail_focus_of.as_deref() == Some(pane_id) {
             bail!("focus failed");
         }
         if !self

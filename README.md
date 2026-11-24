@@ -355,9 +355,10 @@ table and the rest are what `init` writes; start from its output or from
 A template with `attended = true` starts a member the human sits in, such
 as a grill tied to a card (D112). Only `add` starts one: it focuses the new
 pane (`--no-focus` skips that), records the caller's pane and fills a
-`{shepherd_pane}` placeholder with it, and `retire --close` focuses that pane
-again if the human is still in the member's (`herdr agent focus` takes only
-an agent's pane, so run `add` from one). It holds no `max` slot, is never
+`{shepherd_pane}` placeholder with it (`herdr agent focus` takes only an
+agent's pane, so run `add` from one). If the human is still in the member's
+pane, `retire --close` focuses the live shepherd's pane, as the view's `S`
+finds it, else that recorded pane, else warns and leaves focus to herdr. It holds no `max` slot, is never
 asked to hand off, and is left out of `stats`. A watch wakes on its `gone`
 alone, and a lead's watch also on its `merged`.
 

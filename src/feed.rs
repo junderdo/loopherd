@@ -495,6 +495,7 @@ fn reap(
                 let now = SystemTime::now();
                 match retire_and_close(
                     herdr,
+                    req.procs,
                     ledger,
                     &guard,
                     name,

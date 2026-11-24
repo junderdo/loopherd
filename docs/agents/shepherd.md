@@ -171,6 +171,10 @@ Done) then close its pane, worktree and branch.
 Neither path needs the tab ID: the reap finds grill-<n>'s tab from its record.
 If the PR reads anything but MERGED, close nothing out.
 
+Closing a grill tab by hand (`herdr tab close`) while the human is in it
+lets herdr focus the next tab, often a worker's. Focus your own pane first:
+`herdr agent focus "$HERDR_PANE_ID"`. The reap does this itself.
+
 ## Lead
 
 [examples/loopherd-cards-lead.toml](../examples/loopherd-cards-lead.toml) is

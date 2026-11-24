@@ -501,6 +501,10 @@ impl Guard {
         Guard { paths, caller }
     }
 
+    pub fn state_dir(&self) -> &Path {
+        self.paths.state_dir()
+    }
+
     /// Removes a retired lead's MCP config, and its settings once `ended`
     /// says its Claude has, so a running Claude keeps its sandbox; a
     /// sandboxed worker's settings, MCP config and kept record, once ended. A lead caller
