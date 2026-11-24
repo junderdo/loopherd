@@ -495,7 +495,13 @@ fn run_from_the_installed_binary_it_doesnt_say_which() {
     releases.latest("v0.2.0");
     releases.publish("v0.2.0");
     fs::create_dir_all(releases.installed().parent().unwrap()).unwrap();
-    fs::copy(env!("CARGO_BIN_EXE_loopherd"), releases.installed()).unwrap();
+    // Copied by a child, so no test's fork inherits it open for writing (ETXTBSY).
+    let copied = Command::new("cp")
+        .arg(env!("CARGO_BIN_EXE_loopherd"))
+        .arg(releases.installed())
+        .status()
+        .unwrap();
+    assert!(copied.success());
 
     let out = releases.run_as(&releases.installed(), &[], &releases.path());
 
