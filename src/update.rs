@@ -230,8 +230,15 @@ fn update_source(
     }
     writeln!(out, "{old} → {new}, {commits}")?;
     say_which_loopherd(places, out)?;
+    // Not a refusal: a pull can fail partway, after rewriting some files.
     git.output(&["pull", "-q", "--ff-only", "origin", &default])
-        .map_err(|e| refuse(format!("{e:#}")))?;
+        .map_err(|e| {
+            anyhow!(
+                "{e:#}; the checkout {} may be partly updated: check `git status` there, \
+                 and `git checkout -- .` restores it",
+                checkout.display()
+            )
+        })?;
     let status = Command::new(checkout.join("scripts/install"))
         .arg("--update")
         .current_dir(checkout)

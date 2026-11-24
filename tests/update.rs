@@ -962,3 +962,24 @@ fn check_behind_on_another_branch_names_why_update_would_refuse() {
         stdout(&out)
     );
 }
+
+#[test]
+fn a_pull_that_fails_is_a_failure_saying_the_tree_may_be_changed_not_a_refusal() {
+    let source = Source::new();
+    let upstream = source.upstream();
+    fs::write(upstream.join("new.txt"), "theirs").unwrap();
+    source.git(&upstream, &["add", "new.txt"]);
+    source.git(&upstream, &["commit", "-q", "-m", "adds new.txt"]);
+    source.git(&upstream, &["push", "-q", "origin", "main"]);
+    fs::write(source.checkout().join("new.txt"), "mine").unwrap();
+
+    let out = source.run(&[]);
+
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    let stderr = stderr(&out);
+    assert!(!stderr.contains("refused"), "{stderr}");
+    assert!(stderr.contains("git pull"), "{stderr}");
+    assert!(stderr.contains("may be"), "{stderr}");
+    assert!(stderr.contains("git status"), "{stderr}");
+    assert_eq!(source.log(), "");
+}
