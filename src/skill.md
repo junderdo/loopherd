@@ -701,7 +701,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   it when the sandbox can't start at all. What still gets past the sandbox:
   workers run unsandboxed unless the herd's `[worker] sandbox` turns
   theirs on, so a lead can have one act for it (a `credentials` lead
-  starts only with `[worker] sandbox = "require"`), and most of
+  starts only with `[worker] sandbox = "require"`, and its workers are
+  refused for loosened settings or args under either mode), and most of
   the state dir stays writable to it. Set `prefer` only
   when the human says so; doctor names those herds and leads.
 - **Change a herd file's values** with `loopherd herd set <herd> <key>

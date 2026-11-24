@@ -518,16 +518,19 @@ enum Command {
         /// herdr and config checks still run.
         herd: Option<String>,
     },
-    /// Bring a release install (the one-line installer's) up to date by
-    /// running the target release's own install.sh, as install.toml in the
-    /// config dir records it. Never moves to an older release unless
-    /// --version names it; replaces ~/.local/bin/loopherd.
+    /// Bring loopherd up to date the way install.toml in the config dir says
+    /// it was installed. A release install runs the target release's own
+    /// install.sh, never moving to an older release unless --version names
+    /// it. A source install fast-forwards its checkout's default branch and
+    /// runs scripts/install --update, refusing a dirty tree or another branch.
+    /// Either replaces ~/.local/bin/loopherd.
     Update {
-        /// Only report whether a newer release is out: exits 0 up to date,
-        /// 1 behind, 2 when it couldn't check.
+        /// Only report whether a newer release or commits are out: exits 0 up
+        /// to date, 1 behind, 2 when it couldn't check.
         #[arg(long, conflicts_with = "version")]
         check: bool,
-        /// Install this release, older or the current one included.
+        /// Install this release, older or the current one included; release
+        /// installs only.
         #[arg(long, value_name = "vX.Y.Z")]
         version: Option<String>,
     },

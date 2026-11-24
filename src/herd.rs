@@ -1028,6 +1028,16 @@ pub fn merge_guard(paths: &Paths, herd: &str) -> Result<Option<MergeGuard>> {
     Ok((!merge).then_some(lead.merge_guard))
 }
 
+/// Whether `herd`'s lead has `merge` off and guards it by credentials, so its
+/// workers are confined from the human's. A broken `config.toml`, which
+/// `herds` and doctor report, counts as merge off, keeping the confinement.
+pub fn guards_by_credentials(paths: &Paths, herd: &str) -> Result<bool> {
+    let file = load(&paths.herds, herd).context("herd")?;
+    Ok(file
+        .lead
+        .is_some_and(|lead| lead.guards_by_credentials(paths)))
+}
+
 /// The repo whose merges the human hears of while `herd`'s lead runs: one
 /// whose `[lead]` has `merge` off and guards it by hook; else `None`.
 pub fn merge_alerts(paths: &Paths, herd: &str) -> Result<Option<PathBuf>> {
@@ -1071,6 +1081,11 @@ fn lead_defaults(paths: &Paths) -> Result<SwitchValues> {
 }
 
 impl LeadFile {
+    fn guards_by_credentials(&self, paths: &Paths) -> bool {
+        let defaults = lead_defaults(paths).unwrap_or_default();
+        !self.switches().over(&defaults).merge && self.merge_guard == MergeGuard::Credentials
+    }
+
     fn switches(&self) -> SwitchValues {
         SwitchValues {
             merge: self.merge,
@@ -1271,12 +1286,7 @@ fn check(herd: &str, text: &str, paths: &Paths, fix: Fix) -> Result<HerdFile> {
         let prompt = read_prompt(&lead.prompt, &lead.prompt_file, paths);
         prompt.and_then(|p| check_lead_prompt(&p)).context("lead")?;
         check_mcp_servers(&lead.mcp_servers).context("lead")?;
-        // A broken config.toml is reported on its own; judge the herd with merge off.
-        let merge = lead
-            .switches()
-            .over(&lead_defaults(paths).unwrap_or_default())
-            .merge;
-        let credentials = !merge && lead.merge_guard == MergeGuard::Credentials;
+        let credentials = lead.guards_by_credentials(paths);
         if credentials && lead.unix_sockets == Some(UnixSockets::All) {
             bail!(
                 "lead: can't start with merge_guard = \"credentials\": {}",

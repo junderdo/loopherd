@@ -157,7 +157,8 @@ agents_pick() {
   fi
 }
 
-# Usage: offer_agents <ask|--with-agents|--no-extras> <source dir> <agents dir> <ledger>
+# Usage: offer_agents <ask|--with-agents|--no-extras|--update> <source dir> <agents dir> <ledger>
+# --update refreshes only the agent types still in the agents dir that the ledger says loopherd installed.
 offer_agents() {
   local extras=$1 name answer
   agents_src=$2 agents_dir=$3 agents_ledger=$4
@@ -165,6 +166,14 @@ offer_agents() {
   agents_resolve_dir
   agents_tmp=$(mktemp -d)
   trap 'rm -rf "$agents_tmp"' EXIT
+  if [[ "$extras" == --update ]]; then
+    for name in "${agent_names[@]}"; do
+      agents_pick "$name"
+      [[ -z "$(agents_recorded "$pick_target")" || ! (-e "$pick_target" || -L "$pick_target") ]] || agents_place "$name" "$pick_want" "$pick_target" "$pick_agent" "$pick_can_alias"
+    done
+    rm -rf "$agents_tmp"
+    return 0
+  fi
   local overlaps=() installed=1
   for name in "${agent_names[@]}"; do
     agents_pick "$name"
