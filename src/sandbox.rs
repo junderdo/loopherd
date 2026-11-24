@@ -1869,6 +1869,26 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 /// Lead `name`'s settings, from its herd file alone: its worktree is where
 /// `lead` puts it in the herd's repo, whatever the ledger says.
 fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
+    settings_on(paths, name, herd, &THIS_MACHINE)
+}
+
+/// The machine a credentials member is confined on. Unit tests run under a
+/// fake home, so the runner's real XDG dirs and git config stay out.
+pub const THIS_MACHINE: crate::credentials::Machine<'static> = crate::credentials::Machine {
+    env: &|name| (!cfg!(test)).then(|| std::env::var_os(name)).flatten(),
+    mounts: &|| std::fs::read("/proc/mounts"),
+    credential_helpers: &|home| match cfg!(test) {
+        true => String::new(),
+        false => crate::credentials::git_credential_helpers(home),
+    },
+};
+
+fn settings_on(
+    paths: &Paths,
+    name: &str,
+    herd: &str,
+    machine: &crate::credentials::Machine,
+) -> Result<Value> {
     let (switches, _) = herd::lead_sandbox(paths, herd)?;
     let repo = herd::repo(paths, herd)?;
     let config = paths.config_dir();
@@ -1982,6 +2002,7 @@ fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
             herd,
             &mut settings,
             [crate::broker::dir(paths)],
+            machine,
         )?;
     }
     Ok(settings)
@@ -1996,21 +2017,9 @@ pub fn confine_credentials(
     herd: &str,
     settings: &mut Value,
     readable: impl IntoIterator<Item = PathBuf>,
+    machine: &crate::credentials::Machine,
 ) -> Result<()> {
-    let mounts = match std::fs::read("/proc/mounts") {
-        Ok(bytes) => String::from_utf8_lossy(&bytes).into_owned(),
-        Err(e) if e.kind() == ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(credentials_refusal(
-                name,
-                &format!("its Windows drives can't be found to hide: read /proc/mounts: {e}"),
-            ));
-        }
-    };
-    // Unit tests run under a fake home, so the runner's real XDG dirs would leak in;
-    // credentials' own tests cover the dirs the env moves.
-    let env = |name: &str| (!cfg!(test)).then(|| std::env::var_os(name)).flatten();
-    let confined = crate::credentials::confined(paths, herd, &env, &mounts)
+    let confined = crate::credentials::confined(paths, herd, machine)
         .map_err(|e| credentials_refusal(name, &format!("{e:#}")))?;
     let filesystem = &mut settings["sandbox"]["filesystem"];
     // The file tools run outside the sandbox, so each path is denied to both.
@@ -2082,7 +2091,8 @@ pub fn entries_but(dir: &Path, skip: &str) -> Result<Vec<(PathBuf, bool)>> {
 
 /// `settings` without the denies naming paths in `<state>/broker/` and
 /// `<state>/handoffs/` one by one, which change as agents and herds come and
-/// go, not with the switches.
+/// go, nor the copies Claude Code leaves beside `.claude.json`, which come as
+/// it runs; neither changes with the switches.
 fn switch_settings(settings: &Value, paths: &Paths) -> Value {
     let dirs = ["broker", "handoffs"]
         .map(|dir| format!("Edit(/{}/", paths.state_dir().join(dir).display()));
@@ -2092,9 +2102,18 @@ fn switch_settings(settings: &Value, paths: &Paths) -> Value {
                 .is_some_and(|rest| !rest.trim_end_matches("/**)").contains('*'))
         })
     };
+    let copy = |path: &str| {
+        Path::new(path.trim_end_matches(')'))
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(".claude.json."))
+    };
     let mut settings = settings.clone();
     if let Some(deny) = settings["permissions"]["deny"].as_array_mut() {
-        deny.retain(|rule| !rule.as_str().is_some_and(named));
+        deny.retain(|rule| !rule.as_str().is_some_and(|rule| named(rule) || copy(rule)));
+    }
+    if let Some(deny_read) = settings["sandbox"]["filesystem"]["denyRead"].as_array_mut() {
+        deny_read.retain(|path| !path.as_str().is_some_and(copy));
     }
     settings
 }
@@ -2433,6 +2452,84 @@ mod tests {
             let file = paths.config_dir().join("sandbox").join(file);
             assert!(!file.exists(), "{} was written", file.display());
         }
+    }
+
+    /// Lead `lead-h` of credentials herd `h`, with its key and token, its home under `root`.
+    fn credentials_lead(root: &Path) -> Paths {
+        let mut paths = Paths::under(root);
+        paths.home = root.join("home");
+        std::fs::create_dir_all(&paths.home).unwrap();
+        let repo = root.join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        crate::worktree::testing::git(&repo, &["init", "--quiet"]).unwrap();
+        let url = "https://github.com/acme/widgets.git";
+        crate::worktree::testing::git(&repo, &["remote", "add", "origin", url]).unwrap();
+        std::fs::create_dir_all(&paths.herds).unwrap();
+        std::fs::write(
+            paths.herds.join("h.toml"),
+            format!(
+                "repo = {repo:?}\nworkspace = \"w1\"\n[lead]\nprompt = \"go\"\n\
+                 merge_guard = \"credentials\"\n[worker]\nsandbox = \"require\"\n"
+            ),
+        )
+        .unwrap();
+        let credentials = paths.config_dir().join("credentials");
+        std::fs::create_dir_all(&credentials).unwrap();
+        std::fs::write(credentials.join("h.key"), "a private key\n").unwrap();
+        std::fs::write(credentials.join("h.token"), "github_pat_1\n").unwrap();
+        paths
+    }
+
+    #[test]
+    fn a_credentials_leads_settings_hide_the_windows_drives_its_machine_mounts() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = credentials_lead(root.path());
+        let machine = crate::credentials::Machine {
+            env: &|_| None,
+            mounts: &|| Ok(b"Z: /mnt/zz drvfs rw 0 0\n".to_vec()),
+            credential_helpers: &|_| String::new(),
+        };
+
+        let settings = settings_on(&paths, "lead-h", "h", &machine).unwrap();
+
+        let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap();
+        assert!(deny_read.contains(&json!("/mnt/zz")), "{deny_read:?}");
+        let deny = settings["permissions"]["deny"].as_array().unwrap();
+        assert!(deny.contains(&json!("Read(//mnt/zz/**)")), "{deny:?}");
+    }
+
+    #[test]
+    fn a_claude_json_copy_made_after_the_settings_isnt_a_switch_change() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = credentials_lead(root.path());
+        std::fs::write(paths.home.join(".claude.json.tmp.1.ab"), "{}").unwrap();
+        let machine = crate::credentials::Machine {
+            env: &|_| None,
+            mounts: &|| Ok(vec![]),
+            credential_helpers: &|_| String::new(),
+        };
+        let built = settings_on(&paths, "lead-h", "h", &machine).unwrap();
+
+        std::fs::write(paths.home.join(".claude.json.tmp.2.cd"), "{}").unwrap();
+        let current = settings_on(&paths, "lead-h", "h", &machine).unwrap();
+
+        assert_ne!(built, current, "the new copy is denied");
+        assert_eq!(
+            switch_settings(&built, &paths),
+            switch_settings(&current, &paths)
+        );
+    }
+
+    #[test]
+    fn this_machines_mounts_are_read_from_proc() {
+        let read = |m: &crate::credentials::Machine| (m.mounts)().map_err(|e| e.kind());
+
+        assert_eq!(
+            read(&THIS_MACHINE),
+            std::fs::read("/proc/mounts").map_err(|e| e.kind())
+        );
     }
 
     #[test]

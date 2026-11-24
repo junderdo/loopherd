@@ -387,7 +387,12 @@ enum Command {
     RestartWait { name: String },
     /// The detached broker `lead` and `revive` start for a lead (D98).
     #[command(hide = true)]
-    Broker { lead: String },
+    Broker {
+        lead: String,
+        /// Runs the startup checks a broker for <LEAD> would, then exits.
+        #[arg(long)]
+        check: bool,
+    },
     /// Put lead <LEAD>'s broker on this loopherd binary, as after a merge that
     /// changes the broker: asks the running one to stop once its request in
     /// flight is answered, then starts a new one, which serves the requests
@@ -856,7 +861,7 @@ fn main() -> ExitCode {
         } => ("restart", run_restart(&name, force)),
         Command::Restart { .. } => ("restart", run_restart_self()),
         Command::RestartWait { name } => ("restart-wait", run_restart_wait(&name)),
-        Command::Broker { lead } => ("broker", run_broker(&lead)),
+        Command::Broker { lead, check } => ("broker", run_broker(&lead, check)),
         Command::BrokerRestart { lead } => ("broker-restart", run_broker_restart(&lead)),
         Command::Status { all, strays, json } => ("status", run_status(all, strays, json)),
         Command::Stats {
@@ -1701,18 +1706,24 @@ fn spawn_waiter(name: &str, waiter: lock::Lock) -> Result<()> {
     Ok(())
 }
 
-fn run_broker(lead: &str) -> Result<i32> {
+fn run_broker(lead: &str, check: bool) -> Result<i32> {
+    // Before anything slow: an install landing during startup renames over this image's path.
+    let origin = broker::origin();
     let inherited = broker::inherited_lock();
     let paths = Paths::from_env().context("herd")?;
     let mut env =
         broker::lead_env(&paths, lead).with_context(|| format!("{lead}'s broker can't start"))?;
+    if check {
+        sandbox::Lead::kept(&paths, lead)?
+            .with_context(|| format!("{lead} has no launch record, so its broker has no herd"))?;
+        return Ok(0);
+    }
     env.push((broker::BROKER_ENV.into(), lead.into()));
     for (name, value) in env {
         // SAFETY: the broker has started no threads yet.
         unsafe { std::env::set_var(name, value) };
     }
     let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-    let started_from = std::env::current_exe().ok();
     let host = broker::Host {
         herdr: &CliHerdr,
         procs: &process::ProcFs,
@@ -1722,9 +1733,10 @@ fn run_broker(lead: &str) -> Result<i32> {
         spawn_waiter,
         prs: &github::GhCli::default(),
         follow: Some(broker::Follow {
-            installed: &|| installed_as(started_from.as_deref()?),
+            installed: &|| installed_as(&origin.as_ref()?.path),
             reexec: &broker::reexec,
             every: Duration::from_secs(1),
+            moved_onto: origin.as_ref().and_then(|o| o.moved_onto),
         }),
     };
     let served = broker::serve(
@@ -1744,8 +1756,18 @@ fn run_broker(lead: &str) -> Result<i32> {
 /// The loopherd on PATH, canonicalized, when it is installed at `exe`: a
 /// broker started from a dev build or a test's binary stays on it.
 fn installed_as(exe: &Path) -> Option<PathBuf> {
-    let installed = on_path("loopherd")?.canonicalize().ok()?;
-    (installed == exe.canonicalize().ok()?).then_some(installed)
+    let exe = exe.canonicalize().ok()?;
+    // Unlike a shell, not skipping the broker's own install for its x bit, so it notes that.
+    let installed = std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("loopherd"))
+        .filter_map(|path| path.canonicalize().ok())
+        .find(|path| {
+            *path == exe
+                || path
+                    .metadata()
+                    .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })?;
+    (installed == exe).then_some(installed)
 }
 
 fn run_broker_restart(lead: &str) -> Result<i32> {
