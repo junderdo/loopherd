@@ -121,7 +121,9 @@ Optional, once loopherd is installed (above). Needs herdr 0.7.5 or later.
 A source install asks "Install loopherd's herdr plugin?" when herdr is on
 `PATH` and the plugin is missing or older than the checkout's, and
 `scripts/install --with-herdr-plugin` installs or updates it without
-asking. Or by hand:
+asking. Updating needs herdr 0.9.4; on an older herdr, or when an update
+leaves the version where it was, the installer prints the reinstall to run
+by hand. Or by hand:
 
 ```bash
 herdr plugin install junderdo/loopherd/herdr-plugin
