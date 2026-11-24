@@ -26,8 +26,8 @@ cloned as its main checkout. Then, in order:
    the shepherd between side by side and stacked, saving it as
    `view.layout`, and `t` switches between its purple-orange, phosphor and
    catppuccin themes, remembering the choice as `view.theme` in
-   `config.toml`; `x` shows or hides strays. The detail panel sits beside the list while it fits, and
-   under the selected member otherwise.
+   `config.toml`; `x` shows or hides strays. The detail panel sits beside
+   the list while it fits, and under the selected member's table otherwise.
 5. **Start the shepherd.** Press `s` in the view, run in a pane rather
    than the plugin's popup, to start it beside the view, in the view's
    directory (a plugin pane's workspace directory, not the plugin's). Or in

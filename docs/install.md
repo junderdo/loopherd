@@ -1,13 +1,13 @@
 # Installing loopherd
 
 The [README](../README.md#install) has the one-line install. This page has
-the rest: both install paths, their flags, updating, `loopherd setup`,
+the rest: both install paths, their extras, updating, `loopherd setup`,
 uninstalling, and loopherd's herdr plugin.
 
 ## Requirements
 
 - Linux or macOS, x86_64 or aarch64.
-- [herdr](https://herdr.dev/), running.
+- [herdr](https://herdr.dev/) 0.9.5 or later, running.
 - [Claude Code](https://code.claude.com/docs/en/overview) (`claude`).
 - On Linux and WSL2, leads also need [bubblewrap and
   socat](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)
@@ -32,27 +32,25 @@ It picks the build for your OS and arch and checks it against the
 release's `SHA256SUMS`. To pin a release:
 
 ```bash
-curl -fsSL https://junderdo.dev/loopherd/install.sh | LOOPHERD_VERSION=v0.2.0 sh
+curl -fsSL https://junderdo.dev/loopherd/install.sh | LOOPHERD_VERSION=v0.2.1 sh
 ```
 
 The junderdo.dev script fetches and runs the release's own installer, served
 as `https://github.com/junderdo/loopherd/releases/latest/download/install.sh`.
 
-Like `scripts/install`, the installer plays the splash and, asking on the
-terminal, offers the agent types, the `mattpocock-skills` plugin, the herdr
-plugin and its key bindings (each default no); without a terminal it skips
-each and names its flag. It takes `--no-splash` (or `LOOPHERD_NO_SPLASH=1`),
-`--with-agents`, `--with-skills`, `--with-herdr-plugin`, `--with-herdr-keys`
-and `--no-extras`, meaning what they mean to `scripts/install`. The
-junderdo.dev script passes on only `LOOPHERD_VERSION`, so give flags to the
-GitHub copy, after `sh -s --`:
+The installer takes no options. It plays the splash and asks on the
+terminal about each extra as it installs: loopherd's agent types, the
+`mattpocock-skills` plugin, the herdr plugin and its key bindings (each
+default no). With no terminal it installs loopherd and its hooks and skips
+the extras. Two environment variables reach it: `LOOPHERD_VERSION` pins a
+release, as above, and `LOOPHERD_NO_SPLASH=1` skips the splash:
 
 ```bash
-curl -fsSL https://github.com/junderdo/loopherd/releases/latest/download/install.sh | sh -s -- --no-splash --with-agents
+curl -fsSL https://junderdo.dev/loopherd/install.sh | LOOPHERD_NO_SPLASH=1 sh
 ```
 
-**Update:** `loopherd update` (`--check` to only look, `--version vX.Y.Z`
-to pick a release, older ones included).
+**Update:** `loopherd update`, from 0.2.1 on (`--check` to only look,
+`--version vX.Y.Z` to pick a release, older ones included).
 
 ## From source
 
@@ -68,9 +66,11 @@ scripts/install
 
 On a terminal it also offers loopherd's agent types (`builder`,
 `reviewer`, `researcher`, `scout`), the `mattpocock-skills` plugin and
-loopherd's herdr plugin (below), each default no. `--with-agents`,
-`--with-skills` and `--with-herdr-plugin` install one without asking;
-`scripts/install --help` lists its flags.
+loopherd's herdr plugin (below), each default no. Unlike the release
+installer, `scripts/install` takes flags for working on loopherd:
+`--with-agents`, `--with-skills` and `--with-herdr-plugin` install one
+without asking (naming an extra skips the other offers and setup), and
+`scripts/install --help` lists the rest.
 
 **Update:** `loopherd update` (`--check` to only look), or
 `git pull && scripts/install --update` by hand.
@@ -110,12 +110,13 @@ Agent types from `scripts/install` are yours to remove: the files listed in
 
 ## herdr plugin
 
-Optional, once loopherd is installed. Needs herdr 0.7.5 or later. A source
-install asks "Install loopherd's herdr plugin?" when herdr is on `PATH` and
-the plugin is missing or older than the checkout's, and `scripts/install
---with-herdr-plugin` installs or updates it without asking. Updating needs
-herdr 0.9.4; on an older herdr, or when an update leaves the version where
-it was, the installer prints the reinstall to run by hand. Or by hand:
+Optional, once loopherd is installed. Needs herdr 0.7.5 or later. The
+installer asks "Install loopherd's herdr plugin?" when herdr is on `PATH`
+and the plugin is missing or older than the one it ships, and from source
+`scripts/install --with-herdr-plugin` installs or updates it without
+asking. Updating needs herdr 0.9.4; on an older herdr, or when an update
+leaves the version where it was, the installer prints the reinstall to run
+by hand. Or by hand:
 
 ```bash
 herdr plugin install junderdo/loopherd/herdr-plugin
@@ -127,13 +128,14 @@ action, which opens `loopherd view` in a popup over most of the screen;
 
 ### Key bindings
 
-Once the plugin is installed, a source install asks "Add herdr key
-bindings for loopherd's plugin?", and `scripts/install --with-herdr-keys`
-(or `loopherd install-herdr-keys`) adds them without asking: `prefix+m`
-opens the view and `prefix+shift+m` opens it beside the shepherd. Both are
-unbound in herdr 0.9.5's defaults (`herdr --default-config`). It writes them
-as `[[keys.command]]` entries at the end of the `config.toml` herdr reads,
-after backing it up beside itself, and reloads a running server. A key your
+Once the plugin is installed, the installer asks "Add herdr key bindings
+for loopherd's plugin?", and `loopherd install-herdr-keys` (or, from
+source, `scripts/install --with-herdr-keys`) adds them without asking:
+`prefix+m` opens the view and `prefix+shift+m` opens it beside the
+shepherd. Both are unbound in herdr 0.9.5's defaults
+(`herdr --default-config`). It writes them as `[[keys.command]]` entries
+at the end of the `config.toml` herdr reads, after backing it up beside
+itself, and reloads a running server. A key your
 config or herdr's defaults already hold, or an action you already bound, is
 skipped with a line saying why. herdr's keybinds help (`prefix+?`) lists
 them under "custom" by their descriptions. `loopherd install-herdr-keys

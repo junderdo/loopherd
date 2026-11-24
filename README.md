@@ -32,26 +32,26 @@ for yourself. The herds run themselves in between.
   context limit hands off to a fresh session.
 - **One view** of every member across repos, sorted by what needs you.
 
-### New since 0.2.0
+## New since 0.2.0
 
 - `loopherd update` updates a release or a source install in place.
-- The release installer offers what `scripts/install` does: agent types, the
-  `mattpocock-skills` plugin, the herdr plugin and its key bindings.
+- The release installer asks about each extra as it installs: agent types,
+  the `mattpocock-skills` plugin, the herdr plugin and its key bindings.
 - The view lists each member's running subagents, and `view.layout` (or
   `v` in the view) puts the shepherd beside it or below it.
 - The context window comes from each session's model; limits take `250k`
   or `65%`.
 - herdr's startup hook always starts alive leads' brokers; `setup` asks
   whether it should also revive members.
-- `loopherd gate <sha>` runs a herd's checks for its sandboxed lead,
-  outside the sandbox.
+- `loopherd gate <sha>` runs the herd's `[lead] gate` commands for its
+  sandboxed lead, outside the sandbox.
 - `watch` says when a member has stalled: idle after a paused stop for
   `stalled_after` minutes (30 by default).
 
 ## Requirements
 
 - Linux or macOS, x86_64 or aarch64.
-- [herdr](https://herdr.dev/), running.
+- [herdr](https://herdr.dev/) 0.9.5 or later, running.
 - [Claude Code](https://code.claude.com/docs/en/overview) (`claude`).
 - On Linux and WSL2, leads also need [bubblewrap and
   socat](https://code.claude.com/docs/en/sandboxing#set-up-linux-and-wsl2)
@@ -66,8 +66,11 @@ curl -fsSL https://junderdo.dev/loopherd/install.sh | sh
 It installs the latest release as `~/.local/bin/loopherd` (put
 `~/.local/bin` on `PATH`), adds loopherd's Claude hooks and skill (backing
 up `settings.json` first), runs `loopherd setup`, and finishes with
-`loopherd doctor`. Pin a release with `LOOPHERD_VERSION=v0.2.0` in front of
-`sh`. Update with `loopherd update`.
+`loopherd doctor`. It takes no options: it asks about each extra (agent
+types, skills, the herdr plugin, herdr key bindings) as it installs, and
+with no terminal it installs loopherd and its hooks and skips the extras.
+Pin a release with `LOOPHERD_VERSION=v0.2.1` in front of `sh`. Update with
+`loopherd update` (0.2.1 or later).
 
 From source (needs `git`, [Rust](https://rustup.rs/) and
 [`jq`](https://jqlang.github.io/jq/download/)):
@@ -77,8 +80,9 @@ git clone https://github.com/junderdo/loopherd.git && cd loopherd && scripts/ins
 ```
 
 To uninstall: `loopherd install-hook --remove` and
-`rm ~/.local/bin/loopherd`. Installer flags, the optional herdr plugin and
-its key bindings, and the rest are in [docs/install.md](docs/install.md).
+`rm ~/.local/bin/loopherd`. The installer's extras, the optional herdr
+plugin and its key bindings, and the rest are in
+[docs/install.md](docs/install.md).
 
 ## A first herd
 
@@ -88,7 +92,7 @@ With herdr running, in a repo's main checkout:
 cd ~/code/my-app && claude        # accept the trust dialog once, then exit
 loopherd init                     # write the herd; it asks for what it can't infer
 loopherd feed my-app --dry-run    # list the tasks you expect
-loopherd view                     # in a herdr pane; press s to start your shepherd
+loopherd view                     # in a new herdr tab; press s to start your shepherd
 loopherd lead my-app              # start the lead, which feeds and watches the herd
 ```
 
@@ -99,7 +103,7 @@ checks the herd file. Run `loopherd lead` yourself, or ask the shepherd to.
 **When you're unsure how to do something, ask your shepherd.** The shepherd
 is the Claude session you work in beside the herd. `s` in `loopherd view`
 focuses it, or starts one beside the view when there's none; with the herdr
-plugin, `prefix+shift+m` opens the view beside it. It reads loopherd's guide
+plugin's key bindings, `prefix+shift+m` opens the view beside it. It reads loopherd's guide
 (`loopherd --skill`), so ask it things like "how do I pause a herd?" or "why
 didn't feed spawn anything?", and it can run the commands for you.
 
@@ -109,7 +113,7 @@ by hand.
 
 ## Where to go next
 
-- [docs/install.md](docs/install.md): install paths and flags, updating,
+- [docs/install.md](docs/install.md): install paths and extras, updating,
   `setup`, uninstalling, the herdr plugin.
 - [docs/setup.md](docs/setup.md): setting up a repo, the lead's sandbox,
   hand-written herd files.
