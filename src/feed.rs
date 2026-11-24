@@ -3461,26 +3461,42 @@ mod tests {
         let members: Vec<String> = (1..=20).map(|n| format!("zpr-{n}")).collect();
         let members: Vec<&str> = members.iter().map(String::as_str).collect();
         let lock = setup.paths().locks_dir().join("after-merge.lock");
+        fs::create_dir_all(lock.parent().unwrap()).unwrap();
         let ran = || setup.read("runs").map_or(0, |runs| runs.lines().count());
 
-        let free_after = std::thread::scope(|scope| {
-            let feed = pending_fed(&setup, &["echo >> runs"], &members);
-            let feeding = scope.spawn(|| run_pending(&setup, feed));
-            wait_for("ran", || ran() > 0);
+        let records: Vec<_> = members
+            .iter()
+            .map(|m| member(m, Some("prs"), false))
+            .collect();
+        let (lines, free_after) = std::thread::scope(|scope| {
+            let mut fed = pending_fed(&setup, &["echo >> runs"], &members);
+            let feeding = scope.spawn(|| {
+                // Generous, so a member slowed by load never times out and skips its run.
+                let req = FeedRequest {
+                    after_merge_timeout: Duration::from_secs(60),
+                    ..setup.request(false, None)
+                };
+                run_after_merge(&mut ledger(&records), &setup.paths(), &req, &mut fed).unwrap();
+                fed.lines
+            });
             let file = fs::File::create(&lock).unwrap();
             // Spins rather than waits: a feed retaking the lock between members wins any waiter.
-            // Checked before the take, so a finished feed has already dropped its lock.
+            // Checked first, so a finished feed has already dropped its lock.
             let free_after = loop {
                 let finished = feeding.is_finished();
+                if ran() == 0 && !finished {
+                    continue;
+                }
                 if let Some(_held) = Lock::try_take(file.try_clone().unwrap()).unwrap() {
                     break ran();
                 }
                 assert!(!finished, "the lock never came free");
             };
-            feeding.join().unwrap();
-            free_after
+            (feeding.join().unwrap(), free_after)
         });
 
+        let failed: Vec<_> = lines.iter().filter(|l| !l.ends_with(": ok")).collect();
+        assert!(failed.is_empty(), "{failed:?}");
         assert_eq!(
             free_after,
             members.len(),
