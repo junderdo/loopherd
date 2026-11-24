@@ -1,6 +1,6 @@
 //! `loopherd lead`: start a herd's lead member (D17).
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result, bail};
@@ -47,6 +47,10 @@ pub fn lead(
     // Before the sandbox, so its checks read the worktree's project settings.
     let worktree = worktree_path(&spawn_req.repo, &spawn_req.name);
     let fresh = !worktree.exists();
+    let new_files: Vec<PathBuf> = sandbox::launch_files(paths, &spawn_req.name)
+        .into_iter()
+        .filter(|file| !file.exists())
+        .collect();
     ensure_detached_worktree(&spawn_req.repo, &spawn_req.name).context("worktree")?;
     let launch = match sandbox::prepare(paths, &spawn_req.name, &kept, req.sandbox) {
         Ok(launch) => launch,
@@ -63,7 +67,16 @@ pub fn lead(
         Err(e) => return Err(e.context("sandbox")),
     };
     spawn_req.claude_args.extend(launch.args());
-    let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
+    let spawned = match spawn(herdr, ledger, &spawn_req, inherited_workspace) {
+        Ok(spawned) => spawned,
+        Err(e) => {
+            let new = Created {
+                files: new_files,
+                worktree: fresh,
+            };
+            return Err(discard_unstarted(herdr, ledger, &spawn_req, new, e));
+        }
+    };
     let name = spawn_req.name;
     // The lead already runs, so what can't be noted only adds to the warning.
     let mut warnings = vec![];
@@ -103,6 +116,53 @@ pub fn lead(
         ));
     }
     Ok((name, spawned, warnings))
+}
+
+/// What one `lead` call made before its spawn.
+struct Created {
+    files: Vec<PathBuf>,
+    worktree: bool,
+}
+
+/// `err`, after removing what this call `new`ly made for a lead whose spawn
+/// failed. A lead the ledger recorded, or one live in this herdr, may run on
+/// them, so they stay, as they do when either can't say.
+fn discard_unstarted(
+    herdr: &dyn Herdr,
+    ledger: &dyn Ledger,
+    req: &SpawnRequest,
+    new: Created,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    let recorded = ledger
+        .entries()
+        .map(|entries| entries.get(&req.name).is_some_and(|e| !e.retired));
+    let live = herdr
+        .agents()
+        .map(|agents| agents.iter().any(|a| a.name.as_deref() == Some(&req.name)));
+    if recorded.unwrap_or(true) || live.unwrap_or(true) {
+        return err;
+    }
+    let mut left: Vec<String> = new
+        .files
+        .iter()
+        .filter_map(|file| match std::fs::remove_file(file) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                Some(format!("{}: {e}", file.display()))
+            }
+            _ => None,
+        })
+        .collect();
+    let worktree = worktree_path(&req.repo, &req.name);
+    if new.worktree
+        && let Err(e) = remove_worktree(&req.repo, &worktree)
+    {
+        left.push(format!("its new worktree {}: {e:#}", worktree.display()));
+    }
+    match left.is_empty() {
+        true => err,
+        false => err.context(format!("left {}", left.join("; "))),
+    }
 }
 
 /// `dry_run`'s plan, or `lead`'s spawn report, with the exit code.
@@ -333,6 +393,10 @@ mod tests {
     fn assert_refused_leaving_nothing(setup: &Setup, result: Result<impl Sized>, refused: &str) {
         let err = result.err().expect("lead was refused");
         assert!(format!("{err:#}").contains(refused), "{err:#}");
+        assert_left_nothing(setup);
+    }
+
+    fn assert_left_nothing(setup: &Setup) {
         for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
             let file = setup.root.join("config/sandbox").join(file);
             assert!(!file.exists(), "{} was written", file.display());
@@ -388,6 +452,105 @@ mod tests {
         );
 
         assert_refused_leaving_nothing(&setup, result, "socket");
+    }
+
+    #[test]
+    fn a_lead_whose_spawn_fails_before_it_runs_leaves_nothing() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut herdr = herdr();
+        herdr.fail_create_tab = true;
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert_refused_leaving_nothing(&setup, result, "tab create refused");
+    }
+
+    #[test]
+    fn a_lead_whose_spawn_fails_once_it_runs_keeps_its_launch_files_and_worktree() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut herdr = herdr();
+        herdr.fail_prompt = true;
+        let mut ledger = MemLedger::default();
+
+        let err = lead(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("prompt refused"), "{err:#}");
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = setup.root.join("config/sandbox").join(file);
+            assert!(file.exists(), "{} was removed", file.display());
+        }
+        assert!(setup.worktree().exists(), "its worktree was removed");
+    }
+
+    #[test]
+    fn a_lead_recorded_before_its_spawn_fails_keeps_its_files_though_it_exited() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let herdr = std::sync::Arc::new_cyclic(|me: &std::sync::Weak<FakeHerdr>| {
+            let me = me.clone();
+            let mut herdr = herdr();
+            herdr.on_prompt = Some(Box::new(move |_| {
+                me.upgrade().unwrap().remove_agent("lead-h");
+            }));
+            herdr
+        });
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &*herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert!(result.is_err(), "its prompt found no agent");
+        assert!(!ledger.0["lead-h"].retired);
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = setup.root.join("config/sandbox").join(file);
+            assert!(file.exists(), "{} was removed", file.display());
+        }
+        assert!(setup.worktree().exists(), "its worktree was removed");
+    }
+
+    #[test]
+    fn a_failed_spawn_keeps_the_launch_files_and_worktree_a_retired_lead_left() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut ledger = MemLedger::default();
+        let paths = setup.paths();
+        lead(&herdr(), &mut ledger, &paths, &request(&[]), Some("w1")).unwrap();
+        ledger.0.get_mut("lead-h").unwrap().retired = true;
+        let mut other_session = herdr();
+        other_session.fail_create_tab = true;
+
+        let err = lead(
+            &other_session,
+            &mut ledger,
+            &paths,
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("tab create refused"), "{err:#}");
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = setup.root.join("config/sandbox").join(file);
+            assert!(file.exists(), "{} was removed", file.display());
+        }
+        assert!(setup.worktree().exists(), "its worktree was removed");
     }
 
     const PROMPT: &str =
@@ -1928,6 +2091,7 @@ mod tests {
 
             assert_eq!(format!("{err:#}"), refusal);
             assert!(herdr.tabs().is_empty());
+            assert_left_nothing(setup);
         }
     }
 
@@ -1989,6 +2153,7 @@ mod tests {
              [lead] install = false, or merge_guard = \"hook\", in herd h"
         );
         assert!(herdr.tabs().is_empty());
+        assert_left_nothing(&setup);
     }
 
     #[test]
@@ -2020,6 +2185,7 @@ mod tests {
                 "{mode}"
             );
             assert!(herdr.tabs().is_empty(), "{mode}");
+            assert_left_nothing(&setup);
         }
     }
 
@@ -2064,6 +2230,7 @@ mod tests {
                     "{worker} {mode}"
                 );
                 assert!(herdr.tabs().is_empty(), "{worker} {mode}");
+                assert_left_nothing(&setup);
             }
         }
     }
@@ -2164,6 +2331,7 @@ mod tests {
             )
         );
         assert!(herdr.tabs().is_empty());
+        assert_left_nothing(&setup);
     }
 
     #[test]
