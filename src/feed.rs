@@ -175,8 +175,23 @@ pub fn feed(
         }
         free -= 1;
         if req.dry_run {
-            lines.push(format!("would add {name} (template {template})"));
-            added += 1;
+            match crate::worker_sandbox::refusal(paths, &spawn_req, &probe) {
+                Ok(None) => {
+                    lines.push(format!("would add {name} (template {template})"));
+                    added += 1;
+                }
+                Ok(Some(why)) => {
+                    lines.push(format!("would not start: {task}: {why}"));
+                    errors += 1;
+                    free += 1;
+                }
+                Err(e) => {
+                    lines.push(format!("error: {task}: {e:#}; stopping"));
+                    errors += 1;
+                    code = 1;
+                    break;
+                }
+            }
             continue;
         }
         let started = crate::worker_sandbox::spawn(
@@ -264,9 +279,9 @@ fn pending(queue: &Queue, members: Vec<String>) -> Option<Pending> {
 }
 
 /// The names feed would spawn now from `tasks`, the source's output, as
-/// `feed --dry-run` plans them: tasks with no member, while slots are free
-/// under `max`, `freed` being the members whose done check passes. A task
-/// feed would error on is skipped.
+/// `feed --dry-run` plans them before its worker sandbox refusals: tasks
+/// with no member, while slots are free under `max`, `freed` being the
+/// members whose done check passes. A task feed would error on is skipped.
 pub fn claimable(
     ledger: &dyn Ledger,
     paths: &Paths,
@@ -1591,6 +1606,51 @@ mod tests {
         assert_eq!(fed.code, 1);
         assert!(ledger.0.is_empty());
         assert!(herdr.tabs().is_empty());
+    }
+
+    #[test]
+    fn a_dry_run_says_a_required_worker_its_sandbox_refuses_would_not_start() {
+        let setup = worker_setup("printf '1\\n'", "sandbox = \"require\"");
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = FeedRequest {
+            sandbox: sandbox_unavailable,
+            ..setup.request(true, None)
+        };
+
+        let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        assert_eq!(
+            fed.lines,
+            [
+                "would not start: 1: zpr-1 can't start sandboxed: it has no worktree of its own, \
+                 and its sandbox won't open the main checkout; give herd prs's template pr a \
+                 branch, or set [worker] sandbox = \"prefer\" in herd prs to start it \
+                 unsandboxed",
+                "prs: 0 would retire, 0 would add, 0 skipped, 1 error",
+            ]
+        );
+        assert!(!setup.config.path().join("sandbox").exists());
+    }
+
+    #[test]
+    fn a_dry_run_still_says_would_add_for_a_preferred_worker_its_sandbox_cant_start() {
+        let setup = worker_setup("printf '1\\n'", "sandbox = \"prefer\"");
+        let req = FeedRequest {
+            sandbox: sandbox_unavailable,
+            ..setup.request(true, None)
+        };
+
+        let fed = feed(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(fed.lines[0], "would add zpr-1 (template pr)");
     }
 
     #[test]

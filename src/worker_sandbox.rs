@@ -201,7 +201,83 @@ pub fn prepare(
     let herd = &member.herd;
     let require = worker.sandbox == WorkerSandbox::Require;
     let prefer_instead = prefer_instead(herd);
-    let (disallowed, mcp_config) = judge_args_and_mcp(paths, name, member, &worker, from)?;
+    let Judged {
+        disallowed,
+        mcp_config,
+        worktree,
+        unavailable,
+    } = judge(paths, name, member, &worker, from, probe)?;
+    let own = match (&unavailable, worktree) {
+        (None, Some(worktree)) => {
+            let own = settings(paths, name, herd, worktree)?;
+            let loosened = loosenings(&paths.home, worktree, &own);
+            if require && !loosened.is_empty() {
+                return Err(NotStarted(format!(
+                    "{name} can't start sandboxed: your Claude settings loosen its sandbox: {}; \
+                     remove those, {prefer_instead}",
+                    loosened.join("; ")
+                ))
+                .into());
+            }
+            Some((own, loosened))
+        }
+        _ => None,
+    };
+    let dir = paths.config_dir().join("sandbox");
+    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    let kept = member_file(paths, name);
+    std::fs::write(&kept, serde_json::to_string_pretty(member)? + "\n")
+        .with_context(|| format!("write {}", kept.display()))?;
+    let mcp = mcp_file(paths, name);
+    let text = serde_json::to_string_pretty(&mcp_config)? + "\n";
+    write_private(&mcp, &text).with_context(|| format!("write {}", mcp.display()))?;
+    let arg_warnings = disallowed.iter().map(|line| disallowed_warning(name, line));
+    let Some((own, loosened)) = own else {
+        let (why, fix) = unavailable.expect("no settings only when unavailable");
+        let warnings = arg_warnings.collect();
+        return Ok(Launch::Unsandboxed {
+            why,
+            fix,
+            mcp,
+            warnings,
+        });
+    };
+    // An allowWrite entry for a missing path has no effect on Linux.
+    for dir in own_dirs(paths, name) {
+        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
+    }
+    let file = settings_file(paths, name);
+    let text = serde_json::to_string_pretty(&own)? + "\n";
+    write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
+    let warnings = (loosened.iter().map(|line| loosened_warning(name, line)))
+        .chain(arg_warnings)
+        .collect();
+    Ok(Launch::Sandboxed {
+        settings: file,
+        mcp,
+        warnings,
+    })
+}
+
+/// What `prepare` finds before writing anything, past its refusals.
+struct Judged<'a> {
+    disallowed: Vec<String>,
+    mcp_config: Value,
+    worktree: Option<&'a Path>,
+    /// Why its sandbox can't start, as the ledger flags it, and the fix.
+    unavailable: Option<(String, String)>,
+}
+
+fn judge<'a>(
+    paths: &Paths,
+    name: &str,
+    member: &'a Member,
+    worker: &herd::Worker,
+    from: ArgsFrom,
+    probe: &dyn Fn() -> Result<Sockets, Unavailable>,
+) -> Result<Judged<'a>> {
+    let herd = &member.herd;
+    let (disallowed, mcp_config) = judge_args_and_mcp(paths, name, member, worker, from)?;
     // A branch checked out in the main checkout plans the main checkout itself.
     let repo = herd::repo(paths, herd)?;
     let worktree =
@@ -237,56 +313,46 @@ pub fn prepare(
         ))
         .into());
     }
-    let own = match (&unavailable, worktree) {
-        (None, Some(worktree)) => {
-            let own = settings(paths, name, herd, worktree)?;
-            let loosened = loosenings(&paths.home, worktree, &own);
-            if require && !loosened.is_empty() {
-                return Err(NotStarted(format!(
-                    "{name} can't start sandboxed: your Claude settings loosen its sandbox: {}; \
-                     remove those, {prefer_instead}",
-                    loosened.join("; ")
-                ))
-                .into());
-            }
-            Some((own, loosened))
-        }
-        _ => None,
-    };
-    let dir = paths.config_dir().join("sandbox");
-    std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    let kept = member_file(paths, name);
-    std::fs::write(&kept, serde_json::to_string_pretty(member)? + "\n")
-        .with_context(|| format!("write {}", kept.display()))?;
-    let mcp = mcp_file(paths, name);
-    let text = serde_json::to_string_pretty(&mcp_config)? + "\n";
-    write_private(&mcp, &text).with_context(|| format!("write {}", mcp.display()))?;
-    let arg_warnings = disallowed.iter().map(|line| disallowed_warning(name, line));
-    let Some((own, loosened)) = own else {
-        let (_, why, fix) = unavailable.expect("no settings only when unavailable");
-        let warnings = arg_warnings.collect();
-        return Ok(Launch::Unsandboxed {
-            why,
-            fix,
-            mcp,
-            warnings,
-        });
-    };
-    // An allowWrite entry for a missing path has no effect on Linux.
-    for dir in own_dirs(paths, name) {
-        std::fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    }
-    let file = settings_file(paths, name);
-    let text = serde_json::to_string_pretty(&own)? + "\n";
-    write_private(&file, &text).with_context(|| format!("write {}", file.display()))?;
-    let warnings = (loosened.iter().map(|line| loosened_warning(name, line)))
-        .chain(arg_warnings)
-        .collect();
-    Ok(Launch::Sandboxed {
-        settings: file,
-        mcp,
-        warnings,
+    Ok(Judged {
+        disallowed,
+        mcp_config,
+        worktree,
+        unavailable: unavailable.map(|(_, why, fix)| (why, fix)),
     })
+}
+
+/// Why `add` or `feed` would see herd member `req` refused by its sandbox
+/// before checking out its worktree, if they would. Writes nothing.
+pub fn refusal(
+    paths: &Paths,
+    req: &SpawnRequest,
+    probe: &dyn Fn() -> Result<Sockets, Unavailable>,
+) -> Result<Option<String>> {
+    let Some(MemberOf {
+        herd,
+        template: Some(template),
+        ..
+    }) = &req.member_of
+    else {
+        return Ok(None);
+    };
+    let worker = herd::worker(paths, herd)?;
+    if worker.sandbox == WorkerSandbox::Off {
+        return Ok(None);
+    }
+    let member = Member {
+        herd: herd.clone(),
+        template: template.clone(),
+        args: req.claude_args.clone(),
+        worktree: req.planned_worktree()?,
+    };
+    match judge(paths, &req.name, &member, &worker, ArgsFrom::Fresh, probe) {
+        Ok(_) => Ok(None),
+        Err(e) => match e.downcast::<NotStarted>() {
+            Ok(refused) => Ok(Some(refused.0)),
+            Err(e) => Err(e),
+        },
+    }
 }
 
 /// The refusals `prepare` makes from worker `name`'s args and MCP servers
@@ -299,6 +365,15 @@ fn judge_args_and_mcp(
     from: ArgsFrom,
 ) -> Result<(Vec<String>, Value)> {
     let herd = &member.herd;
+    // Its settings and kept record would replace a lead's and hide it from calling_lead.
+    if name.starts_with("lead-") {
+        return Err(NotStarted(format!(
+            "{name} can't start as a worker: lead-* names are herd leads', whose sandbox files \
+             a worker's would replace; give herd {herd}'s template {} another name",
+            member.template
+        ))
+        .into());
+    }
     let require = worker.sandbox == WorkerSandbox::Require;
     let prefer_instead = prefer_instead(herd);
     let sources = arg_sources(paths, member, from)?;
@@ -432,13 +507,15 @@ pub fn spawn(
         let entries = ledger.entries().context("ledger")?;
         Ok(entries.get(&req.name).is_some_and(|r| !r.retired))
     };
+    let sandbox_off =
+        |herd: &str| herd::worker(paths, herd).is_ok_and(|w| w.sandbox == WorkerSandbox::Off);
     let member = match &req.member_of {
         // A name in use fails spawn's own check, before its holder's files are touched.
         Some(MemberOf {
             herd,
             template: Some(template),
             ..
-        }) if !recorded(ledger)? => Member {
+        }) if !sandbox_off(herd) && !recorded(ledger)? => Member {
             herd: herd.clone(),
             template: template.clone(),
             args: req.claude_args.clone(),
@@ -1111,6 +1188,58 @@ mod tests {
              unsandboxed"
         );
         assert!(!h.paths.config_dir().join("sandbox").exists());
+    }
+
+    #[test]
+    fn a_worker_named_as_a_herds_lead_is_refused_and_writes_nothing() {
+        let h = herd("sandbox = \"prefer\"");
+        let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
+
+        let err = prepare(
+            &h.paths,
+            "lead-h",
+            &member(Some(&worktree)),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap_err();
+
+        assert!(err.downcast_ref::<NotStarted>().is_some());
+        assert_eq!(
+            format!("{err:#}"),
+            "lead-h can't start as a worker: lead-* names are herd leads', whose sandbox files a \
+             worker's would replace; give herd h's template t another name"
+        );
+        assert!(!h.paths.config_dir().join("sandbox").exists());
+    }
+
+    #[test]
+    fn a_worker_named_as_a_lead_of_no_herd_yet_is_refused_and_keeps_a_kept_leads_files() {
+        let h = herd("sandbox = \"require\"");
+        let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
+        let dir = h.paths.config_dir().join("sandbox");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lead-b.lead.json"), r#"{"herd":"b","args":[]}"#).unwrap();
+        std::fs::write(dir.join("lead-b.json"), "lead's").unwrap();
+
+        let err = prepare(
+            &h.paths,
+            "lead-b",
+            &member(Some(&worktree)),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap_err();
+
+        assert!(
+            format!("{err:#}").starts_with("lead-b can't start as a worker: lead-* names"),
+            "{err:#}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("lead-b.json")).unwrap(),
+            "lead's"
+        );
+        assert!(!dir.join("lead-b.member.json").exists());
     }
 
     #[test]
