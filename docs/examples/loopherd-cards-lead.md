@@ -29,7 +29,10 @@ Start now:
 3. Arm `loopherd watch {herd} --timeout 3600` as a background task, and
    re-arm after every exit but `{herd} drained`: on that, report done and
    stop. On `<member> merged`, run the after-merge steps for it: move its
-   card to Done, `scripts/trello unblock`, then `loopherd feed {herd}`. On `<name> claimable`, feed. Each wakes you once:
+   card to Done, `scripts/trello unblock`, then `loopherd feed {herd}`; for
+   an attended `grill-<n>`, whose pane that feed's reap closes before it can
+   ping the shepherd, then run `loopherd report "grill-<n> merged: LH-<n> closed out"` (D145).
+   On `<name> claimable`, feed. Each wakes you once:
    a claimable card you don't feed then shows up again only in the
    heartbeat's dry run. Exit 2 is
    your heartbeat: still check each Review card's PR for a merge and run
