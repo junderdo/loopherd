@@ -158,7 +158,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D143](decisions/D143.md) | A lead's question unanswered for 30 minutes (no prompt in its pane, recorded by `prompt-hook` as `answered`) sends a `waiting` notification from its watch, once per stretch; an armed shepherd's watch prints `<lead> waiting <age>`; status and view show the age; doctor warns when a lead runs with `[notify]` off. Amends D32, D57. |
 | [D144](decisions/D144.md) | Amends D114, D121. A credentials member is also denied `~/.claude.json`, docker's and npm's configs, `github-copilot/` and `store --file` helpers' files (`/proc/<pid>/environ` stays open: a `Read` deny there breaks the sandbox); five more GitHub token variables are blanked; a GUID-tagged virtiofs share counts as a Windows drive, and an unnameable one refuses the member. |
 | [D145](decisions/D145.md) | A grill gets its background first: the shepherd runs `add --no-focus`, always `tell`s background, then focuses the pane, and the grill waits for it before its first question; in a led herd the lead notes `grill-<n> merged: LH-<n> closed out` to the shepherd, the grill's own ping being best-effort. Amends D112. |
-| [D146](decisions/D146.md) | The view keeps the detail panel beside the list while the list's 55% share fits the widest herd table, else draws it at full width under the selected member's table, scrolled in with the selected row but never past it; no detail box without a selection. |
+| [D147](decisions/D147.md) | The view keeps the detail panel beside the list while the list's 55% share fits the widest herd table, else draws it at full width under the selected member's table, scrolled in with the selected row but never past it; no detail box without a selection. |
 
 ## Emerging model
 
