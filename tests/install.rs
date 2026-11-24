@@ -1536,3 +1536,49 @@ fn update_on_a_terminal_shows_no_splash() {
     assert!(out.status.success(), "{out:?}");
     assert!(find(&out.stdout, ALT_SCREEN).is_none(), "{out:?}");
 }
+
+#[test]
+fn update_leaves_out_an_agent_type_the_human_removed() {
+    let sandbox = Sandbox::new(false);
+    let agents = sandbox.home.join(".claude/agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(agents.join("builder.md"), repo_agent("builder")).unwrap();
+    fs::create_dir_all(agents_ledger(&sandbox).parent().unwrap()).unwrap();
+    fs::write(
+        agents_ledger(&sandbox),
+        format!(
+            "{} {}\n{} {}\n",
+            sha256(&repo_agent("builder")),
+            agents.join("builder.md").display(),
+            sha256(&repo_agent("scout")),
+            agents.join("scout.md").display()
+        ),
+    )
+    .unwrap();
+
+    let out = sandbox.install(&["--update"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(agents.join("builder.md").exists());
+    assert!(!agents.join("scout.md").exists());
+    assert!(!agents.join("reviewer.md").exists());
+}
+
+#[test]
+fn update_installs_no_agent_types_where_the_ledger_names_only_another_dir() {
+    let sandbox = Sandbox::new(false);
+    fs::create_dir_all(agents_ledger(&sandbox).parent().unwrap()).unwrap();
+    fs::write(
+        agents_ledger(&sandbox),
+        format!(
+            "{} /elsewhere/agents/builder.md\n",
+            sha256(&repo_agent("builder"))
+        ),
+    )
+    .unwrap();
+
+    let out = sandbox.install(&["--update"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(!sandbox.home.join(".claude/agents").exists());
+}

@@ -41,13 +41,9 @@ run_offers() {
       claude_dir="$PWD/${claude_dir#./}"
     fi
   fi
-  local status=0 ledger="${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
-  if [[ "$agents" == update ]]; then
-    # The ledger exists once loopherd has installed agent types.
-    if [[ -e "$ledger" ]]; then agents=yes; else agents=no; fi
-  fi
-  case "$agents" in yes) agents=--with-agents ;; no) agents=--no-extras ;; esac
-  offer_agents "$agents" "$root/agents" "$claude_dir/agents" "$ledger"
+  local status=0
+  case "$agents" in yes) agents=--with-agents ;; no) agents=--no-extras ;; update) agents=--update ;; esac
+  offer_agents "$agents" "$root/agents" "$claude_dir/agents" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
   # The plugin goes into the config dir beside --settings, like the hooks and agents (D27).
   # A failed install is reported, but the herdr offers still run before it fails the run.
   if [[ -n "$settings" ]]; then
