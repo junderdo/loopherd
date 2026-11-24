@@ -583,7 +583,7 @@ fn reason(
     // stop read paused, and restart refuses it.
     let (save, how, plan, restart) = match member.is_lead() {
         true => (
-            "stop every background shell and Monitor you started (TaskStop each, or kill it), \
+            "stop every background shell and Monitor you started (TaskStop each), \
              your `loopherd watch` among them, so your stop reads finished, then ",
             " with `loopherd handoff <<'EOF'`, since your sandbox refuses your file tools there",
             "your plan as next steps, re-arming your watch first",
@@ -1118,12 +1118,13 @@ mod tests {
         assert!(
             reason.contains(
                 "Stop your current work: stop every background shell and Monitor you started \
-                 (TaskStop each, or kill it), your `loopherd watch` among them, so your stop \
+                 (TaskStop each), your `loopherd watch` among them, so your stop \
                  reads finished, then write your handoff to"
             ),
             "{reason}"
         );
         assert!(!reason.contains("branch"), "{reason}");
+        assert!(!reason.contains("kill"), "{reason}");
         let handoff = w.state().join("handoffs/lead-cards/handoff.md");
         assert!(
             reason.contains(&format!(

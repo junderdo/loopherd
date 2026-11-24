@@ -523,7 +523,9 @@ mod tests {
         let handoffs = section("\n### Handoffs\n", "\n### Your own handoff\n");
         let own = section("- **Your own handoff.**", "- **Your checkout**");
         let step = section("6. **Handoff:**", "What differs from the shepherd:");
+        let restarts = section("**A lead restarts itself.**", "\n\n");
         for (name, text) in [
+            ("A lead restarts itself", restarts),
             ("Handoffs", handoffs),
             ("Your own handoff", own),
             ("Handoff step", step),
@@ -536,14 +538,22 @@ mod tests {
     }
 
     #[test]
-    fn waiting_on_a_process_warns_pgrep_f_matches_its_own_shell() {
+    fn a_leads_wait_on_a_process_runs_in_the_call_that_started_it() {
         let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
         for rule in [
-            "`pgrep -f <pattern>` matches the waiting shell's own command line",
+            "Each Bash call also has its own pid namespace: `pgrep` or `kill` sees only \
+             processes that same call started, so polling from another call reads done at once, \
+             and only TaskStop stops another call's shell.",
+            "Run the long command itself as the background task and act on its completion \
+             notification.",
+            "A wait inside that one call uses `cmd & pid=$!; …; wait $pid`",
+            "`pgrep -f <pattern>`, that matches the waiting shell's own command line",
             "`pgrep -f \"[t]arget-…\"`",
-            "wait on its pid",
         ] {
             assert!(skill.contains(rule), "the skill misses {rule:?}");
+        }
+        for wrong in ["kill -0", "or kill it"] {
+            assert!(!skill.contains(wrong), "the skill still says {wrong:?}");
         }
     }
 
