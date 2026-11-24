@@ -87,8 +87,17 @@ impl Sandbox {
             .env("HOME", &self.home)
             .env_remove("CLAUDE_CONFIG_DIR")
             .env_remove("XDG_STATE_HOME")
+            .env("LOOPHERD_CONFIG_DIR", self.config())
             .env("PATH", &self.path);
         cmd
+    }
+
+    fn config(&self) -> PathBuf {
+        self.dir.path().join("config")
+    }
+
+    fn record(&self) -> Option<String> {
+        fs::read_to_string(self.config().join("install.toml")).ok()
     }
 
     fn install(&self, args: &[&str]) -> Output {
@@ -221,6 +230,38 @@ fn install_remove_runs_no_doctor() {
         fs::read_to_string(&sandbox.log).unwrap(),
         "new install-hook --remove --settings /tmp/s.json\n"
     );
+}
+
+#[test]
+fn install_records_a_source_install_of_its_checkout_over_a_release_record() {
+    let sandbox = Sandbox::new(false);
+    fs::create_dir_all(sandbox.config()).unwrap();
+    fs::write(
+        sandbox.config().join("install.toml"),
+        "kind = \"release\"\ntag = \"v0.1.0\"\n",
+    )
+    .unwrap();
+
+    let out = sandbox.install(&["--no-extras"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        sandbox.record().unwrap(),
+        format!(
+            "kind = \"source\"\ncheckout = \"{}\"\n",
+            env!("CARGO_MANIFEST_DIR")
+        )
+    );
+}
+
+#[test]
+fn install_with_settings_writes_no_install_record() {
+    let sandbox = Sandbox::new(false);
+
+    let out = sandbox.install(&["--no-extras", "--settings", "/tmp/s.json"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(sandbox.record(), None);
 }
 
 #[test]
