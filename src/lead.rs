@@ -63,7 +63,10 @@ pub fn lead(
         Err(e) => return Err(e.context("sandbox")),
     };
     spawn_req.claude_args.extend(launch.args());
-    let spawned = spawn(herdr, ledger, &spawn_req, inherited_workspace)?;
+    let spawned = match spawn(herdr, ledger, &spawn_req, inherited_workspace) {
+        Ok(spawned) => spawned,
+        Err(e) => return Err(discard_unstarted(herdr, paths, &spawn_req, fresh, e)),
+    };
     let name = spawn_req.name;
     // The lead already runs, so what can't be noted only adds to the warning.
     let mut warnings = vec![];
@@ -103,6 +106,33 @@ pub fn lead(
         ));
     }
     Ok((name, spawned, warnings))
+}
+
+/// `err`, after removing the launch files and, when `fresh`, the worktree
+/// that a failed spawn left. A live agent by the lead's name runs on them, so
+/// they stay, as they do when herdr can't say.
+fn discard_unstarted(
+    herdr: &dyn Herdr,
+    paths: &Paths,
+    req: &SpawnRequest,
+    fresh: bool,
+    err: anyhow::Error,
+) -> anyhow::Error {
+    let live = herdr
+        .agents()
+        .map(|agents| agents.iter().any(|a| a.name.as_deref() == Some(&req.name)));
+    if live.unwrap_or(true) {
+        return err;
+    }
+    let mut left = sandbox::discard_launch(paths, &req.name);
+    let worktree = worktree_path(&req.repo, &req.name);
+    if fresh && let Err(e) = remove_worktree(&req.repo, &worktree) {
+        left.push(format!("its new worktree {}: {e:#}", worktree.display()));
+    }
+    match left.is_empty() {
+        true => err,
+        false => err.context(format!("left {}", left.join("; "))),
+    }
 }
 
 /// `dry_run`'s plan, or `lead`'s spawn report, with the exit code.
@@ -392,6 +422,48 @@ mod tests {
         );
 
         assert_refused_leaving_nothing(&setup, result, "socket");
+    }
+
+    #[test]
+    fn a_lead_whose_spawn_fails_before_it_runs_leaves_nothing() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut herdr = herdr();
+        herdr.fail_create_tab = true;
+        let mut ledger = MemLedger::default();
+
+        let result = lead(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        );
+
+        assert_refused_leaving_nothing(&setup, result, "tab create refused");
+    }
+
+    #[test]
+    fn a_lead_whose_spawn_fails_once_it_runs_keeps_its_launch_files_and_worktree() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let mut herdr = herdr();
+        herdr.fail_prompt = true;
+        let mut ledger = MemLedger::default();
+
+        let err = lead(
+            &herdr,
+            &mut ledger,
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("prompt refused"), "{err:#}");
+        for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
+            let file = setup.root.join("config/sandbox").join(file);
+            assert!(file.exists(), "{} was removed", file.display());
+        }
+        assert!(setup.worktree().exists(), "its worktree was removed");
     }
 
     const PROMPT: &str =
