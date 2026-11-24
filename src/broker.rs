@@ -4928,6 +4928,10 @@ mod tests {
         world.add(g_retired);
         let own = checked_out(&repo, "ours");
         world.add(worker_at("b-ours", "h", &repo, &own));
+        let released = checked_out(&repo, "kept");
+        let mut retired = worker_at("b-kept", "h", &repo, &released);
+        retired.retired = true;
+        world.add(retired);
         let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
 
         for (n, worktree) in [("mine", &human_s), ("theirs", &g_s)] {
@@ -4941,10 +4945,12 @@ mod tests {
                 assert!(format!("{err:#}").ends_with(&why), "{n}: {err:#}");
             }
         }
-        let (out, _, code) = world.client().call(&add_branch("ours", true)).unwrap();
+        for n in ["ours", "kept"] {
+            let (out, _, code) = world.client().call(&add_branch(n, true)).unwrap();
 
-        assert_eq!(code, 0, "{out}");
-        assert!(out.lines().any(|l| l == "name b-ours"), "{out}");
+            assert_eq!(code, 0, "{n}: {out}");
+            assert!(out.lines().any(|l| l == format!("name b-{n}")), "{out}");
+        }
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.tabs().is_empty());
@@ -4991,24 +4997,31 @@ mod tests {
     }
 
     #[test]
-    fn a_lead_s_feed_won_t_start_a_task_in_a_worktree_the_human_checked_out() {
+    fn a_lead_s_feed_won_t_start_a_task_in_a_worktree_the_human_or_another_herd_checked_out() {
         let world = World::new();
         let (_root, repo) = branch_herd(&world);
         let herd_file = world.paths.herds.join("h.toml");
         let text = std::fs::read_to_string(&herd_file).unwrap();
-        std::fs::write(&herd_file, text.replace("echo lead-h", "echo mine")).unwrap();
+        let source = text.replace("echo lead-h", "echo mine; echo theirs");
+        std::fs::write(&herd_file, source).unwrap();
         let human_s = checked_out(&repo, "mine");
+        let g_s = checked_out(&repo, "theirs");
+        let mut g_retired = worker_at("g-theirs", "g", &repo, &g_s);
+        g_retired.retired = true;
+        world.add(g_retired);
         let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
 
         let (out, _, code) = world.client().call(&feed("h")).unwrap();
 
         assert_eq!(code, 1, "{out}");
-        let refused = format!(
-            "error: mine: refused: adding b-mine would reuse worktree {}, which no ledger \
-             entry of herd h records",
-            human_s.display()
-        );
-        assert!(out.lines().any(|l| l == refused), "{out}");
+        for (n, worktree) in [("mine", &human_s), ("theirs", &g_s)] {
+            let refused = format!(
+                "error: {n}: refused: adding b-{n} would reuse worktree {}, which no \
+                 ledger entry of herd h records",
+                worktree.display()
+            );
+            assert!(out.lines().any(|l| l == refused), "{n}: {out}");
+        }
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert!(herdr.tabs().is_empty());
@@ -5053,26 +5066,32 @@ mod tests {
         serving.join().unwrap().0.unwrap();
     }
 
-    #[test]
-    fn a_lead_s_add_of_a_detached_worktree_named_like_its_lead_is_refused() {
-        let world = World::new();
-        let (_root, repo) = branch_herd(&world);
+    /// Adds herd h a `[template.d]` with a detached worktree slugged `{n}`,
+    /// and returns the dry-run add of it with `n`.
+    fn add_detached(world: &World, n: &str) -> Op {
         let herd_file = world.paths.herds.join("h.toml");
         let mut text = std::fs::read_to_string(&herd_file).unwrap();
         text.push_str(
             "[template.d]\nparams = [\"n\"]\nname = \"d-{n}\"\nworktree = \"{n}\"\nprompt = \"go\"\n",
         );
         std::fs::write(&herd_file, text).unwrap();
-        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
-        let detached = Op::Add {
+        Op::Add {
             herd: "h".into(),
             template: "d".into(),
-            params: vec!["lead-h".into()],
+            params: vec![n.into()],
             claude_args: vec![],
             dry_run: true,
             ready_timeout_secs: 60,
             no_focus: false,
-        };
+        }
+    }
+
+    #[test]
+    fn a_lead_s_add_of_a_detached_worktree_named_like_its_lead_is_refused() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let detached = add_detached(&world, "lead-h");
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
 
         let err = world.client().call(&detached).unwrap_err();
 
@@ -5084,6 +5103,69 @@ mod tests {
         assert!(format!("{err:#}").ends_with(&why), "{err:#}");
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_s_add_of_a_detached_worktree_won_t_reuse_one_the_human_checked_out() {
+        let world = World::new();
+        let (_root, repo) = branch_herd(&world);
+        let human_s = checked_out(&repo, "mine");
+        let detached = add_detached(&world, "mine");
+        let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+        let err = world.client().call(&detached).unwrap_err();
+
+        let why = format!(
+            "adding d-mine would reuse worktree {}, which no ledger entry of herd h records",
+            human_s.display()
+        );
+        assert!(format!("{err:#}").ends_with(&why), "{err:#}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_s_add_won_t_reuse_a_worktree_a_live_entry_outside_its_herd_names_any_way() {
+        let links = tempfile::tempdir().unwrap();
+        for (holder, herd, recorded) in [
+            ("lh-loose", None, "as is"),
+            ("g-shared", Some("g"), "through a symlink"),
+            ("g-shared", Some("g"), "with a trailing slash"),
+        ] {
+            let world = World::new();
+            let (_root, repo) = branch_herd(&world);
+            let shared = checked_out(&repo, "shared");
+            let mut retired = worker_at("b-earlier", "h", &repo, &shared);
+            retired.retired = true;
+            world.add(retired);
+            let named = match recorded {
+                "through a symlink" => {
+                    let link = links.path().join("shared");
+                    std::os::unix::fs::symlink(&shared, &link).unwrap();
+                    link
+                }
+                "with a trailing slash" => PathBuf::from(format!("{}/", shared.display())),
+                _ => shared.clone(),
+            };
+            let mut live = worker_at(holder, "g", &repo, &named);
+            live.herd = herd.map(Into::into);
+            world.add(live);
+            let serving = world.serve(FakeHerdr::new(&[("w1", "main")]));
+
+            let err = world
+                .client()
+                .call(&add_branch("shared", true))
+                .unwrap_err();
+
+            let of = herd.map_or("no herd's".into(), |h| format!("herd {h}'s"));
+            let why = format!(
+                "adding b-shared would reuse worktree {}, which {of} {holder} holds",
+                shared.display()
+            );
+            assert!(format!("{err:#}").ends_with(&why), "{recorded}: {err:#}");
+            world.retire("lead-h");
+            serving.join().unwrap().0.unwrap();
+        }
     }
 
     #[test]
