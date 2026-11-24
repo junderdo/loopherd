@@ -40,6 +40,16 @@ For an attended `grill-<n>`, whose pane that feed's reap closes before it can
 ping the shepherd, then run
 `loopherd report "grill-<n> merged: LH-<n> closed out"` (D145).
 
+With merge on, gates are the shepherd's (D152). Your sandbox can't run the
+full suite, so when a review passes, run
+`loopherd report --kind note 'Gate request: #<n> (LH-<m>) at <full sha>: <summary>'`
+(single-quoted), not a question, and keep working. The shepherd runs fmt,
+clippy and cargo test on that head and answers with `loopherd tell`:
+`Gate PASS #<n> at <sha>` or `Gate FAIL #<n> at <sha>: <failures>`. Merge a
+PASS head as above; send a FAIL's failures to the member like a blocking
+finding. A PASS holds after main moves only if nothing merged since shares a
+file with the PR; otherwise have the member merge main and request again.
+
 When you need the human, run `loopherd report --kind question "<the exact
 question>"` and end your turn. With merge off, a merge question carries the PR
 link, any PR that must merge first, and the line

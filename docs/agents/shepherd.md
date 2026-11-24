@@ -218,6 +218,17 @@ human to paste:
 ! GH_TOKEN=$(gh auth token --user junderdo) gh pr merge <n> --merge --match-head-commit <full sha>
 ```
 
+**Gates** (D152). With the lead's merge on, a passed review reaches your
+watch as `lead-loopherd-cards note … Gate request: #<n> (LH-<m>) at <sha>`.
+Run the gate on that head: a detached worktree under `<scratch>/pr<n>/`, its
+own `CARGO_TARGET_DIR` there, a temp `LOOPHERD_CONFIG_DIR`, `XDG_STATE_HOME`,
+`XDG_CONFIG_HOME` and `TMPDIR`, `HERDR_SOCKET_PATH` at a dead socket and no
+`LOOPHERD_LIVE`, then `cargo fmt --check`, `cargo clippy --all-targets -- -D
+warnings` and `cargo test`. Answer with `loopherd tell lead-loopherd-cards
+"Gate PASS #<n> at <sha>"`, or `Gate FAIL #<n> at <sha>: ` and each failing
+test with its first error line; the lead merges a PASS. With merge off, the
+lead asks the human a merge question instead, and the human gates.
+
 A switch its `[lead]` leaves unset comes from `[lead_defaults]` in
 `~/.config/loopherd/config.toml` (`scripts/install --lead-defaults` to change
 them), else is off; `loopherd herds` shows each switch's value and source.
