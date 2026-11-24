@@ -71,6 +71,11 @@ fn sandbox_with(status: &str) -> Sandbox {
         "context_window = 200000\n[lead_defaults]\nmerge = false\n",
     )
     .unwrap();
+    fs::write(
+        dir.path().join("config/install.toml"),
+        "kind = \"release\"\ntag = \"v0.2.0\"\n",
+    )
+    .unwrap();
     let sandbox = Sandbox {
         settings: dir.path().join("settings.json"),
         dir,
@@ -152,8 +157,31 @@ fn a_sound_install_prints_one_line_and_exits_0() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let out = s.doctor(&[]);
-    assert_eq!(stdout(&out), "doctor: 18 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 19 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
+}
+
+#[test]
+fn a_missing_install_record_warns_naming_both_installers() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    fs::remove_file(s.dir.path().join("config/install.toml")).unwrap();
+    let out = s.doctor(&[]);
+    let said = stdout(&out);
+    assert_eq!(out.status.code(), Some(0), "{said}");
+    let record = s.dir.path().join("config/install.toml");
+    assert!(
+        said.contains(&format!(
+            "warning install record: no install record at {}",
+            record.display()
+        )),
+        "{said}"
+    );
+    assert!(
+        said.contains("junderdo.dev/loopherd/install.sh | sh"),
+        "{said}"
+    );
+    assert!(said.contains("`scripts/install` from a checkout"), "{said}");
 }
 
 #[test]
@@ -173,7 +201,7 @@ fn missing_hooks_in_the_given_settings_fail_naming_install_hook_and_exit_1() {
         "{text}"
     );
     assert!(
-        text.ends_with("doctor: 10 ok, 4 warnings, 4 failures\n"),
+        text.ends_with("doctor: 11 ok, 4 warnings, 4 failures\n"),
         "{text}"
     );
     assert_eq!(out.status.code(), Some(1));
@@ -345,11 +373,11 @@ fn verbose_lists_every_check_and_json_gives_them_as_data() {
     let s = sandbox(Some("0.9.5"));
     s.install_hooks();
     let verbose = stdout(&s.doctor(&["--verbose"]));
-    assert_eq!(verbose.lines().count(), 19, "{verbose}");
+    assert_eq!(verbose.lines().count(), 20, "{verbose}");
     assert!(verbose.contains("ok herdr version: 0.9.5\n"), "{verbose}");
     let out = s.doctor(&["--json"]);
     let data: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
-    assert_eq!(data["ok"], 18);
+    assert_eq!(data["ok"], 19);
     assert_eq!(data["checks"][12]["name"], "herdr version");
     assert_eq!(out.status.code(), Some(0));
 }
@@ -384,7 +412,7 @@ fn the_herdr_plugin_only_ever_warns() {
         let out = s.doctor(&[]);
         assert_eq!(
             stdout(&out),
-            format!("{line}doctor: 17 ok, 1 warnings, 0 failures\n")
+            format!("{line}doctor: 18 ok, 1 warnings, 0 failures\n")
         );
         assert_eq!(out.status.code(), Some(0));
     }
@@ -467,7 +495,7 @@ fn a_herd_narrows_the_herd_checks_and_an_unknown_one_exits_2() {
     fs::write(herds.join("broken.toml"), "colour = 1\n").unwrap();
     assert_eq!(s.doctor(&[]).status.code(), Some(1));
     let out = s.doctor(&["h"]);
-    assert_eq!(stdout(&out), "doctor: 20 ok, 0 warnings, 0 failures\n");
+    assert_eq!(stdout(&out), "doctor: 21 ok, 0 warnings, 0 failures\n");
     assert_eq!(out.status.code(), Some(0));
     let out = s.doctor(&["nope"]);
     assert_eq!(out.status.code(), Some(2), "{out:?}");
@@ -505,7 +533,7 @@ fn a_herdr_that_wedges_listing_agents_fails_after_the_deadline_instead_of_hangin
          herdr didn't answer plugin list within 5s; \
          fix: run `herdr plugin list --plugin loopherd` to see why\n\
          failure members: herdr didn't list its agents within 5s; fix: restart herdr's server\n\
-         doctor: 17 ok, 1 warnings, 1 failures\n"
+         doctor: 18 ok, 1 warnings, 1 failures\n"
     );
     assert_eq!(out.status.code(), Some(1));
 }

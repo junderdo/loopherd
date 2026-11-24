@@ -13,6 +13,7 @@ use std::process::{Command, Output, Stdio};
 const INSTALL_SH: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install.sh");
 const DOCTOR_FAILS: &str = "doctor: 8 ok, 0 warnings, 1 failures";
 const REPO: &str = env!("CARGO_MANIFEST_DIR");
+const GITHUB: &str = "https://github.com/junderdo/loopherd/releases";
 const AGENTS: [&str; 4] = ["builder", "researcher", "reviewer", "scout"];
 
 /// The files beside `loopherd` in a release tarball that carries the extras.
@@ -113,9 +114,10 @@ impl Release {
             executable(
                 &stage.join("loopherd"),
                 format!(
-                    "#!/bin/sh\necho \"{tag} $*\" >> '{}'\n[ \"$1\" != doctor ] || echo '{DOCTOR_FAILS}'\n[ ! -f \"{exits}/$1\" ] || exit \"$(cat \"{exits}/$1\")\"\n",
+                    "#!/bin/sh\n[ \"$1\" != --version ] || {{ echo 'loopherd {version}'; exit; }}\necho \"{tag} $*\" >> '{}'\n[ \"$1\" != doctor ] || echo '{DOCTOR_FAILS}'\n[ ! -f \"{exits}/$1\" ] || exit \"$(cat \"{exits}/$1\")\"\n",
                     self.log.display(),
                     exits = self.exits_dir().display(),
+                    version = tag.trim_start_matches('v'),
                 ),
             );
             if extras {
@@ -142,6 +144,22 @@ impl Release {
 
     fn installed(&self) -> PathBuf {
         self.home.join(".local/bin/loopherd")
+    }
+
+    fn record(&self) -> PathBuf {
+        self.home.join(".config/loopherd/install.toml")
+    }
+
+    /// A `curl` that fetches GitHub's release URLs from the fake release, for
+    /// a run with `LOOPHERD_RELEASE_BASE` empty.
+    fn serve_github(&self) {
+        executable(
+            &self.fake_bin.join("curl"),
+            format!(
+                "#!/bin/sh\nfor a; do shift; set -- \"$@\" \"$(echo \"$a\" | sed 's|^{GITHUB}|file://{}|')\"; done\nexec /usr/bin/curl \"$@\"\n",
+                self.base().display()
+            ),
+        );
     }
 
     fn log(&self) -> String {
@@ -228,6 +246,50 @@ fn installs_the_latest_release_then_its_hooks_and_setup() {
         "v0.2.0 install-hook\nv0.2.0 setup\nv0.2.0 doctor\n"
     );
     assert!(text(&out).contains("loopherd herds"), "{}", text(&out));
+    assert!(
+        !release.record().exists(),
+        "a fake release base writes no install record"
+    );
+}
+
+#[test]
+fn an_install_from_github_records_the_installed_tag_in_the_config_dir() {
+    let release = Release::new("Linux", "x86_64");
+    release.serve_github();
+    let out = release.install(&[("LOOPHERD_RELEASE_BASE", "")]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(release.record()).unwrap(),
+        "kind = \"release\"\ntag = \"v0.2.0\"\n"
+    );
+}
+
+#[test]
+fn a_pinned_install_from_github_records_the_pinned_tag_under_loopherd_config_dir() {
+    let release = Release::new("Linux", "x86_64");
+    release.serve_github();
+    let config = release.dir.path().join("config");
+    let out = release.install(&[
+        ("LOOPHERD_RELEASE_BASE", ""),
+        ("LOOPHERD_VERSION", "0.1.0"),
+        ("LOOPHERD_CONFIG_DIR", config.to_str().unwrap()),
+    ]);
+    assert!(out.status.success(), "{}", text(&out));
+    assert_eq!(
+        fs::read_to_string(config.join("install.toml")).unwrap(),
+        "kind = \"release\"\ntag = \"v0.1.0\"\n"
+    );
+    assert!(!release.record().exists());
+}
+
+#[test]
+fn a_failed_install_from_github_records_nothing() {
+    let release = Release::new("Linux", "x86_64");
+    release.serve_github();
+    fs::remove_file(release.base().join("latest/download/SHA256SUMS")).unwrap();
+    let out = release.install(&[("LOOPHERD_RELEASE_BASE", "")]);
+    assert!(!out.status.success(), "{}", text(&out));
+    assert!(!release.record().exists());
 }
 
 #[test]
@@ -331,6 +393,7 @@ fn loopherd_version_pins_a_release() {
         release.log(),
         "v0.1.0 install-hook\nv0.1.0 setup\nv0.1.0 doctor\n"
     );
+    assert!(!release.record().exists());
 }
 
 #[test]
@@ -344,11 +407,20 @@ fn a_script_stamped_by_a_release_installs_that_release() {
         script.replace("\nrelease_tag=\n", "\nrelease_tag=v0.1.0\n"),
     )
     .unwrap();
-    let out = release.run(stamped.to_str().unwrap(), &release.path(), &[]);
+    release.serve_github();
+    let out = release.run(
+        stamped.to_str().unwrap(),
+        &release.path(),
+        &[("LOOPHERD_RELEASE_BASE", "")],
+    );
     assert!(out.status.success(), "{}", text(&out));
     assert_eq!(
         release.log(),
         "v0.1.0 install-hook\nv0.1.0 setup\nv0.1.0 doctor\n"
+    );
+    assert_eq!(
+        fs::read_to_string(release.record()).unwrap(),
+        "kind = \"release\"\ntag = \"v0.1.0\"\n"
     );
 }
 

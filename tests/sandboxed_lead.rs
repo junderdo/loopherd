@@ -174,7 +174,65 @@ const REFUSED_TO_LEADS: &[(&[&str], &str)] = &[
         &["restart-wait", "lead-h"],
         "a lead's broker starts its restart waiter",
     ),
+    (&["update"], UPDATE_WHY),
+    (&["update", "--version", "v0.1.0"], UPDATE_WHY),
 ];
+
+const UPDATE_WHY: &str =
+    "updating loopherd is the human's unless the lead's herd sets [lead] install = true";
+
+fn herd_h(state: &Path, lead: &str) {
+    fs::create_dir_all(state.join("config/herds")).unwrap();
+    fs::write(
+        state.join("config/herds/h.toml"),
+        format!("repo = \"/r\"\n[lead]\nprompt = \"go\"\n{lead}"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_lead_s_pane_refuses_update_while_its_herd_has_install_off() {
+    let state = tempfile::tempdir().unwrap();
+    let socket = state.path().join("herdr.sock");
+    lead_s_state(state.path(), &socket, alive());
+    herd_h(state.path(), "install = false\n");
+
+    let err = refused(&run_in_lead_pane(state.path(), &socket, &["update"]));
+
+    assert!(
+        err.contains(&format!(
+            "refused: lead lead-h runs this loopherd, and {UPDATE_WHY}"
+        )),
+        "{err}"
+    );
+}
+
+#[test]
+fn a_lead_s_pane_runs_update_when_its_herd_has_install_on() {
+    let state = tempfile::tempdir().unwrap();
+    let socket = state.path().join("herdr.sock");
+    lead_s_state(state.path(), &socket, alive());
+    herd_h(state.path(), "install = true\n");
+
+    let err = refused(&run_in_lead_pane(state.path(), &socket, &["update"]));
+
+    assert!(!err.contains("lead-h"), "{err}");
+    assert!(err.contains("no install record"), "{err}");
+}
+
+#[test]
+fn a_lead_s_pane_runs_update_check_with_install_off() {
+    let state = tempfile::tempdir().unwrap();
+    let socket = state.path().join("herdr.sock");
+    lead_s_state(state.path(), &socket, alive());
+    herd_h(state.path(), "install = false\n");
+
+    let out = run_in_lead_pane(state.path(), &socket, &["update", "--check"]);
+
+    assert_eq!(out.status.code(), Some(2), "{out:?}");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!err.contains("lead-h"), "{err}");
+}
 
 #[test]
 fn a_live_lead_s_pane_refuses_the_shepherd_s_and_human_s_commands_naming_why() {
