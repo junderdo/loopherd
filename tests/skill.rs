@@ -596,8 +596,8 @@ fn a_lead_restarts_itself_after_its_handoff() {
     let lead = flat_section(&printed, "\n## Lead\n", "\n### ");
     assert!(
         lead.contains(
-            "Then report `--kind handoff`, stop your watch, run `loopherd restart --self`, \
-             and end your turn"
+            "Then report `--kind handoff`, stop every background shell and Monitor you started \
+             (your watch among them), run `loopherd restart --self`, and end your turn"
         ),
         "{lead}"
     );
