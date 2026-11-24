@@ -191,7 +191,7 @@ offer_agents() {
     return 0
   fi
   if [[ "$extras" == ask && ! -t 0 ]]; then
-    echo "skipped loopherd's agent types (no terminal); add --with-agents to install them"
+    echo "skipped loopherd's agent types (no terminal); ${LOOPHERD_EXTRAS_NO_TERMINAL:-add --with-agents to install them}"
     rm -rf "$agents_tmp"
     return 0
   fi
