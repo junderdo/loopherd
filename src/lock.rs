@@ -34,7 +34,7 @@ impl Lock {
                     format!(
                         "held past {}{}",
                         humantime::format_duration(bound),
-                        held_by(&file, || std::fs::read_to_string("/proc/locks"))
+                        held_by(&file, read_proc_locks)
                     ),
                 ));
             }
@@ -74,10 +74,28 @@ fn try_flock(file: &File) -> io::Result<bool> {
 }
 
 /// How many times [`held_by`] reads `/proc/locks` before saying the holder
-/// isn't there: the kernel serves it a page per read, so a lock dropped ahead
-/// of the holder's line between pages shifts that line past the reader.
+/// isn't there, for a listing past a page that [`read_proc_locks`] can't
+/// read as one snapshot.
 #[cfg(target_os = "linux")]
 const PROC_LOCKS_READS: usize = 3;
+
+/// `/proc/locks` in reads of a page or more. Each `read()` restarts the
+/// listing by position, so small reads (as `read_to_string`'s first ones are)
+/// skip a line when a lock ahead of it drops between them; one read returns up
+/// to a page as a consistent snapshot.
+fn read_proc_locks() -> io::Result<String> {
+    use std::io::Read;
+    let mut file = File::open("/proc/locks")?;
+    let mut listing = vec![];
+    let mut chunk = vec![0; 64 * 1024];
+    loop {
+        match file.read(&mut chunk)? {
+            0 => break,
+            n => listing.extend_from_slice(&chunk[..n]),
+        }
+    }
+    String::from_utf8(listing).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+}
 
 #[cfg(target_os = "linux")]
 fn held_by(file: &File, mut proc_locks: impl FnMut() -> io::Result<String>) -> String {
