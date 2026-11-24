@@ -46,8 +46,6 @@ const SUBSCRIBED_POLL: Duration = Duration::from_secs(10);
 const TICK: Duration = Duration::from_millis(100);
 /// Wide enough for `for 59m`, so the columns don't jump when a time appears.
 const TIME_WIDTH: usize = 7;
-/// The narrowest terminal that shows the detail pane beside the list.
-const DETAIL_MIN_WIDTH: u16 = 100;
 /// The shortest terminal that shows the event ticker.
 const TICKER_MIN_HEIGHT: u16 = 16;
 /// Body rows below which the quiet herd drops its sheep for just the line.
@@ -250,11 +248,34 @@ struct Row {
 struct Panel {
     title: Line<'static>,
     rows: Vec<Row>,
+    /// Columns a herd table needs to show its rows whole; 0 for the strays.
+    width: u16,
 }
 
 impl Panel {
     fn height(&self) -> u16 {
         (self.rows.len() + 2).min(u16::MAX as usize) as u16
+    }
+}
+
+/// The selected agent's details, titled with its name.
+struct Detail {
+    title: String,
+    lines: Vec<Line<'static>>,
+}
+
+/// A box in the scrolled list column.
+enum Stacked {
+    Panel(Panel),
+    Detail(Detail, u16),
+}
+
+impl Stacked {
+    fn height(&self) -> u16 {
+        match self {
+            Stacked::Panel(p) => p.height(),
+            Stacked::Detail(_, height) => *height,
+        }
     }
 }
 
@@ -455,18 +476,17 @@ impl App {
         ])
         .areas(inner);
         frame.render_widget(self.banner(banner.width), banner);
-        let (list, detail) = match frame.area().width >= DETAIL_MIN_WIDTH {
-            true => {
-                let [list, detail] =
-                    Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
-                        .areas(body);
-                (list, Some(detail))
+        let panels = self.panels(now);
+        let tables = panels.iter().map(|p| p.width).max().unwrap_or(0);
+        let [list, side] =
+            Layout::horizontal([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .areas(body);
+        match self.detail(now) {
+            Some(detail) if list.width >= tables => {
+                self.draw_panels(frame.buffer_mut(), list, panels, None);
+                self.draw_detail(frame.buffer_mut(), side, detail);
             }
-            false => (body, None),
-        };
-        self.draw_panels(frame.buffer_mut(), list, now);
-        if let Some(area) = detail {
-            self.draw_detail(frame.buffer_mut(), area, now);
+            detail => self.draw_panels(frame.buffer_mut(), body, panels, detail),
         }
         frame.render_widget(Paragraph::new(notes), notes_area);
         if ticker_height > 0 {
@@ -551,38 +571,76 @@ impl App {
     }
 
     /// The panels stacked top to bottom and scrolled to keep the selected row
-    /// in view. Panels below the view aren't drawn.
-    fn draw_panels(&self, out: &mut Buffer, body: Rect, now: Instant) {
-        let panels = self.panels(now);
-        let mut top = 0u16;
-        let mut selected_line = 0;
-        for panel in &panels {
-            if let Some(i) = panel
+    /// in view, with `detail` under the panel holding it and kept in view
+    /// below it where the height allows. Panels below the view aren't drawn.
+    fn draw_panels(
+        &self,
+        out: &mut Buffer,
+        body: Rect,
+        panels: Vec<Panel>,
+        detail: Option<Detail>,
+    ) {
+        let holds_selected = |panel: &Panel| {
+            panel
                 .rows
                 .iter()
                 .position(|r| r.target == Some(self.selected))
-            {
-                selected_line = top.saturating_add(1 + i as u16);
+        };
+        let holder = panels.iter().position(|p| holds_selected(p).is_some());
+        let mut detail = detail.filter(|_| holder.is_some()).map(|d| {
+            let text_width = body.width.saturating_sub(4);
+            let rows = detail::fit(d.lines.clone(), text_width, u16::MAX).len();
+            let height = (rows + 2).min(u16::MAX as usize) as u16;
+            Stacked::Detail(d, height)
+        });
+        let mut stack = vec![];
+        for (i, panel) in panels.into_iter().enumerate() {
+            stack.push(Stacked::Panel(panel));
+            if Some(i) == holder {
+                stack.extend(detail.take());
             }
-            top = top.saturating_add(panel.height());
         }
-        let scroll = (selected_line + 1).saturating_sub(body.height);
+        let mut top = 0u16;
+        let mut selected_line = 0;
+        let mut detail_bottom = 0;
+        for item in &stack {
+            match item {
+                Stacked::Panel(panel) => {
+                    if let Some(i) = holds_selected(panel) {
+                        selected_line = top.saturating_add(1 + i as u16);
+                    }
+                }
+                Stacked::Detail(..) => detail_bottom = top.saturating_add(item.height()),
+            }
+            top = top.saturating_add(item.height());
+        }
+        let scroll = (selected_line + 1)
+            .max(detail_bottom)
+            .saturating_sub(body.height)
+            .min(selected_line);
         let bottom = scroll.saturating_add(body.height);
-        let shown: Vec<Panel> = panels
+        let shown: Vec<Stacked> = stack
             .into_iter()
-            .scan(0u16, |top, panel| {
+            .scan(0u16, |top, item| {
                 let starts = *top;
-                *top = top.saturating_add(panel.height());
-                (starts < bottom).then_some(panel)
+                *top = top.saturating_add(item.height());
+                (starts < bottom).then_some(item)
             })
             .collect();
         let height = shown.iter().fold(0u16, |h, p| h.saturating_add(p.height()));
-        // Drawn whole off-screen, so a panel cut by the view keeps its borders.
+        // Drawn whole off-screen, so a box cut by the view keeps its borders.
         let mut page = Buffer::empty(Rect::new(0, 0, body.width, height));
         let mut y = 0;
-        for panel in shown {
-            let area = Rect::new(0, y, body.width, panel.height()).intersection(page.area);
-            y = y.saturating_add(panel.height());
+        for item in shown {
+            let area = Rect::new(0, y, body.width, item.height()).intersection(page.area);
+            y = y.saturating_add(item.height());
+            let panel = match item {
+                Stacked::Panel(panel) => panel,
+                Stacked::Detail(detail, _) => {
+                    self.draw_detail(&mut page, area, detail);
+                    continue;
+                }
+            };
             let block = self.block().title(panel.title);
             let inner = block.inner(area);
             block.render(area, &mut page);
@@ -636,22 +694,27 @@ impl App {
         Paragraph::new(lines).centered().render(area, out);
     }
 
-    /// The selected agent's details in a box titled with its name.
-    fn draw_detail(&self, out: &mut Buffer, area: Rect, now: Instant) {
-        let targets = self.targets();
-        let (title, lines) = match targets.get(self.selected) {
-            Some(Target::Member(m)) => {
+    fn detail(&self, now: Instant) -> Option<Detail> {
+        Some(match self.targets().get(self.selected)? {
+            Target::Member(m) => {
                 let time = time(self.since.of(&m.name, now));
-                let lines = detail::member(m, &self.mail, &time, self.theme);
-                (m.name.as_str(), lines)
+                Detail {
+                    title: m.name.clone(),
+                    lines: detail::member(m, &self.mail, &time, self.theme),
+                }
             }
-            Some(Target::Stray(s)) => ("stray", detail::stray(s)),
-            None => ("", vec![]),
-        };
-        let mut block = self.block();
-        if !title.is_empty() {
-            block = block.title(Span::styled(format!(" {title} "), self.theme.title()));
-        }
+            Target::Stray(s) => Detail {
+                title: "stray".into(),
+                lines: detail::stray(s),
+            },
+        })
+    }
+
+    /// The selected agent's details in a box titled with its name.
+    fn draw_detail(&self, out: &mut Buffer, area: Rect, Detail { title, lines }: Detail) {
+        let block = self
+            .block()
+            .title(Span::styled(format!(" {title} "), self.theme.title()));
         let inner = block.inner(area);
         block.render(area, out);
         let text = Rect {
@@ -916,12 +979,14 @@ impl App {
                     target: None,
                 }));
             }
+            let widest = rows.iter().map(|r| r.line.width()).max().unwrap_or(0);
             panels.push(Panel {
                 title: match view.herds.get(i) {
                     Some(herd) => self.outlines.title(herd, self.theme),
                     None => Line::styled(format!(" {name} "), Modifier::BOLD),
                 },
                 rows,
+                width: (widest + 2).min(u16::MAX as usize) as u16,
             });
         }
         let strays = stray_lines(view);
@@ -937,6 +1002,7 @@ impl App {
             panels.push(Panel {
                 title: Line::styled(format!(" {title} "), Modifier::BOLD),
                 rows,
+                width: 0,
             });
         }
         panels
@@ -1856,7 +1922,7 @@ max = 3
     }
 
     fn render(app: &App, now: Instant) -> Terminal<TestBackend> {
-        render_at(app, now, 72, 14)
+        render_at(app, now, 72, 24)
     }
 
     /// Tall enough to show every panel the fixtures make.
@@ -1988,6 +2054,12 @@ max = 3
                 "││ ⚠ b     blocked           -       wt-b      w1:tb/w1:pb            ││",
                 "││ ⠋ a     working           -       wt-a      w1:ta/w1:pa            ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│╭ b ─────────────────────────────────────────────────────────────────╮│",
+                "││ blocked                                                            ││",
+                "││ worker                                                             ││",
+                "││ worktree /nonexistent/wt-b                                         ││",
+                "││ pane w1:tb/w1:pb                                                   ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ ungrouped ─────────────────────────────────────────────────────────╮│",
                 "││   NAME  STATUS            BRANCH  WORKTREE  PANE                   ││",
                 "││ ○ c     idle              -       wt-c      w1:tc/w1:pc            ││",
@@ -1995,12 +2067,6 @@ max = 3
                 "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ +1 stray (live in herdr, not in loopherd's ledger) ────────────────╮│",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
-                "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
-                "│                                                                      │",
                 "│                                                                      │",
                 "│                                                                      │",
                 "│                                                                      │",
@@ -2069,11 +2135,11 @@ max = 3
     fn the_window_has_a_rounded_purple_border_titled_loopherd_in_bold() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render(&app(&herdr, &ledger, now), now);
-        for corner in [(0, 0), (71, 0), (0, 13), (71, 13)] {
+        for corner in [(0, 0), (71, 0), (0, 23), (71, 23)] {
             assert_eq!(cell(&terminal, corner).fg, PURPLE, "{corner:?}");
         }
         assert_eq!(cell(&terminal, (0, 0)).symbol(), "╭");
-        assert_eq!(cell(&terminal, (71, 13)).symbol(), "╯");
+        assert_eq!(cell(&terminal, (71, 23)).symbol(), "╯");
         assert!(lines(&terminal)[0].starts_with("╭ loopherd ─"));
         assert!(cell(&terminal, (2, 0)).modifier.contains(Modifier::BOLD));
     }
@@ -2468,9 +2534,9 @@ max = 3
             &herdr,
             &ledger,
         );
-        let terminal = render_tall(&app, now);
+        let terminal = render_at(&app, now, 72, 36);
         assert_eq!(
-            lines(&terminal)[2..21],
+            lines(&terminal)[2..27],
             [
                 "│╭ old-herd (retired only) ───────────────────────────────────────────╮│",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
@@ -2478,6 +2544,12 @@ max = 3
                 "││   NAME    STATUS            BRANCH  WORKTREE   PANE                ││",
                 "││ ⚠ b       blocked           -       wt-b       w1:tb/w1:pb         ││",
                 "││ ⠋ a       working           -       wt-a       w1:ta/w1:pa         ││",
+                "│╰────────────────────────────────────────────────────────────────────╯│",
+                "│╭ b ─────────────────────────────────────────────────────────────────╮│",
+                "││ blocked                                                            ││",
+                "││ worker                                                             ││",
+                "││ worktree /nonexistent/wt-b                                         ││",
+                "││ pane w1:tb/w1:pb                                                   ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
                 "│╭ ungrouped ─────────────────────────────────────────────────────────╮│",
                 "││   NAME    STATUS            BRANCH  WORKTREE   PANE                ││",
@@ -2494,11 +2566,11 @@ max = 3
             ]
         );
         assert_eq!(
-            text(&terminal)[23],
+            text(&terminal)[29],
             "gone: no live agent matches it; `loopherd revive` can bring it back"
         );
         assert_eq!(
-            text(&terminal)[28],
+            text(&terminal)[34],
             "q quit  ↑↓/jk select  enter focus  t theme  s strays: on  a all: on"
         );
         press(
@@ -2992,7 +3064,10 @@ max = 3
     fn says_it_is_reading_before_the_first_read_arrives() {
         let now = Instant::now();
         let shown = text(&render(&App::new(Options::default(), truecolor()), now));
-        assert_eq!(shown[11], "reading herdr and the ledger…");
+        assert!(
+            shown.contains(&"reading herdr and the ledger…".to_string()),
+            "{shown:#?}"
+        );
     }
 
     #[test]
@@ -3170,27 +3245,99 @@ max = 3
     }
 
     #[test]
-    fn at_100_columns_the_body_splits_into_the_list_and_a_purple_pane_titled_with_the_selection() {
-        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
-        let app = app(&herdr, &ledger, now);
+    fn the_detail_sits_beside_the_list_while_the_list_share_fits_the_tables_columns() {
+        let (herdr, now) = (herdr(), Instant::now());
+        let app = app(&herdr, &ledger(), now);
 
-        let wide = render_at(&app, now, 100, 20);
+        let wide = render_at(&app, now, 120, 20);
         let (x, y) = pos(&wide, "╭ b ");
-        // Inside the window's border, 98 columns split 54/44.
-        assert_eq!(x, 55, "{:#?}", lines(&wide));
+        // Inside the window's border, 118 columns split 65/53.
+        assert_eq!(x, 66, "{:#?}", lines(&wide));
         assert_eq!(cell(&wide, (x, y)).fg, PURPLE);
         assert!(lines(&wide)[y as usize].starts_with("│╭ prs "));
 
-        let narrow = render_at(&app, now, 99, 20);
+        let narrow = render_at(&app, now, 100, 20);
         assert!(
-            !lines(&narrow).iter().any(|l| l.contains("╭ b ")),
-            "{:#?}",
+            lines(&narrow)[2].starts_with("│╭ prs ") && lines(&narrow)[2].ends_with("─╮│"),
+            "the list fills the width: {:#?}",
             lines(&narrow)
         );
-        assert!(
-            lines(&narrow)[2].ends_with("─╮│"),
-            "the list fills the width"
+
+        let mut ledger = ledger();
+        ledger.0.get_mut("b").unwrap().worktree =
+            Some("/nonexistent/wt-b-on-a-branch-with-a-long-name".into());
+        let widened = render_at(&self::app(&herdr, &ledger, now), now, 120, 20);
+        assert_eq!(
+            pos(&widened, "╭ b ").0,
+            1,
+            "wider columns stack it: {:#?}",
+            lines(&widened)
         );
+    }
+
+    #[test]
+    fn too_narrow_for_the_tables_beside_it_the_detail_sits_under_the_selected_herd_at_full_width() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let app = app(&herdr, &ledger, now);
+
+        let narrow = render_at(&app, now, 72, 30);
+        let shown = lines(&narrow);
+        let detail = shown
+            .iter()
+            .position(|l| l.starts_with("│╭ b "))
+            .unwrap_or_else(|| panic!("no stacked detail in {shown:#?}"));
+        assert!(shown[detail].ends_with("─╮│"), "{shown:#?}");
+        assert!(shown[detail - 1].starts_with("│╰─"), "{shown:#?}");
+        assert!(shown[detail - 2].contains(" a "), "{shown:#?}");
+        let ungrouped = pos(&narrow, "╭ ungrouped ").1 as usize;
+        assert!(ungrouped > detail, "{shown:#?}");
+        assert!(shown[ungrouped - 1].starts_with("│╰─"), "{shown:#?}");
+    }
+
+    #[test]
+    fn selecting_a_member_of_another_herd_moves_the_stacked_detail_under_its_table() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        app.press(KeyCode::Down, now);
+        app.press(KeyCode::Down, now);
+
+        let terminal = render_at(&app, now, 72, 30);
+        let shown = lines(&terminal);
+        let ungrouped = pos(&terminal, "╭ ungrouped ").1 as usize;
+        assert!(shown[ungrouped - 1].starts_with("│╰─"), "{shown:#?}");
+        assert!(!shown.iter().any(|l| l.contains("╭ b ")), "{shown:#?}");
+        let detail = pos(&terminal, "╭ c ").1 as usize;
+        assert!(shown[detail - 2].contains(" old "), "{shown:#?}");
+        assert!(shown[detail + 1].contains("idle"), "{shown:#?}");
+    }
+
+    #[test]
+    fn the_list_scrolls_the_stacked_detail_into_view_but_never_past_the_selected_row() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        app.press(KeyCode::Down, now);
+        app.press(KeyCode::Down, now);
+
+        let roomy = lines(&render_at(&app, now, 72, 24));
+        let detail = roomy
+            .iter()
+            .position(|l| l.starts_with("│╭ c "))
+            .unwrap_or_else(|| panic!("{roomy:#?}"));
+        assert!(
+            roomy[detail..].iter().any(|l| l.starts_with("│╰─")),
+            "the detail shows whole: {roomy:#?}"
+        );
+        assert!(roomy.iter().any(|l| l.contains(" ○ c ")), "{roomy:#?}");
+
+        let cramped = text(&render_at(&app, now, 72, 10));
+        let body: Vec<&str> = cramped[2..6].iter().map(String::as_str).collect();
+        assert!(body[0].starts_with("○ c "), "{cramped:#?}");
+        assert_eq!(
+            body[1],
+            "✕ old   gone              -       wt-old    w1:pold"
+        );
+        assert!(body[2].starts_with("╰─"), "{cramped:#?}");
+        assert!(body[3].starts_with("╭ c "), "{cramped:#?}");
     }
 
     fn post_at(dir: &std::path::Path, name: &str, at: &str, body: Body) {
@@ -3571,12 +3718,12 @@ max = 3
     }
 
     #[test]
-    fn before_anything_is_selected_the_pane_is_an_empty_box() {
+    fn with_nothing_selected_there_is_no_detail_box() {
         let app = App::new(Options::default(), truecolor());
         let now = Instant::now();
         let terminal = render_at(&app, now, 120, 20);
         assert!(
-            lines(&terminal)[2].contains("╭─"),
+            !lines(&terminal)[2].contains("╭─"),
             "{:#?}",
             lines(&terminal)
         );
@@ -3601,8 +3748,8 @@ max = 3
         assert_eq!(
             shown[retired - 1..=retired],
             [
-                "││   NAME    STATUS                                 BRANCH  WORKT││                                                   ││",
-                "││ · done-1  retired 2026-11-17T08:00:00Z           -       wt-do││                                                   ││",
+                "││   NAME    STATUS                                 BRANCH  WORKTREE   PANE                                           ││",
+                "││ · done-1  retired 2026-11-17T08:00:00Z           -       wt-done-1  w1:pdone-1                                     ││",
             ]
         );
         assert!(
