@@ -558,7 +558,7 @@ fn only_the_humans_shepherd_names_its_herdr_agent_at_session_start() {
          (its `pane_id` is `$HERDR_PANE_ID`)",
         "if its name is already `shepherd`, carry on without a warning",
         "otherwise retry the rename once its `launch_pending` clears",
-        "On any other error, carry on and tell the human that `S` can't find you",
+        "On any other error, carry on and tell the human that `s` can't find you",
     ] {
         assert!(naming.contains(rule), "{naming}");
     }
