@@ -157,6 +157,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D142](decisions/D142.md) | Amends D124. A moving broker probes the new install with `broker <lead> --check` (its startup config checks), passes the new image the install's path and dev/ino so a late install is still followed, notes a non-executable install once, and doctor waits once for brokers under one shared 3 s deadline, only for those following the `PATH` install. |
 | [D143](decisions/D143.md) | A lead's question unanswered for 30 minutes (no prompt in its pane, recorded by `prompt-hook` as `answered`) sends a `waiting` notification from its watch, once per stretch; an armed shepherd's watch prints `<lead> waiting <age>`; status and view show the age; doctor warns when a lead runs with `[notify]` off. Amends D32, D57. |
 | [D144](decisions/D144.md) | Amends D114, D121. A credentials member is also denied `~/.claude.json`, docker's and npm's configs, `github-copilot/` and `store --file` helpers' files (`/proc/<pid>/environ` stays open: a `Read` deny there breaks the sandbox); five more GitHub token variables are blanked; a GUID-tagged virtiofs share counts as a Windows drive, and an unnameable one refuses the member. |
+| [D145](decisions/D145.md) | A grill gets its background first: the shepherd runs `add --no-focus`, always `tell`s background, then focuses the pane, and the grill waits for it before its first question; in a led herd the lead notes `grill-<n> merged: LH-<n> closed out` to the shepherd, the grill's own ping being best-effort. Amends D112. |
 
 ## Emerging model
 
