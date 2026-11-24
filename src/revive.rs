@@ -721,20 +721,15 @@ fn revive_one(
         }
     };
     let worker = match lead {
-        Some(_) => None,
-        None => match worker_sandbox::to_resume(&req.paths, record) {
-            Ok(member) => member,
-            Err(error) => {
-                return Outcome::Failed {
-                    step: "sandbox",
-                    error,
-                };
-            }
-        },
+        Some(_) => Ok(None),
+        None => worker_sandbox::to_resume(&req.paths, record),
     };
     // A sandbox always lets its cwd be written, so a kept worker's is its kept worktree.
-    let kept_worktree = worker.as_ref().and_then(|m| m.worktree.as_ref());
-    let cwd = match (&lead, kept_worktree) {
+    let kept_worktree = match &worker {
+        Ok(Some(member)) => member.worktree.clone(),
+        _ => None,
+    };
+    let cwd = match (&lead, &kept_worktree) {
         (Some((_, worktree)), _) | (None, Some(worktree)) => worktree,
         (None, None) => record.worktree.as_ref().unwrap_or(&record.repo),
     };
@@ -798,6 +793,15 @@ fn revive_one(
             rearm: Rearm::NotSent,
         };
     }
+    let worker = match worker {
+        Ok(member) => member,
+        Err(error) => {
+            return Outcome::Failed {
+                step: "sandbox",
+                error,
+            };
+        }
+    };
     let mut lead_args = None;
     let mut unsandboxed = None;
     let mut sockets_unblocked = None;
@@ -1178,6 +1182,55 @@ mod tests {
             ),
             "{out}"
         );
+        assert!(herdr.started().is_empty());
+    }
+
+    /// [`kept_worker`] whose kept record won't parse.
+    fn unparseable_kept_worker(req: &ReviveRequest, cwd: &Path) -> AgentRecord {
+        let record = kept_worker(req, "sandbox = \"require\"", cwd);
+        let kept = req.paths.config_dir().join("sandbox/w1.member.json");
+        std::fs::write(kept, "not json").unwrap();
+        record
+    }
+
+    #[test]
+    fn a_live_worker_whose_kept_record_wont_parse_is_alive() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("w1"), Some("sess-w1"), "w1:p4");
+        let req = request();
+        let mut ledger = ledger([unparseable_kept_worker(&req, cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!((out.as_str(), code), ("alive w1 w1:p4", 0));
+    }
+
+    #[test]
+    fn a_dry_run_would_resume_a_worker_whose_kept_record_wont_parse() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = ReviveRequest {
+            dry_run: true,
+            ..request()
+        };
+        let mut ledger = ledger([unparseable_kept_worker(&req, cwd.path())]);
+
+        let (out, _) = run(&herdr, &mut ledger, &req);
+
+        assert!(out.starts_with("would resume w1 "), "{out}");
+    }
+
+    #[test]
+    fn a_worker_whose_kept_record_wont_parse_isnt_revived() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr();
+        let req = request();
+        let mut ledger = ledger([unparseable_kept_worker(&req, cwd.path())]);
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_ne!(code, 0, "{out}");
+        assert!(out.starts_with("failed w1: sandbox: parse "), "{out}");
         assert!(herdr.started().is_empty());
     }
 

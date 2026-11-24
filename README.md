@@ -67,7 +67,8 @@ It takes `--no-splash` (or `LOOPHERD_NO_SPLASH=1`), `--with-agents`,
 The same script is served as
 `https://github.com/junderdo/loopherd/releases/latest/download/install.sh`.
 
-**Update:** run the one-liner again.
+**Update:** `loopherd update` (`--check` to only look, `--version vX.Y.Z`
+to pick a release, older ones included).
 
 </td><td>
 
@@ -288,7 +289,9 @@ as its main checkout. Then, in order:
    A lead's Claude args (`[lead].args`, else the herd's `args`, then the
    command line) may be only `--model`, `--effort`, `--verbose` and
    `--permission-mode` with `default`, `manual`, `auto` or `plan`; any
-   other is refused or warned of the same way. Under `require`, a lead
+   other is refused or warned of the same way, but loopherd's own launch
+   flags, `--settings`, `--mcp-config` and `--strict-mcp-config`, are
+   refused under both `require` and `prefer`. Under `require`, a lead
    started with an arg now off that list can't be restarted or revived
    until you retire it and run `loopherd lead` again.
    A lead starts with no MCP servers; list the ones it may use, by the

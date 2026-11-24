@@ -867,7 +867,14 @@ pub fn launch_flag_refusals(
 ) -> Vec<String> {
     let drop = |flag: &str| match herd_args {
         Some((herd, shared)) if launch_flags_in(shared).contains(&flag) => {
-            herd_args_fix(herd, "it")
+            let command_line = &args[shared.len().min(args.len())..];
+            match launch_flags_in(command_line).contains(&flag) {
+                true => format!(
+                    "{}, and drop it from the command line",
+                    herd_args_fix(herd, "it")
+                ),
+                false => herd_args_fix(herd, "it"),
+            }
         }
         _ => "drop it from [lead].args, the herd's args and the command line".into(),
     };
@@ -910,21 +917,24 @@ pub fn fresh_arg_warnings(paths: &Paths, name: &str, lead: &Lead) -> Result<Vec<
 }
 
 fn arg_warnings(paths: &Paths, name: &str, lead: &Lead, from: ArgsFrom) -> Result<Vec<String>> {
-    let shared = match from {
-        ArgsFrom::Fresh => match herd::lead_args(paths, &lead.herd)? {
-            (configured, true) => Some(configured),
-            (_, false) => None,
-        },
+    let configured = match from {
+        ArgsFrom::Fresh => Some(herd::lead_args(paths, &lead.herd)?),
         ArgsFrom::Kept => None,
     };
-    let herd_args = shared.as_deref().map(|args| (lead.herd.as_str(), args));
+    let herd_args = match &configured {
+        Some((args, true)) => Some((lead.herd.as_str(), args.as_slice())),
+        _ => None,
+    };
     if let Some(why) = launch_flag_refusals(name, &lead.args, herd_args)
         .into_iter()
         .next()
     {
         bail!(why);
     }
-    let disallowed = disallowed_args(paths, &lead.herd, &lead.args, from)?;
+    let configured = configured
+        .as_ref()
+        .map(|(args, shared)| (args.as_slice(), *shared));
+    let disallowed = disallowed_args(&lead.herd, &lead.args, configured);
     if let Some(refusal) = disallowed_refusal(paths, name, &lead.herd, &disallowed, from)? {
         return Err(refusal);
     }
@@ -1189,9 +1199,16 @@ fn disallowed_refusal(
     if disallowed.is_empty() {
         return Ok(None);
     }
+    let from_source = |source| disallowed.iter().any(|arg| arg.source == source);
     let fix = match from {
-        ArgsFrom::Fresh if disallowed.iter().any(|arg| arg.from_herd_args) => {
-            herd_args_fix(herd, "those")
+        ArgsFrom::Fresh if from_source(Source::HerdArgs) => {
+            match from_source(Source::CommandLine) {
+                true => format!(
+                    "{}, and drop those from the command line",
+                    herd_args_fix(herd, "those from its args")
+                ),
+                false => herd_args_fix(herd, "those"),
+            }
         }
         ArgsFrom::Fresh => "drop those".to_string(),
         ArgsFrom::Kept => {
@@ -1227,55 +1244,66 @@ pub const ALLOWED_ARGS: &str =
 /// An arg outside the allowlist, shown with its values and where it was set.
 struct Disallowed {
     line: String,
-    from_herd_args: bool,
+    source: Source,
+}
+
+/// Where a lead's arg was set.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Source {
+    /// The herd's `args`, which its workers take too.
+    HerdArgs,
+    LeadArgs,
+    CommandLine,
+    /// Kept from its start, the source not recorded.
+    Kept,
 }
 
 /// Each of a lead's `args`, without loopherd's own launch flags, that the
-/// allowlist doesn't cover. D100 says why it's an allowlist.
+/// allowlist doesn't cover. `configured` is what `args` start with from the
+/// herd file and whether those are the herd's shared args; `None` means
+/// they were kept from its start. D100 says why it's an allowlist.
 fn disallowed_args(
-    paths: &Paths,
     herd: &str,
     args: &[String],
-    from: ArgsFrom,
-) -> Result<Vec<Disallowed>> {
-    let sources = match from {
-        ArgsFrom::Kept => vec![(args, "the args it was started with".to_string(), false)],
-        ArgsFrom::Fresh => {
-            let (configured, shared) = herd::lead_args(paths, herd)?;
+    configured: Option<(&[String], bool)>,
+) -> Vec<Disallowed> {
+    let sources = match configured {
+        None => vec![(
+            args,
+            "the args it was started with".to_string(),
+            Source::Kept,
+        )],
+        Some((configured, shared)) => {
             let rest = &args[configured.len().min(args.len())..];
-            let source = match shared {
-                true => format!("herd {herd}'s args"),
-                false => "[lead].args".into(),
+            let (shown, source) = match shared {
+                true => (format!("herd {herd}'s args"), Source::HerdArgs),
+                false => ("[lead].args".into(), Source::LeadArgs),
             };
             vec![
-                (&args[..args.len() - rest.len()], source, shared),
-                (rest, "the command line".into(), false),
+                (&args[..args.len() - rest.len()], shown, source),
+                (rest, "the command line".into(), Source::CommandLine),
             ]
         }
     };
-    Ok(sources
+    sources
         .into_iter()
-        .flat_map(|(args, source, from_herd_args)| {
+        .flat_map(|(args, shown, source)| {
             outside_allowlist(args)
                 .into_iter()
                 .map(move |arg| Disallowed {
-                    line: format!("{arg}, from {source}"),
-                    from_herd_args,
+                    line: format!("{arg}, from {shown}"),
+                    source,
                 })
         })
-        .collect())
+        .collect()
 }
 
 /// What herd `herd`'s file passes its lead outside the allowlist, one line
 /// each, but for loopherd's own launch flags, which [`launch_flag_refusals`] names.
 pub fn configured_disallowed_args(paths: &Paths, herd: &str) -> Result<Vec<String>> {
-    let (configured, _) = herd::lead_args(paths, herd)?;
-    let disallowed = disallowed_args(
-        paths,
-        herd,
-        &without_launch_flags(&configured),
-        ArgsFrom::Fresh,
-    )?;
+    let (configured, shared) = herd::lead_args(paths, herd)?;
+    let configured = without_launch_flags(&configured);
+    let disallowed = disallowed_args(herd, &configured, Some((&configured, shared)));
     Ok(disallowed.into_iter().map(|arg| arg.line).collect())
 }
 
@@ -1703,7 +1731,7 @@ pub fn check_running(
         Some(kept) => without_launch_flags(&kept.args),
         None => without_launch_flags(claude_args),
     };
-    let disallowed = disallowed_args(paths, herd, &args, ArgsFrom::Kept)?;
+    let disallowed = disallowed_args(herd, &args, None);
     if let Some(refusal) = disallowed_refusal(paths, name, herd, &disallowed, ArgsFrom::Kept)? {
         return Err(refusal);
     }
@@ -1959,6 +1987,7 @@ fn settings_on(
             "scripts/install *",
             "./scripts/install",
             "./scripts/install *",
+            "loopherd update",
         ]);
     }
     sandbox["excludedCommands"] = json!(excluded);

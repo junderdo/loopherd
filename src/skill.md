@@ -33,9 +33,12 @@ The human's shepherd only, never a lead or member: also at the start of
 each session, name your herdr agent so the herd view's `S` focuses you
 instead of starting a second shepherd: `herdr agent rename
 "$HERDR_PANE_ID" shepherd`. If herdr answers `agent_name_taken`, another
-shepherd already runs in the pane it names; stop and tell the human. On
-any other error, carry on and tell the human that `S` can't find you
-(D88).
+shepherd already runs in the pane it names; stop and tell the human. If
+it answers `agent_launch_pending`, find your entry in `herdr agent list`
+(its `pane_id` is `$HERDR_PANE_ID`): if its name is already `shepherd`,
+carry on without a warning, since `S` started you under that name;
+otherwise retry the rename once its `launch_pending` clears. On any other
+error, carry on and tell the human that `S` can't find you (D88, D146).
 
 ### Setting up a project
 
@@ -673,7 +676,9 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   `[lead].args`, else the herd's `args`, then the command line, may be
   only `--model`, `--effort`, `--verbose` and `--permission-mode` with
   `default`, `manual`, `auto` or `plan` (each also as `--flag=value`);
-  any other is treated as a loosening is, and `lead --dry-run` checks
+  any other is treated as a loosening is (`--settings`, `--mcp-config` and
+  `--strict-mcp-config`, loopherd's own launch flags, are refused under
+  both `require` and `prefer`), and `lead --dry-run` checks
   them too. To keep an arg the workers need from the lead, give it its
   own `[lead].args` rather than editing the herd's `args`. A lead has no MCP tools
   unless its herd's `[lead] mcp_servers` names servers from the human's
@@ -751,7 +756,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   lead's mailbox saying its broker couldn't move, a lead's
   `<lead>'s broker predates this loopherd` error, its `can't read` reply
   error, or `loopherd doctor`'s warning that a broker doesn't run the
-  loopherd on PATH (which `scripts/install` shows). Run it from your own
+  loopherd on PATH (which `scripts/install` and `loopherd update` show). Run it from your own
   shell, never a lead's or an `after_merge`, as a background task: it can
   wait out a feed. It asks the broker to stop once its request in flight
   is answered, then starts one on the installed binary, which serves what
@@ -935,7 +940,8 @@ What differs from the shepherd:
 
   When `merge`, `install` or `rebase` is off, the PreToolUse hook also
   blocks the Bash commands that need it (`gh pr merge` or the merge API, a
-  `scripts/install` or `loopherd install-hook`, a rebase or force-push), in
+  `scripts/install`, `loopherd install-hook` or `loopherd update`, a rebase or
+  force-push), in
   your pane and in any Claude nested in it, with a line naming the switch;
   ask instead. A herd file or `config.toml` it can't read blocks all three. A `feed` from
   your pane runs none of `after_merge` when the hook would deny any command
@@ -987,7 +993,8 @@ What differs from the shepherd:
   too, so say so in your last message and end your turn.
   Your `watch` still calls herdr itself, not through your broker. Run
   `loopherd watch` bare, as its own Bash call, to run it outside the
-  sandbox (D104), and `scripts/install` too with `install` on: a
+  sandbox (D104), and `scripts/install` or a bare `loopherd update` (no
+  flags) too with `install` on: a
   `cd x &&`, a redirect, `$(…)` or a path to the binary keeps it inside,
   where it can't write its files in `reports/`. Your watch refuses `--settings`. `revive` is the shepherd's
   or the human's. `tell`, `read`, `restart` and `prompt` reach only your

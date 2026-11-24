@@ -136,6 +136,7 @@ impl Sandbox {
         cmd.env("HOME", &self.home)
             .env("XDG_STATE_HOME", &self.state)
             .env("PATH", &self.path)
+            .env("LOOPHERD_CONFIG_DIR", self.home.join(".config/loopherd"))
             .env("LOOPHERD_NO_SPLASH", "1")
             .env_remove("CLAUDE_CONFIG_DIR");
     }

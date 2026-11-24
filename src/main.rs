@@ -54,6 +54,7 @@ mod template;
 mod test_fakes;
 mod tool_hook;
 mod tui;
+mod update;
 mod usage;
 // build.rs includes it; here only for its tests.
 #[cfg(test)]
@@ -507,6 +508,19 @@ enum Command {
         /// herdr and config checks still run.
         herd: Option<String>,
     },
+    /// Bring a release install (the one-line installer's) up to date by
+    /// running the target release's own install.sh, as install.toml in the
+    /// config dir records it. Never moves to an older release unless
+    /// --version names it; replaces ~/.local/bin/loopherd.
+    Update {
+        /// Only report whether a newer release is out: exits 0 up to date,
+        /// 1 behind, 2 when it couldn't check.
+        #[arg(long, conflicts_with = "version")]
+        check: bool,
+        /// Install this release, older or the current one included.
+        #[arg(long, value_name = "vX.Y.Z")]
+        version: Option<String>,
+    },
     /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks to Claude's
     /// user settings, calling this binary, and write the `--skill` guide as the loopherd
     /// skill; safe to re-run. Backs the settings file up before changing it.
@@ -789,6 +803,7 @@ fn main() -> ExitCode {
             .exit();
     };
     if let Some((name, why)) = refused_to_leads(&command)
+        && !(matches!(command, Command::Update { .. }) && own_lead_installs())
         && let Err(e) = refuse_from_lead(why, by_pane(&command), ledger_free(&command))
     {
         eprintln!("loopherd {name}: {e:#}");
@@ -911,6 +926,7 @@ fn main() -> ExitCode {
             "install-hook",
             run_install_hook(remove, settings, skills_dir),
         ),
+        Command::Update { check, version } => ("update", run_update(check, version)),
         Command::InstallHerdrKeys { remove } => {
             ("install-herdr-keys", run_install_herdr_keys(remove))
         }
@@ -964,6 +980,11 @@ fn refused_to_leads(command: &Command) -> Option<(&'static str, &'static str)> {
         Command::RestartWait { .. } => {
             ("restart-wait", "a lead's broker starts its restart waiter")
         }
+        // --check changes nothing, as doctor doesn't.
+        Command::Update { check: false, .. } => (
+            "update",
+            "updating loopherd is the human's unless the lead's herd sets [lead] install = true",
+        ),
         _ => return None,
     })
 }
@@ -991,6 +1012,23 @@ fn refuse_from_lead(why: &str, by_pane: bool, ledger_free: bool) -> Result<()> {
     broker::refuse_from_lead(lead.as_ref(), &ledger, &process::ProcFs, why, ledger_free)
 }
 
+/// Whether the lead in this pane may install, by its herd's `[lead] install`.
+fn own_lead_installs() -> bool {
+    let Some(lead) = own_lead() else {
+        return false;
+    };
+    let installs = || -> Result<bool> {
+        let ledger = FileLedger::new(FileLedger::default_path()?);
+        let herd = ledger
+            .entries()?
+            .remove(lead.lead())
+            .and_then(|record| record.herd)
+            .context("the lead's herd")?;
+        Ok(herd::lead_switches(&Paths::from_env()?, &herd)?.install)
+    };
+    installs().unwrap_or(false)
+}
+
 /// Refused commands that change only config or herd files, never the ledger.
 fn ledger_free(command: &Command) -> bool {
     matches!(
@@ -1002,6 +1040,7 @@ fn ledger_free(command: &Command) -> bool {
             | Command::Config { .. }
             | Command::Setup(_)
             | Command::MergeGuard { .. }
+            | Command::Update { .. }
     )
 }
 
@@ -2441,6 +2480,34 @@ fn run_doctor(
         false => print!("{}", doctor::text(&checks, verbose)),
     }
     Ok(doctor::exit_code(&checks))
+}
+
+fn run_update(check: bool, version: Option<String>) -> Result<i32> {
+    let places = (|| -> Result<update::Places> {
+        let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+        Ok(update::Places {
+            config_dir: Paths::from_env()?.config_dir().to_path_buf(),
+            installed: home.join(".local/bin/loopherd"),
+            running: std::env::current_exe().context("find this binary")?,
+            base: std::env::var("LOOPHERD_RELEASE_BASE")
+                .ok()
+                .filter(|base| !base.is_empty()),
+        })
+    })();
+    let places = match places {
+        Err(e) if check => {
+            eprintln!("loopherd update: {e:#}");
+            return Ok(2);
+        }
+        places => places?,
+    };
+    let want = match (check, version) {
+        (true, _) => update::Want::Check,
+        (false, Some(version)) => update::Want::Version(version),
+        (false, None) => update::Want::Latest,
+    };
+    let on_path = |name: &str| on_path(name).is_some();
+    update::update(&places, want, &on_path, &mut std::io::stdout())
 }
 
 fn doctor_install(settings: Option<PathBuf>) -> Result<doctor::Install> {
