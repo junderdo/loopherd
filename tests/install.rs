@@ -245,11 +245,16 @@ fn install_records_a_source_install_of_its_checkout_over_a_release_record() {
     let out = sandbox.install(&["--no-extras"]);
 
     assert!(out.status.success(), "{out:?}");
+    let head = Command::new("git")
+        .args(["-C", env!("CARGO_MANIFEST_DIR"), "rev-parse", "HEAD"])
+        .output()
+        .unwrap();
     assert_eq!(
         sandbox.record().unwrap(),
         format!(
-            "kind = \"source\"\ncheckout = \"{}\"\n",
-            env!("CARGO_MANIFEST_DIR")
+            "kind = \"source\"\ncheckout = \"{}\"\ncommit = \"{}\"\n",
+            env!("CARGO_MANIFEST_DIR"),
+            String::from_utf8_lossy(&head.stdout).trim()
         )
     );
 }
@@ -1364,4 +1369,258 @@ fn a_caller_with_a_strict_ifs_and_set_u_gets_the_whole_splash() {
     let out = without_escapes(&raw);
     assert!(out.contains("after"), "{out}");
     assert!(out.contains("exit 0"), "{out}");
+}
+
+fn agents_ledger(sandbox: &Sandbox) -> PathBuf {
+    sandbox.home.join(".local/state/loopherd/agents.sha256")
+}
+
+fn repo_agent(name: &str) -> String {
+    fs::read_to_string(format!("{}/agents/{name}.md", env!("CARGO_MANIFEST_DIR"))).unwrap()
+}
+
+fn sha256(text: &str) -> String {
+    use std::io::Write as _;
+    let mut child = Command::new("sha256sum")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(text.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    String::from_utf8(out.stdout).unwrap()[..64].to_string()
+}
+
+#[test]
+fn update_runs_plain_setup_then_doctor_and_installs_no_agent_types_without_a_ledger() {
+    let sandbox = Sandbox::new(false);
+
+    let out = sandbox.install(&["--update"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        fs::read_to_string(&sandbox.log).unwrap(),
+        "new install-hook\nnew setup\nnew doctor\n"
+    );
+    assert!(!sandbox.home.join(".claude/agents").exists());
+    assert!(sandbox.record().is_some());
+}
+
+#[test]
+fn update_prints_the_skills_plugin_update_command_when_the_plugin_is_installed() {
+    let sandbox = Sandbox::new(false);
+
+    let out = sandbox.install(&["--update"]);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("claude plugin update mattpocock-skills@claude-plugins-official"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn update_says_nothing_about_the_skills_plugin_when_it_isnt_installed() {
+    let sandbox = Sandbox::new(false);
+    executable(
+        &sandbox.fake_bin.join("claude"),
+        "#!/bin/sh\n[ \"$*\" != 'plugin list --json' ] || echo '[{\"id\":\"mattpocock-skills@claude-plugins-official\",\"scope\":\"project\"}]'\n",
+    );
+
+    let out = sandbox.install(&["--update"]);
+
+    assert!(out.status.success(), "{out:?}");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(!stdout.contains("mattpocock-skills"), "{stdout}");
+}
+
+#[test]
+fn update_refreshes_agent_types_loopherd_installed_when_the_ledger_exists() {
+    let sandbox = Sandbox::new(false);
+    let agents = sandbox.home.join(".claude/agents");
+    fs::create_dir_all(&agents).unwrap();
+    let old = "---\nname: builder\n---\nan older builder\n";
+    fs::write(agents.join("builder.md"), old).unwrap();
+    fs::create_dir_all(agents_ledger(&sandbox).parent().unwrap()).unwrap();
+    fs::write(
+        agents_ledger(&sandbox),
+        format!("{} {}\n", sha256(old), agents.join("builder.md").display()),
+    )
+    .unwrap();
+
+    let out = sandbox.install(&["--update"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        fs::read_to_string(agents.join("builder.md")).unwrap(),
+        repo_agent("builder")
+    );
+}
+
+#[test]
+fn update_off_a_terminal_keeps_an_edited_agent_type_with_a_warning() {
+    let sandbox = Sandbox::new(false);
+    let agents = sandbox.home.join(".claude/agents");
+    fs::create_dir_all(&agents).unwrap();
+    let installed = "---\nname: builder\n---\nan older builder\n";
+    let edited = "---\nname: builder\n---\nmy own builder\n";
+    fs::write(agents.join("builder.md"), edited).unwrap();
+    fs::create_dir_all(agents_ledger(&sandbox).parent().unwrap()).unwrap();
+    fs::write(
+        agents_ledger(&sandbox),
+        format!(
+            "{} {}\n",
+            sha256(installed),
+            agents.join("builder.md").display()
+        ),
+    )
+    .unwrap();
+
+    let out = sandbox.install(&["--update"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(
+        fs::read_to_string(agents.join("builder.md")).unwrap(),
+        edited
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(stdout.contains("kept"), "{stdout}");
+    assert!(
+        stdout.contains("edited since loopherd installed it"),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn update_with_an_extra_or_a_setup_flag_is_an_error_that_builds_nothing() {
+    for flag in [
+        "--no-extras",
+        "--with-agents",
+        "--with-skills",
+        "--with-herdr-plugin",
+        "--with-herdr-keys",
+        "--lead-defaults",
+        "--context",
+        "--revive-on-startup",
+    ] {
+        let sandbox = Sandbox::new(false);
+
+        let out = sandbox.install(&["--update", flag]);
+
+        assert_eq!(out.status.code(), Some(2), "{flag}: {out:?}");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("--update"),
+            "{flag}: {out:?}"
+        );
+        assert!(!sandbox.log.exists(), "{flag}");
+        assert!(!sandbox.installed().exists(), "{flag}");
+    }
+}
+
+#[test]
+fn update_on_a_terminal_shows_no_splash() {
+    let sandbox = Sandbox::new(false);
+    let Some(mut cmd) = pty(&format!(
+        "stty cols 100 rows 30; exec {INSTALL} --update --settings /tmp/s.json </dev/null"
+    )) else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    let out = cmd
+        .env("HOME", &sandbox.home)
+        .env("PATH", &sandbox.path)
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(find(&out.stdout, ALT_SCREEN).is_none(), "{out:?}");
+}
+
+#[test]
+fn update_leaves_out_an_agent_type_the_human_removed() {
+    let sandbox = Sandbox::new(false);
+    let agents = sandbox.home.join(".claude/agents");
+    fs::create_dir_all(&agents).unwrap();
+    fs::write(agents.join("builder.md"), repo_agent("builder")).unwrap();
+    fs::create_dir_all(agents_ledger(&sandbox).parent().unwrap()).unwrap();
+    fs::write(
+        agents_ledger(&sandbox),
+        format!(
+            "{} {}\n{} {}\n",
+            sha256(&repo_agent("builder")),
+            agents.join("builder.md").display(),
+            sha256(&repo_agent("scout")),
+            agents.join("scout.md").display()
+        ),
+    )
+    .unwrap();
+
+    let out = sandbox.install(&["--update"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(agents.join("builder.md").exists());
+    assert!(!agents.join("scout.md").exists());
+    assert!(!agents.join("reviewer.md").exists());
+}
+
+#[test]
+fn update_installs_no_agent_types_where_the_ledger_names_only_another_dir() {
+    let sandbox = Sandbox::new(false);
+    fs::create_dir_all(agents_ledger(&sandbox).parent().unwrap()).unwrap();
+    fs::write(
+        agents_ledger(&sandbox),
+        format!(
+            "{} /elsewhere/agents/builder.md\n",
+            sha256(&repo_agent("builder"))
+        ),
+    )
+    .unwrap();
+
+    let out = sandbox.install(&["--update"]);
+
+    assert!(out.status.success(), "{out:?}");
+    assert!(!sandbox.home.join(".claude/agents").exists());
+}
+
+#[test]
+fn update_with_settings_names_the_config_dir_in_the_skills_plugin_update_command() {
+    let sandbox = Sandbox::new(false);
+    let claude = sandbox.dir.path().join("claude");
+    fs::create_dir_all(&claude).unwrap();
+    let settings = claude.join("settings.json");
+
+    let out = sandbox.install(&["--update", "--settings", settings.to_str().unwrap()]);
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(&format!(
+            "CLAUDE_CONFIG_DIR={} claude plugin update mattpocock-skills@claude-plugins-official",
+            claude.display()
+        )),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn a_failed_install_hook_after_the_rename_leaves_the_install_record_as_it_was() {
+    let sandbox = Sandbox::new(false);
+    let before = format!(
+        "kind = \"source\"\ncheckout = \"{}\"\ncommit = \"0000000000000000000000000000000000000000\"\n",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    fs::create_dir_all(sandbox.config()).unwrap();
+    fs::write(sandbox.config().join("install.toml"), &before).unwrap();
+    sandbox.exits("install-hook", 1);
+
+    let out = sandbox.install(&["--no-extras"]);
+
+    assert!(!out.status.success(), "{out:?}");
+    assert!(sandbox.installed().exists());
+    assert_eq!(sandbox.record().unwrap(), before);
 }

@@ -14,19 +14,22 @@ last, so a failure there is the same report.
 
 ## Feed
 
-From the main checkout, `git pull --ff-only`, then refresh the `loopherd` on
-PATH:
+Refresh the `loopherd` on PATH:
 
 ```bash
-scripts/install
+loopherd update
 ```
 
-It needs `jq`. It builds, copies the binary to `~/.local/bin/loopherd` through
-a temp file and a rename, so a failed build keeps the last good one, and runs
+For a source install it fast-forwards the recorded checkout's default branch
+and runs `scripts/install --update`; it refuses a dirty tree or another
+branch checked out, naming why. By hand, from the main checkout:
+`git pull --ff-only && scripts/install --update`. `scripts/install` needs
+`jq`. It builds, copies the binary to `~/.local/bin/loopherd` through a temp
+file and a rename, so a failed build keeps the last good one, and runs
 `loopherd install-hook`, which installs the hooks and the skill
 (`~/.agents/skills/loopherd`, linked from `~/.claude/skills/loopherd`). A
-release install (the one-line installer) refreshes with `loopherd update`
-instead; restart any open `loopherd view` after it. Then:
+release install (the one-line installer) also refreshes with
+`loopherd update`. Restart any open `loopherd view` after it. Then:
 
 ```bash
 loopherd feed loopherd-cards --dry-run
