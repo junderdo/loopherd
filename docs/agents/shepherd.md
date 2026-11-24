@@ -121,9 +121,14 @@ herdr agent focus <pane>
 The quoted heredoc keeps the background's backticks and `$(…)` from running in
 your shell; never pass it inline in double quotes. A line of the background
 that is exactly the delimiter would end it early and run the rest as shell, so
-check for one before sending. If `tell` fails, still focus the pane and tell
-the human to give the grill the background themselves. The grill sends them
-back to your pane when the conversation ends.
+check for one before sending. The grill sends the human back to your pane
+when the conversation ends.
+
+- **`add` printed `blocked: answer it in pane <p>, …`**: the grill was never
+  prompted. Focus that pane for the human to answer the dialog, run
+  `loopherd prompt grill-<n>`, then the block above.
+- **`tell` failed after a prompted start**: still focus the pane, and have
+  the human give the grill the background themselves.
 
 ### Interactive or batch
 
@@ -162,8 +167,13 @@ feeds, and its reap (`retire --close grill-<n>`) closes the grill's pane,
 worktree and branch before the grill runs its close-out. The lead then leaves
 you a note, `grill-<n> merged: LH-<n> closed out`, which your watch prints as
 `lead-loopherd-cards note …`; take that as the close-out and do nothing more.
-For an unled herd, close out either way below; feed's `after_merge` and the
-reap (once the card is in Done) then close the grill's pane, worktree and
+The lead runs its own copy of its prompt
+(`~/.config/loopherd/herds/loopherd-cards-lead.md`), so once D145 lands, have
+the human carry its after-merge note sentence from
+[examples/loopherd-cards-lead.md](../examples/loopherd-cards-lead.md) into
+that copy by hand (a copy-over drops their local edits), then restart the
+lead. For an unled herd, close out either way below; feed's `after_merge` and
+the reap (once the card is in Done) then close the grill's pane, worktree and
 branch.
 
 - **On the grill's line**: check
@@ -179,7 +189,14 @@ branch.
   the card to Done, run `scripts/trello unblock`, then
   `loopherd feed loopherd-cards`.
 
-Neither path needs the tab ID: the reap finds grill-<n>'s tab from its record.
+- **grill-<n> gone from `loopherd status`** with no line from the grill or
+  note from the lead (a lead prompt without the D145 note, or a pane closed
+  before its close-out): check its PR as above. When it reads MERGED and the
+  card isn't in Done, close out as in the bullet above; when the card is in
+  Done, the lead already did.
+
+Check grill-<n>'s row in `loopherd status` on each watch wake until one of
+these closes it out. Neither path needs the tab ID: the reap finds grill-<n>'s tab from its record.
 If the PR reads anything but MERGED, close nothing out.
 
 Closing a grill tab by hand (`herdr tab close`) while the human is in it
