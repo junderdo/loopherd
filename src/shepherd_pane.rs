@@ -51,33 +51,57 @@ pub fn summon(
     view: Option<&ViewPane>,
     layout: Layout,
 ) -> Result<Summoned> {
-    let agents = herdr.agents()?;
-    let named = agents.iter().find(|a| a.name.as_deref() == Some(SHEPHERD));
-    let live = match (named, shepherd_resume::recorded_place_and_shell(state)) {
-        (Some(agent), _) => Some(agent.pane_id.clone()),
-        (None, Some((place, shell))) => {
-            let here = herdr.socket().as_deref() == Some(place.socket.as_path())
-                && agents.iter().any(|a| a.pane_id == place.pane);
-            let claude_runs = process::live(procs, Some(place.process)).is_some();
-            // The shell outlives a Claude restarted in it; a pane id reused later runs another.
-            let in_its_shell = match process::live(procs, shell) {
-                Some(shell) if here && !claude_runs => {
-                    herdr.shell_pid(&place.pane)? == Some(shell.pid)
-                }
-                _ => false,
-            };
-            match (here && (claude_runs || in_its_shell), claude_runs) {
-                (true, _) => Some(place.pane),
-                (false, true) => return Ok(Summoned::Elsewhere(place)),
-                (false, false) => None,
-            }
-        }
-        (None, None) => None,
+    let pane = match live_shepherd(herdr, procs, state)? {
+        Live::Here(pane) => pane,
+        Live::Elsewhere(place) => return Ok(Summoned::Elsewhere(place)),
+        Live::Gone => return start_beside(herdr, state, view, layout),
     };
-    if let Some(pane) = live {
-        herdr.focus(&pane)?;
-        return Ok(Summoned::Focused(pane));
+    herdr.focus(&pane)?;
+    Ok(Summoned::Focused(pane))
+}
+
+/// Where the live shepherd runs, as the herd view's `S` finds it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Live {
+    /// In this pane of this herdr.
+    Here(String),
+    /// Its recorded Claude runs, but not in a pane of this herdr.
+    Elsewhere(Place),
+    Gone,
+}
+
+/// The agent named `shepherd`, else the place `shepherd.json` in `state`
+/// records, while its Claude, or the shell it ran in, is alive (D82, D88).
+pub fn live_shepherd(herdr: &dyn Herdr, procs: &dyn Procs, state: &Path) -> Result<Live> {
+    let agents = herdr.agents()?;
+    if let Some(agent) = agents.iter().find(|a| a.name.as_deref() == Some(SHEPHERD)) {
+        return Ok(Live::Here(agent.pane_id.clone()));
     }
+    let Some((place, shell)) = shepherd_resume::recorded_place_and_shell(state) else {
+        return Ok(Live::Gone);
+    };
+    let here = herdr.socket().as_deref() == Some(place.socket.as_path())
+        && agents.iter().any(|a| a.pane_id == place.pane);
+    let claude_runs = process::live(procs, Some(place.process)).is_some();
+    // The shell outlives a Claude restarted in it; a pane id reused later runs another.
+    let in_its_shell = match process::live(procs, shell) {
+        Some(shell) if here && !claude_runs => herdr.shell_pid(&place.pane)? == Some(shell.pid),
+        _ => false,
+    };
+    Ok(match (here && (claude_runs || in_its_shell), claude_runs) {
+        (true, _) => Live::Here(place.pane),
+        (false, true) => Live::Elsewhere(place),
+        (false, false) => Live::Gone,
+    })
+}
+
+/// Starts a shepherd split off `view`'s pane; `NoPane` without one.
+fn start_beside(
+    herdr: &dyn Herdr,
+    state: &Path,
+    view: Option<&ViewPane>,
+    layout: Layout,
+) -> Result<Summoned> {
     let Some(view) = view else {
         return Ok(Summoned::NoPane);
     };
