@@ -105,6 +105,9 @@ Init never launches an agent.
    An optional `[queue] low_at = <n>`, default `2 × max` and at least
    `max`, is the claimable count at or below which a lead's watch says the
    herd is `running low` (D116).
+   An optional top-level `stalled_after = <minutes>`, default 30 and at
+   least 1, is how long a member may sit idle on a paused stop before a
+   watch says it `stalled` (D152).
    `loopherd herds` lists herd files, their templates and `after_merge`. Hand-spawn only for
    work outside the queue, with `loopherd add <herd> <template> <params…>`.
    A lead always uses `add`: `loopherd spawn … --prompt-file` records no
@@ -172,6 +175,7 @@ Init never launches an agent.
    | `<herd> running low  0 claimable, <m> unready, no workers open` | Lead's watch only: as above, but claimable is 0 and no worker is open, so nothing runs (D80). Prints even mid-streak of the plain form, and in its place when both start together. Once per streak: it prints again only after a worker opens (even one that opened and retired while no watch ran), claimable rises above 0, or unready reaches 0. A paused herd prints none and keeps its streak. Triage (see Lead). |
    | `<herd> out of work` | The herd isn't paused, claimable is 0, its `backlog` lists nothing unready (or it has none), and no worker is open. A lead's watch prints it for its herd; the shepherd's, every 60s, for each unled herd with a herd file it reads. Once per streak: it prints again only after claimable or unready rises above 0 or a worker opens, even one that opened and retired while no watch ran. The shepherd's doesn't repeat what a retired lead's watch already said. A paused herd prints none and keeps its streak. A lead reports it (see Lead); the shepherd tells the human, who pauses the herd or files and approves work. |
    | `<member> interrupted` | Lead's watch only: the feed running the worker's `after_merge` died before noting it. Feed, which notes it, then read the note. |
+   | `<member> stalled  paused 47m: 1 shell` | In its 60s round, a lead's watch for its workers, and the shepherd's for leads and members of unled herds: the member's last stop was paused (a lead's own running watch doesn't count) (with what it left in flight), nothing came from it since, and herdr has shown it idle for its herd's `stalled_after` (default 30m). Once per streak: a new stop, report, or herdr showing it busy ends the streak, and a later stall prints again. `status` shows it as `stalled <n>m`. Read its pane (`loopherd read <member>`); if the shell or task it waits on is hung, `loopherd tell` it to drop that and carry on (D152). |
    | `<member> blocked` | A dialog only the human answers: tell them. loopherd never answers it. |
    | `<member> gone` | Its pane exited or closed, its tab or workspace closed with it inside, or it had no agent for two polls in a row after this watch saw it live. A `gone` recorded when a tab or workspace closed, and then retracted because the member's pane had moved out of it, prints nothing; `reports --all` shows it followed by `moved`. |
    | `<lead> no broker` | Your own watch only: an unretired lead on your herdr has had no broker running for two polls in a row (one is a start or `broker-restart` gap), so its `feed`, `status` and `report` fail and it can't even ask. Once per streak: it prints again only after its broker runs again. Run `loopherd broker-restart <lead>`, which starts one when none runs. |
@@ -936,6 +940,10 @@ What differs from the shepherd:
   decision that isn't yours goes out as `loopherd report --kind question
   "<the exact question>"`, then end your turn; the shepherd's watch sees it
   and relays it. Don't wait in a loop for an answer.
+- **On `<worker> stalled`.** A paused worker has sat idle past
+  `stalled_after`. Read its pane with `loopherd read <worker>`; if the
+  shell or task it waits on is hung, `loopherd tell` it to stop that and
+  carry on. Never kill its shells yourself.
 - **Switches.** Your prompt lists seven, each `on` or `off`; off means the
   human does it, so ask instead. Each comes from your herd file's `[lead]`,
   else `[lead_defaults]` in `$LOOPHERD_CONFIG_DIR/config.toml` (set by

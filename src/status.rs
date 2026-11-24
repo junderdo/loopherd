@@ -13,6 +13,7 @@ use crate::herd_view::{Herd, Member, Options, QueueTasks, Tasks, View, view};
 use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::pause;
+use crate::stall;
 pub use crate::subagents::Subagents;
 use crate::watch::printable;
 use crate::worktree::PinnedGit;
@@ -206,7 +207,8 @@ fn add_tasks(herds: &mut Vec<Herd>, queues: &Queues, ledger: &dyn Ledger, only: 
 
 /// Prints [`read`]'s view, with each backlog herd's task counts when given
 /// `queues`, exiting 2 if herdr is unreachable and 3 if its `agent list`
-/// reply is malformed.
+/// reply is malformed. The mailboxes in `subagents` mark stalled members,
+/// and list running subagents in the JSON.
 pub fn status(
     herdr: &dyn Herdr,
     ledger: &dyn Ledger,
@@ -258,11 +260,15 @@ fn status_of(
     only: Option<&str>,
     subagents: Option<&Subagents>,
 ) -> Result<Output> {
+    let listed = subagents.filter(|_| format == Format::Json);
     let Read {
         mut view,
         problem,
         code,
-    } = read_with(herdr, ledger, Some(pauses), options, only, true, subagents)?;
+    } = read_with(herdr, ledger, Some(pauses), options, only, true, listed)?;
+    if let Some(mailboxes) = subagents {
+        mark_stalls(&mut view, mailboxes, queues.map(|q| q.paths));
+    }
     if let Some(queues) = queues {
         add_tasks(&mut view.herds, queues, ledger, only);
     }
@@ -282,6 +288,39 @@ fn status_of(
         stderr: problem.map(|p| p + "\n").unwrap_or_default(),
         code,
     })
+}
+
+/// Marks each open herd member parked on a paused stop for at least its
+/// herd's `stalled_after`; the default without `paths`.
+fn mark_stalls(view: &mut View, mailboxes: &Subagents, paths: Option<&Paths>) {
+    for herd in &mut view.herds {
+        let after = paths
+            .and_then(|paths| herd::stalled_after(paths, &herd.name).ok())
+            .unwrap_or(stall::DEFAULT_AFTER);
+        for member in herd
+            .members
+            .iter_mut()
+            .filter(|m| !m.gone && !m.attended && m.retired.is_none())
+        {
+            let dir = mailboxes.mailboxes;
+            // A lead waiting on its own watch is idle by design.
+            if member.lead && crate::watch::lead_watch_running(dir, &member.name).unwrap_or(false) {
+                continue;
+            }
+            let parked = stall::parked(
+                mailboxes.mailboxes,
+                &member.name,
+                member.status,
+                None,
+                mailboxes.now,
+            );
+            if let Ok(Some(parked)) = parked
+                && parked.idle >= after
+            {
+                member.stalled = Some(parked.minutes());
+            }
+        }
+    }
 }
 
 /// Members' branches, each repo's git pinned and its worktree config checked
@@ -425,7 +464,10 @@ pub fn label(member: &Member) -> String {
         (Some("unknown"), _) => "retired".into(),
         (Some(at), _) => format!("retired {at}"),
         (None, true) => "gone".into(),
-        (None, false) => member.status.as_str().into(),
+        (None, false) => match member.stalled {
+            Some(minutes) => format!("stalled {minutes}m"),
+            None => member.status.as_str().into(),
+        },
     }
 }
 
@@ -1487,6 +1529,64 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         assert_eq!(named("lh-42")["subagents"], serde_json::json!([]));
         assert_eq!(named("old")["gone"], true);
         assert_eq!(named("old")["subagents"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_herd_member_idle_on_a_paused_stop_past_its_threshold_shows_stalled() {
+        let mailboxes = tempfile::tempdir().unwrap();
+        let m = mailboxes.path();
+        for name in ["zpr-1", "zpr-2", "lh-42"] {
+            post(m, name, "2026-11-21T09:00:00Z", stop_with(1));
+        }
+        let herdr = FakeHerdr::new(&[("w1", "main")])
+            .with_raw_agent(agent(Some("zpr-1"), "w1:pzpr-1", AgentStatus::Idle))
+            .with_raw_agent(agent(Some("zpr-2"), "w1:pzpr-2", AgentStatus::Working))
+            .with_raw_agent(agent(Some("lh-42"), "w1:plh-42", AgentStatus::Idle));
+        let at = |now: &str| Subagents {
+            mailboxes: m,
+            now: humantime::parse_rfc3339(now).unwrap(),
+        };
+        let status_at = |now: &str, format: Format| {
+            let mailboxes = at(now);
+            let options = Options::default();
+            status(
+                &herdr,
+                &ledger(),
+                &not_paused(),
+                None,
+                options,
+                format,
+                Some(&mailboxes),
+            )
+            .unwrap()
+            .stdout
+        };
+
+        assert!(status_at("2026-11-21T09:29:00Z", PLAIN).contains("  zpr-1  idle  "));
+        let text = status_at("2026-11-21T09:40:00Z", PLAIN);
+        assert!(text.contains("  zpr-1  stalled 40m  "), "{text}");
+        assert!(text.contains("  zpr-2  working  "), "{text}");
+        assert!(text.contains("  lh-42  idle  "), "{text}");
+        let mut attended = ledger();
+        attended.0.get_mut("zpr-1").unwrap().attended = Some(Default::default());
+        let options = Options::default();
+        let mailboxes = at("2026-11-21T09:40:00Z");
+        let out = status(
+            &herdr,
+            &attended,
+            &not_paused(),
+            None,
+            options,
+            PLAIN,
+            Some(&mailboxes),
+        );
+        assert!(!out.unwrap().stdout.contains("stalled"));
+        let json = status_at("2026-11-21T09:40:00Z", Format::Json);
+        let json: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let members = json["herds"][0]["members"].as_array().unwrap();
+        let named = |name: &str| members.iter().find(|m| m["name"] == name).unwrap();
+        assert_eq!(named("zpr-1")["stalled"], 40);
+        assert_eq!(named("zpr-2").get("stalled"), None);
     }
 
     #[test]

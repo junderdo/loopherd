@@ -42,6 +42,7 @@ mod shepherd_restart;
 mod shepherd_resume;
 mod skill;
 mod spawn;
+mod stall;
 mod stats;
 mod status;
 mod stop_hook;
@@ -1322,8 +1323,7 @@ fn run_status(all: bool, strays: bool, json: bool) -> Result<i32> {
         queues.as_ref(),
         Options { all, strays },
         format,
-        // Only the JSON lists subagents.
-        (format == status::Format::Json).then_some(&subagents),
+        Some(&subagents),
     )?;
     print!("{}", out.stdout);
     for line in out.stderr.lines() {

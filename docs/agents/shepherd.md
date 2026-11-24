@@ -71,6 +71,15 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   `<lead> no broker`. Run `loopherd broker-restart <lead>`, which starts
   one when none runs.
 
+- **Stalled** (D152): a watch's `<member> stalled  paused <n>m: 1 shell`
+  means the member stopped paused on its own background work and herdr has
+  shown it idle since, past its herd's `stalled_after` (default 30m). Read
+  its pane with `loopherd read <member>`. If the shell it waits on is hung
+  (a `cargo test` well past its timeout, say), `loopherd tell` it to drop
+  that shell and carry on, usually by rerunning the step in the foreground.
+  A lead handles its own workers' stalls; you get a lead's own (only when
+  its watch isn't running) and those of unled herds' members.
+
 - **Triage** (the skill's Triage, D60, D116): the herd file's `[queue] backlog`
   (see [examples/loopherd-cards-routed.toml](../examples/loopherd-cards-routed.toml))
   lists the unready cards. A herd with that file's `[template.groom]` gets
