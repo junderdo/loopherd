@@ -5469,12 +5469,25 @@ mod tests {
         );
     }
 
-    /// A herdr showing `lh-1`'s screen as `screen`, whose `agents` waits on `gate` when given.
-    fn reading_herdr(screen: &str, gate: Option<std::sync::mpsc::Receiver<()>>) -> FakeHerdr {
-        let mut herdr = FakeHerdr::new(&[]).with_agent("lh-1");
+    /// A herdr showing `lh-1`'s screen as `screen`.
+    fn reading_herdr(screen: &str) -> FakeHerdr {
+        let herdr = FakeHerdr::new(&[]).with_agent("lh-1");
         herdr.set_screen("w9:p9", screen);
-        herdr.agents_gate = gate.map(std::sync::Mutex::new);
         herdr
+    }
+
+    /// A [`reading_herdr`] whose `agents` calls each say so on the receiver, then wait until the
+    /// sender sends or drops: a request that has said so is in flight.
+    fn holding_herdr(screen: &str) -> (FakeHerdr, mpsc::Sender<()>, mpsc::Receiver<()>) {
+        let mut herdr = reading_herdr(screen);
+        let (open, gate) = mpsc::channel();
+        let (arrived, entered) = mpsc::channel();
+        let gate = std::sync::Mutex::new(gate);
+        herdr.on_agents = Some(Box::new(move || {
+            let _ = arrived.send(());
+            let _ = gate.lock().unwrap().recv();
+        }));
+        (herdr, open, entered)
     }
 
     fn read_lh_1(client: Client) -> JoinHandle<Result<(String, String, i32)>> {
@@ -5491,10 +5504,12 @@ mod tests {
     {
         let world = World::new();
         world.add(member("lh-1", Some("h")));
-        let (open, gate) = std::sync::mpsc::channel();
-        let old = world.serve(reading_herdr("old", Some(gate)));
+        let (herdr, open, entered) = holding_herdr("old");
+        let old = world.serve(herdr);
         let in_flight = read_lh_1(world.client());
-        std::thread::sleep(Duration::from_millis(200));
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the read never reached herdr");
         // Taken up into its lane behind the one in flight, but not started.
         let queued = read_lh_1(world.client());
         std::thread::sleep(Duration::from_millis(200));
@@ -5515,7 +5530,7 @@ mod tests {
                         // Both brokers share this test's pid; a real stop names the old one alone.
                         let stop = stop_file(&world.paths, "lead-h");
                         write_replacing(&stop, "0").unwrap();
-                        new = Some(world.serve(reading_herdr("new", None)));
+                        new = Some(world.serve(reading_herdr("new")));
                         Ok(Started::Own(4242))
                     },
                 )
@@ -5882,10 +5897,12 @@ mod tests {
     fn a_broker_that_doesnt_stop_in_time_fails_the_restart_naming_its_pid_and_keeps_serving() {
         let world = World::new();
         world.add(member("lh-1", Some("h")));
-        let (open, gate) = std::sync::mpsc::channel();
-        let serving = world.serve(reading_herdr("old", Some(gate)));
+        let (herdr, open, entered) = holding_herdr("old");
+        let serving = world.serve(herdr);
         let in_flight = read_lh_1(world.client());
-        std::thread::sleep(Duration::from_millis(200));
+        entered
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the read never reached herdr");
 
         let err = restart_broker_with(
             &world.paths,
@@ -5947,7 +5964,7 @@ mod tests {
     fn a_stop_left_by_a_restart_that_died_is_ignored_by_the_broker_and_its_lead() {
         let world = World::new();
         world.add(member("lh-1", Some("h")));
-        let serving = world.serve(reading_herdr("on", None));
+        let serving = world.serve(reading_herdr("on"));
         // Its own pid, as a later process reusing the dead restart's pid would leave it.
         let stop = stop_file(&world.paths, "lead-h");
         std::fs::write(&stop, std::process::id().to_string()).unwrap();
@@ -5975,7 +5992,7 @@ mod tests {
         std::thread::sleep(Duration::from_millis(300));
 
         assert!(!read.is_finished(), "{:?}", read.join());
-        let serving = world.serve(reading_herdr("new", None));
+        let serving = world.serve(reading_herdr("new"));
         std::fs::remove_file(stop_file(&world.paths, "lead-h")).unwrap();
         drop(restarting);
         assert_eq!(read.join().unwrap().unwrap(), ("new".into(), "".into(), 0));
