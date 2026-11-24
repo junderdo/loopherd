@@ -1,6 +1,9 @@
 //! `loopherd setup`: its questions on a terminal, its flags, and what it
 //! leaves alone without one.
 
+mod fakes;
+
+use fakes::executable;
 use std::fs;
 use std::io::Write;
 use std::os::unix::process::CommandExt;
@@ -529,8 +532,7 @@ fn setup_names_the_package_when_claude_code_has_no_seccomp_filter_and_installs_n
     let bin = config.dir.join("bin");
     fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
-    fs::write(&claude, "#!/bin/sh\necho '2.1.329 (Claude Code)'\n").unwrap();
-    fs::set_permissions(&claude, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    executable(&claude, "#!/bin/sh\necho '2.1.329 (Claude Code)'\n");
     let path = format!("{}:{}", bin.display(), std::env::var("PATH").unwrap());
     let npm_prefix = config.dir.join("npm-prefix");
 

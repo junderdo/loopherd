@@ -177,9 +177,7 @@ fn wrapper_command(bin: &Path, home: &Path, args: &[&str]) -> Command {
 fn fake_loopherd(dir: &Path, says: &str) {
     fs::create_dir_all(dir).unwrap();
     let path = dir.join("loopherd");
-    fs::write(&path, format!("#!/bin/sh\necho \"{says} $*\"\n")).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    executable(&path, format!("#!/bin/sh\necho \"{says} $*\"\n"));
 }
 
 #[test]
@@ -449,9 +447,7 @@ fn stub(bin: &Path, name: &str, then: &str) {
     let path = bin.join(name);
     let log = bin.join(format!("{name}.args"));
     let script = format!("#!/bin/sh\necho \"$@\" >> '{}'\n{then}\n", log.display());
-    fs::write(&path, script).unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    executable(&path, script);
 }
 
 fn stub_args(bin: &Path, name: &str) -> Option<String> {

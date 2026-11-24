@@ -280,7 +280,7 @@ fn retire_while_herdr_shows_it(status: &str, state: &Path, args: &[&str]) -> Out
     let herdr = bin.join("herdr");
     let agents = r#"{"result": {"agents": [{"name": "lh-1", "pane_id": "w1:p1", "tab_id": "w1:t1", "agent_status": "STATUS", "agent_session": null}]}}"#
         .replace("STATUS", status);
-    fs::write(
+    fakes::executable(
         &herdr,
         format!(
             r#"#!/bin/sh
@@ -294,10 +294,7 @@ esac
 "#,
             calls = bin.join("calls").display()
         ),
-    )
-    .unwrap();
-    use std::os::unix::fs::PermissionsExt;
-    fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+    );
     Command::new(env!("CARGO_BIN_EXE_loopherd"))
         .arg("retire")
         .args(args)
