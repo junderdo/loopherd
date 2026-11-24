@@ -434,6 +434,24 @@ fn check_exits_2_without_a_record() {
 }
 
 #[test]
+fn check_exits_2_when_home_is_unset() {
+    let releases = Releases::new();
+    releases.installed_at("v0.2.0");
+    releases.latest("v0.2.0");
+
+    let out = Command::new(env!("CARGO_BIN_EXE_loopherd"))
+        .args(["update", "--check"])
+        .env_clear()
+        .env("PATH", releases.path())
+        .env("LOOPHERD_CONFIG_DIR", releases.config())
+        .output()
+        .unwrap();
+
+    assert_eq!(out.status.code(), Some(2), "{}", stderr(&out));
+    assert!(stderr(&out).contains("HOME is not set"), "{}", stderr(&out));
+}
+
+#[test]
 fn without_a_record_it_refuses_naming_both_installers() {
     let releases = Releases::new();
     releases.latest("v0.2.0");

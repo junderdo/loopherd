@@ -2461,14 +2461,23 @@ fn run_doctor(
 }
 
 fn run_update(check: bool, version: Option<String>) -> Result<i32> {
-    let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
-    let places = update::Places {
-        config_dir: Paths::from_env()?.config_dir().to_path_buf(),
-        installed: home.join(".local/bin/loopherd"),
-        running: std::env::current_exe().context("find this binary")?,
-        base: std::env::var("LOOPHERD_RELEASE_BASE")
-            .ok()
-            .filter(|base| !base.is_empty()),
+    let places = (|| -> Result<update::Places> {
+        let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
+        Ok(update::Places {
+            config_dir: Paths::from_env()?.config_dir().to_path_buf(),
+            installed: home.join(".local/bin/loopherd"),
+            running: std::env::current_exe().context("find this binary")?,
+            base: std::env::var("LOOPHERD_RELEASE_BASE")
+                .ok()
+                .filter(|base| !base.is_empty()),
+        })
+    })();
+    let places = match places {
+        Err(e) if check => {
+            eprintln!("loopherd update: {e:#}");
+            return Ok(2);
+        }
+        places => places?,
     };
     let want = match (check, version) {
         (true, _) => update::Want::Check,
