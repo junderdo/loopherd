@@ -38,7 +38,7 @@ it answers `agent_launch_pending`, find your entry in `herdr agent list`
 (its `pane_id` is `$HERDR_PANE_ID`): if its name is already `shepherd`,
 carry on without a warning, since `S` started you under that name;
 otherwise retry the rename once its `launch_pending` clears. On any other
-error, carry on and tell the human that `S` can't find you (D88, D145).
+error, carry on and tell the human that `S` can't find you (D88, D146).
 
 ### Setting up a project
 
