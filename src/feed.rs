@@ -3385,7 +3385,9 @@ mod tests {
         let setup = Setup::new("true", 1);
         let mut fed = pending_fed(&setup, &["echo ran >> log"], &["zpr-1"]);
         let mut req = setup.request(false, None);
-        req.after_merge_timeout = Duration::from_millis(20);
+        // Roomy enough that `echo` finishes within it on a loaded machine.
+        req.after_merge_timeout = Duration::from_secs(1);
+        let hold = req.after_merge_timeout * 2 + Duration::from_millis(500);
         req.after_merge_wait = Duration::from_secs(10);
         let lock = setup.paths().locks_dir().join("after-merge.lock");
         fs::create_dir_all(lock.parent().unwrap()).unwrap();
@@ -3394,7 +3396,7 @@ mod tests {
             .unwrap();
 
         let releasing = std::thread::spawn(move || {
-            std::thread::sleep(Duration::from_millis(200));
+            std::thread::sleep(hold);
             drop(held);
         });
 
