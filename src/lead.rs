@@ -333,6 +333,10 @@ mod tests {
     fn assert_refused_leaving_nothing(setup: &Setup, result: Result<impl Sized>, refused: &str) {
         let err = result.err().expect("lead was refused");
         assert!(format!("{err:#}").contains(refused), "{err:#}");
+        assert_left_nothing(setup);
+    }
+
+    fn assert_left_nothing(setup: &Setup) {
         for file in ["lead-h.lead.json", "lead-h.mcp.json", "lead-h.json"] {
             let file = setup.root.join("config/sandbox").join(file);
             assert!(!file.exists(), "{} was written", file.display());
@@ -1928,6 +1932,7 @@ mod tests {
 
             assert_eq!(format!("{err:#}"), refusal);
             assert!(herdr.tabs().is_empty());
+            assert_left_nothing(setup);
         }
     }
 
@@ -1989,6 +1994,7 @@ mod tests {
              [lead] install = false, or merge_guard = \"hook\", in herd h"
         );
         assert!(herdr.tabs().is_empty());
+        assert_left_nothing(&setup);
     }
 
     #[test]
@@ -2020,6 +2026,7 @@ mod tests {
                 "{mode}"
             );
             assert!(herdr.tabs().is_empty(), "{mode}");
+            assert_left_nothing(&setup);
         }
     }
 
@@ -2064,6 +2071,7 @@ mod tests {
                     "{worker} {mode}"
                 );
                 assert!(herdr.tabs().is_empty(), "{worker} {mode}");
+                assert_left_nothing(&setup);
             }
         }
     }
@@ -2164,6 +2172,7 @@ mod tests {
             )
         );
         assert!(herdr.tabs().is_empty());
+        assert_left_nothing(&setup);
     }
 
     #[test]
