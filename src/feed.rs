@@ -1788,6 +1788,26 @@ mod tests {
     }
 
     #[test]
+    fn a_broken_config_toml_doesnt_stop_a_feed_of_sandboxed_workers() {
+        let setup = worker_setup("printf '1\\n'", "sandbox = \"prefer\"");
+        let file = setup.config.path().join("herds/prs.toml");
+        let herd = fs::read_to_string(&file).unwrap() + "[lead]\nprompt = \"go\"\n";
+        fs::write(file, herd).unwrap();
+        fs::write(crate::herd::config_file(&setup.paths()), "[lead_defaults\n").unwrap();
+        let herdr = herdr();
+        let mut ledger = MemLedger::default();
+        let req = FeedRequest {
+            sandbox: sandbox_unavailable,
+            ..setup.request(false, None)
+        };
+
+        let fed = feed(&herdr, &mut ledger, &setup.paths(), &req, Some("w1")).unwrap();
+
+        assert_eq!(fed.lines[0], "added zpr-1", "{:?}", fed.lines);
+        assert_eq!(fed.code, 0, "{:?}", fed.lines);
+    }
+
+    #[test]
     fn a_failed_spawn_stops_the_run_after_that_task() {
         use crate::herdr::fake::Startup;
         let setup = Setup::new("printf '1\\n2\\n'", 5);
