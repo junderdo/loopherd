@@ -374,10 +374,13 @@ fn poll_then_restart(
                 }
             }
         }
+        // Reports before the handoff: a restart sets the handoff aside before
+        // its new session reports a start, so a start then reads as a revive.
+        let since = since_handoff(&req.state.join("reports"), name)?;
         let Some(handoff) = waiting_handoff() else {
             return Ok(Ok(Waited::RestartedElsewhere));
         };
-        if since_handoff(&req.state.join("reports"), name)? == SinceHandoff::None {
+        if since == SinceHandoff::None {
             return Ok(Err(format!(
                 "self-restart stopped: {name} started again since its handoff (a revive?) and its handoff is \
                  still at {}. Check `loopherd reports --all {name}`; restarting it now takes --force.",
