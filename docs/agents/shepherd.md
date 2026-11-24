@@ -24,7 +24,9 @@ scripts/install
 It needs `jq`. It builds, copies the binary to `~/.local/bin/loopherd` through
 a temp file and a rename, so a failed build keeps the last good one, and runs
 `loopherd install-hook`, which installs the hooks and the skill
-(`~/.agents/skills/loopherd`, linked from `~/.claude/skills/loopherd`). Then:
+(`~/.agents/skills/loopherd`, linked from `~/.claude/skills/loopherd`). A
+release install (the one-line installer) refreshes with `loopherd update`
+instead; restart any open `loopherd view` after it. Then:
 
 ```bash
 loopherd feed loopherd-cards --dry-run

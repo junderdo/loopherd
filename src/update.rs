@@ -43,10 +43,9 @@ pub fn no_record(path: &Path) -> (String, String) {
             "no install record at {}, so loopherd update can't tell how loopherd was installed",
             path.display()
         ),
-        format!(
-            "install it again with `curl -fsSL {RELEASES}/latest/download/install.sh | sh`, \
-             or `scripts/install` from a checkout"
-        ),
+        "install it again with `curl -fsSL https://junderdo.dev/loopherd/install.sh | sh`, \
+         or `scripts/install` from a checkout"
+            .to_string(),
     )
 }
 

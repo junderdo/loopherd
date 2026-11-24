@@ -415,7 +415,7 @@ fn without_a_record_it_refuses_naming_both_installers() {
     let err = stderr(&out);
     assert!(err.contains("install.toml"), "{err}");
     assert!(
-        err.contains("releases/latest/download/install.sh | sh"),
+        err.contains("junderdo.dev/loopherd/install.sh | sh"),
         "{err}"
     );
     assert!(err.contains("scripts/install"), "{err}");
