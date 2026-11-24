@@ -365,7 +365,8 @@ pub struct Measured {
 /// handoff from last time to its `prev.md`. An attended member is only
 /// measured. `limit` is asked with the model of the transcript's last turn.
 /// A failed `limit` falls back to the built-in one, and it or an unknown
-/// model is passed to `note` once per session.
+/// model is passed to `note` once per session, as is an older handoff the
+/// rotation couldn't move aside.
 pub fn handoff_block(
     member: &AgentRecord,
     input: &[u8],
@@ -412,7 +413,7 @@ pub fn handoff_block(
     // A failed note must not skip the check; it surfaces only when nothing is asked.
     let deferred = |t: u64| subagents_running(&input) && t * 2 <= limit * 3;
     let reason = match tokens.filter(|&t| t > limit && !deferred(t)) {
-        Some(tokens) => ask(member, tokens, session, limit, state),
+        Some(tokens) => ask(member, tokens, session, limit, state, note),
         None => Ok(None),
     };
     let reason = match reason {
@@ -440,6 +441,7 @@ fn ask(
     session: &str,
     limit: u64,
     state: &Path,
+    note: &dyn Fn(String) -> Result<()>,
 ) -> Result<Option<String>> {
     let asked = state.join("handoff-asked");
     let marker = asked.join(session);
@@ -450,8 +452,10 @@ fn ask(
     let moved = match handoff::find(state, &member.name) {
         Some(last) if !written_this_run(&last, state, &member.name)? => {
             let aside = handoff::set_aside(state, &member.name, &last)?;
-            if let Some(warning) = aside.warning {
-                eprintln!("loopherd stop-hook: warning: {warning}");
+            if let Some(warning) = aside.warning
+                && let Err(e) = note(format!("my Stop hook {warning}"))
+            {
+                eprintln!("loopherd stop-hook: warning: {warning} (and couldn't note it: {e:#})");
             }
             Some(aside.prev)
         }
@@ -1415,6 +1419,102 @@ mod tests {
             );
             assert_eq!(reason.ends_with(&told), moved, "{case}: {reason}");
         }
+    }
+
+    #[test]
+    fn an_older_handoff_the_rotation_couldnt_move_aside_is_noted() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let handoffs = w.state().join("handoffs");
+        fs::create_dir_all(handoffs.join("lh-1")).unwrap();
+        fs::write(handoffs.join("lh-1/handoff.md"), "last time").unwrap();
+        written_at(&handoffs.join("lh-1.md"), "older", "2026-11-17T01:00:00Z");
+        fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
+        let notes = std::cell::RefCell::new(vec![]);
+        let note = |text: String| {
+            notes.borrow_mut().push(text);
+            Ok(())
+        };
+        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+
+        let reason = handoff_block(
+            &who,
+            &w.stop("s1", &t, ""),
+            &fixed_limit(100),
+            &w.state(),
+            &note,
+        )
+        .reason
+        .unwrap();
+
+        assert!(reason.is_some());
+        let notes = notes.borrow();
+        let [noted] = notes.as_slice() else {
+            panic!("{notes:?}");
+        };
+        assert!(
+            noted.starts_with(&format!(
+                "my Stop hook couldn't move the older {} to {}: ",
+                handoffs.join("lh-1.md").display(),
+                handoffs.join("lh-1.prev.md").display()
+            )),
+            "{noted}"
+        );
+    }
+
+    #[test]
+    fn a_rotation_that_moves_everything_notes_nothing() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let handoffs = w.state().join("handoffs");
+        written_at(
+            &handoffs.join("lh-1/handoff.md"),
+            "last time",
+            "2026-11-17T02:00:00Z",
+        );
+        written_at(&handoffs.join("lh-1.md"), "older", "2026-11-17T01:00:00Z");
+        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+
+        let reason = handoff_block(
+            &who,
+            &w.stop("s1", &t, ""),
+            &fixed_limit(100),
+            &w.state(),
+            &|text| panic!("noted {text}"),
+        )
+        .reason
+        .unwrap();
+
+        assert!(reason.is_some());
+        assert!(handoffs.join("lh-1.prev.md").exists());
+    }
+
+    #[test]
+    fn an_unmoved_older_handoff_whose_note_fails_still_asks() {
+        let w = World::new();
+        let who = member("lh-1", None);
+        let handoffs = w.state().join("handoffs");
+        written_at(
+            &handoffs.join("lh-1/handoff.md"),
+            "last time",
+            "2026-11-17T02:00:00Z",
+        );
+        written_at(&handoffs.join("lh-1.md"), "older", "2026-11-17T01:00:00Z");
+        fs::create_dir_all(handoffs.join("lh-1.prev.md/x")).unwrap();
+        let t = w.transcript(&[assistant(0, 0, 200, false)]);
+
+        let reason = handoff_block(
+            &who,
+            &w.stop("s1", &t, ""),
+            &fixed_limit(100),
+            &w.state(),
+            &|_| anyhow::bail!("mailbox full"),
+        )
+        .reason
+        .unwrap();
+
+        assert!(reason.is_some_and(|r| r.contains("past your limit of 100")));
+        assert!(handoffs.join("lh-1/prev.md").exists());
     }
 
     #[test]
