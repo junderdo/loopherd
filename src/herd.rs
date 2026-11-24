@@ -2024,6 +2024,27 @@ args = ["--model", "opus"]
     }
 
     #[test]
+    fn add_into_a_herd_with_the_worker_sandbox_off_makes_only_spawns_own_herdr_calls() {
+        let (config, _repo) = worker_config("sandbox = \"off\"");
+        let req = request("prs", "pr", &["1050"]);
+        let added = herdr();
+        add(
+            &added,
+            &mut MemLedger::default(),
+            &config.paths(),
+            &req,
+            Some("w1"),
+        )
+        .unwrap();
+
+        let spawned = herdr();
+        let spawn_req = resolve(&config.paths(), &req).unwrap();
+        crate::spawn::spawn(&spawned, &mut MemLedger::default(), &spawn_req, Some("w1")).unwrap();
+
+        assert_eq!(added.calls(), spawned.calls());
+    }
+
+    #[test]
     fn add_refuses_a_required_worker_whose_sandbox_cant_start() {
         let (config, _repo) = worker_config("sandbox = \"require\"");
         let herdr = herdr();

@@ -1164,7 +1164,7 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
              except OSError as e:\n            \
              out.write(f'{{path}}\\t{{e.strerror}}\\n')\n    \
              env = dict(os.environ, XDG_STATE_HOME={state:?}, LOOPHERD_CONFIG_DIR={config:?})\n    \
-             for step, args in [('report', [{bin:?}, 'report', '--kind', 'done', 'sandbox probe']), ('handoff', [{bin:?}, 'handoff']), ('commit', ['git', '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-m', 'sandbox probe'])]:\n        \
+             for step, args in [('report', [{bin:?}, 'report', '--kind', 'done', 'sandbox probe']), ('handoff', [{bin:?}, 'handoff']), ('commit', ['git', '-c', 'user.name=t', '-c', 'user.email=t@t', 'commit', '--allow-empty', '-m', 'sandbox probe']), ('herd set', [{bin:?}, 'herd', 'set', {herd:?}, 'worker.sandbox', '\"require\"'])]:\n        \
              run = subprocess.run(args, env=env, capture_output=True, text=True, input='## State\\n')\n        \
              out.write(f'{{step}}\\t{{run.returncode}}\\t{{run.stderr.strip()}}\\n')\n",
             results = results.display().to_string(),
@@ -1174,12 +1174,18 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         ),
     )
     .unwrap();
+    // Not yet there, since the Write tool won't overwrite a file it hasn't read.
+    let own_write = state_dir.join(format!("handoffs/{name}/written.md"));
+    let write_paths: Vec<String> = write_paths
+        .into_iter()
+        .chain([own_write.display().to_string()])
+        .collect();
     let herd_text = format!(
         "{}[template.probe]\nparams = [\"n\"]\nname = \"{{herd}}-{{n}}\"\n\
              branch = {branch:?}\n\
              prompt = \"\"\"This is loopherd's live test of your sandbox, which the human runs: \
              it checks which writes your sandbox refuses, and Read-only file system for most of \
-             them is the result being measured. Make exactly one Bash tool call, with the \
+             them is the result being measured, as is the refusal of the loopherd herd set it tries. Make exactly one Bash tool call, with the \
              command exactly as written and nothing added before or after it: python3 {} \
              Then make one Write tool call per path below, in order, each writing the text \
              probe, with the path copied exactly: {} Then reply with what the command printed and what each write \
@@ -1257,7 +1263,7 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
     assert!(args.contains(&mcp.display().to_string().into()), "{entry}");
 
     let given_up = std::time::Instant::now() + std::time::Duration::from_secs(240);
-    let done = |probed: &str| probed.lines().count() >= refused.len() + 3;
+    let done = |probed: &str| probed.lines().count() >= refused.len() + 4;
     loop {
         let probed = std::fs::read_to_string(&results).unwrap_or_default();
         let status = herdr_ok(&["agent", "get", &name])["result"]["agent"]["agent_status"].clone();
@@ -1280,9 +1286,11 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
         .map(|(p, _)| p)
         .collect();
     // The model sometimes rewrites the main checkout's path as a sibling of its own worktree.
-    for path in &write_paths[..2] {
-        assert!(calls.contains(path), "no Write call on {path}: {calls:?}");
+    for path in [&write_paths[..2], &write_paths[3..]].concat() {
+        assert!(calls.contains(&path), "no Write call on {path}: {calls:?}");
     }
+    // The Stop hook asks a worker to write its handoff with the file tools.
+    assert_eq!(std::fs::read_to_string(&own_write).unwrap().trim(), "probe");
     let probed = std::fs::read_to_string(&results).unwrap();
     let expected: String = refused
         .iter()
@@ -1291,8 +1299,15 @@ fn a_sandboxed_worker_writes_only_its_own_worktree_mailbox_and_handoff() {
     assert!(probed.starts_with(&expected), "{probed}");
     let ran: Vec<&str> = probed[expected.len()..].lines().collect();
     assert_eq!(
-        ran,
+        ran[..3],
         ["report\t0\t", "handoff\t0\t", "commit\t0\t"],
+        "{probed}"
+    );
+    // The sandbox's read-only ledger refuses it before the config dir's deny would.
+    assert!(
+        ran.get(3)
+            .is_some_and(|line| line.starts_with("herd set\t1\t")
+                && line.ends_with("and a herd file is the human's to change")),
         "{probed}"
     );
     assert_eq!(std::fs::read_to_string(&herd_file).unwrap(), before);
