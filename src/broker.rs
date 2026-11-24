@@ -4138,7 +4138,7 @@ mod tests {
         let (world, herdr, entered, release) = slow_feed();
         let serving = world.serve(herdr);
         let client = Client {
-            answer_within: Some(Duration::from_millis(300)),
+            answer_within: Some(Duration::from_secs(2)),
             ..world.client()
         };
 
@@ -4146,7 +4146,7 @@ mod tests {
 
         assert_eq!(
             format!("{err:#}"),
-            "lead-h's broker didn't answer feed within 300ms; it may still be carrying it out, \
+            "lead-h's broker didn't answer feed within 2s; it may still be carrying it out, \
              so check before asking again, and check the broker with loopherd doctor"
         );
         // Marked started, the feed still runs its queue source before start_claude.
