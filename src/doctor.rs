@@ -3234,6 +3234,32 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_herd_under_prefer_fails_as_invalid_and_reports_no_worker_warnings() {
+        let m = machine(&ALL);
+        let repo = m.herd("h");
+        m.herd_file(
+            "h",
+            &format!(
+                "repo = {:?}\nargs = [\"--add-dir\", \"/a\"]\n[template.t]\nparams = []\n\
+                 prompt = \"go\"\n[lead]\nprompt = \"go\"\nmerge_guard = \"credentials\"\n\
+                 [worker]\nsandbox = \"prefer\"\n",
+                repo.to_str().unwrap()
+            ),
+        );
+
+        let checks = m.checks(None, &herdr()).unwrap();
+
+        let herd = checks.iter().find(|c| c.name == "herd h").unwrap();
+        assert_eq!(herd.status, Status::Failure, "{}", herd.detail);
+        assert!(
+            !checks
+                .iter()
+                .any(|c| c.status == Status::Warning && c.name.starts_with("herd h ")),
+            "{checks:?}"
+        );
+    }
+
+    #[test]
     fn a_running_worker_without_its_herds_sandbox_is_named_and_one_in_an_off_herd_isnt() {
         let m = machine(&ALL);
         for (herd, worker) in [("h", "require"), ("plain", "off")] {
