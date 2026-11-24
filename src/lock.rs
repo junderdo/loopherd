@@ -73,8 +73,14 @@ fn try_flock(file: &File) -> io::Result<bool> {
     }
 }
 
+/// How many times [`held_by`] reads `/proc/locks` before saying the holder
+/// isn't there: the kernel serves it a page per read, so a lock dropped ahead
+/// of the holder's line between pages shifts that line past the reader.
 #[cfg(target_os = "linux")]
-fn held_by(file: &File, proc_locks: impl FnOnce() -> io::Result<String>) -> String {
+const PROC_LOCKS_READS: usize = 3;
+
+#[cfg(target_os = "linux")]
+fn held_by(file: &File, mut proc_locks: impl FnMut() -> io::Result<String>) -> String {
     use std::os::unix::fs::MetadataExt;
     let Ok(meta) = file.metadata() else {
         return "; holder unknown".to_string();
@@ -86,12 +92,18 @@ fn held_by(file: &File, proc_locks: impl FnOnce() -> io::Result<String>) -> Stri
         libc::minor(dev),
         meta.ino()
     );
-    let listed = proc_locks().map(|locks| holders(&locks, &id));
+    let mut listed = Ok(vec![]);
+    for _ in 0..PROC_LOCKS_READS {
+        listed = proc_locks().map(|locks| holders(&locks, &id));
+        if !matches!(&listed, Ok(pids) if pids.is_empty()) {
+            break;
+        }
+    }
     named(listed, meta.ino())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn held_by(_: &File, _: impl FnOnce() -> io::Result<String>) -> String {
+fn held_by(_: &File, _: impl FnMut() -> io::Result<String>) -> String {
     "; holder unknown".to_string()
 }
 
@@ -233,6 +245,26 @@ mod tests {
             missing,
             format!("; holder not found in /proc/locks for inode {ino}")
         );
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_holder_skipped_by_one_read_of_proc_locks_is_found_on_the_next() {
+        use std::os::unix::fs::MetadataExt;
+        let dir = tempfile::tempdir().unwrap();
+        let file = open(&dir.path().join("x.lock"));
+        let meta = file.metadata().unwrap();
+        let (dev, ino) = (meta.dev(), meta.ino());
+        let id = format!("{:02x}:{:02x}:{ino}", libc::major(dev), libc::minor(dev));
+        let mut reads = vec![
+            String::new(),
+            format!("1: FLOCK  ADVISORY  WRITE 4242 {id} 0 EOF\n"),
+        ]
+        .into_iter();
+
+        let found = held_by(&file, || Ok(reads.next().unwrap()));
+
+        assert_eq!(found, " by pid 4242");
     }
 
     #[cfg(target_os = "linux")]
