@@ -71,7 +71,7 @@ impl Switch {
     fn humans_part(self) -> &'static str {
         match self {
             Switch::Merge => "the human merges PRs",
-            Switch::Install => "the human runs scripts/install and install-hook",
+            Switch::Install => "the human runs scripts/install, install-hook and loopherd update",
             Switch::Rebase => "the human rebases and force-pushes",
             Switch::ForceRestart => "the human forces a restart",
             Switch::ForceRetire => "the human forces a retire",
@@ -435,6 +435,9 @@ fn needs_one(command: &[String]) -> Option<Switch> {
             let positional = positionals(args, &[]);
             match *positional.first()? {
                 "install-hook" => Some(Switch::Install),
+                "update" => {
+                    (!flag("--check") && !flag("--help") && !flag("-h")).then_some(Switch::Install)
+                }
                 "lead-defaults" => flag("--set").then_some(Switch::LeadDefaults),
                 "config" => {
                     matches!(positional.get(1), Some(&"set" | &"unset")).then_some(Switch::Config)
@@ -611,6 +614,9 @@ mod tests {
         "loopherd install-hook",
         "/home/me/.local/bin/loopherd install-hook --remove",
         "env XDG_STATE_HOME=/tmp/s loopherd install-hook",
+        "loopherd update",
+        "loopherd update --version v0.1.0",
+        "/home/me/.local/bin/loopherd update",
     ];
     const REBASES: &[&str] = &[
         "git rebase origin/main",
@@ -652,6 +658,8 @@ mod tests {
         "git diff scripts/install",
         "scripts/install-check",
         "loopherd status",
+        "loopherd update --check",
+        "loopherd update --help",
         "loopherd report --kind question 'may I run install-hook?'",
         "loopherd report --kind question 'merge PR #12? run: gh pr merge 12 --squash'",
         "git log --grep rebase",

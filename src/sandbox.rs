@@ -1959,6 +1959,7 @@ fn settings_on(
             "scripts/install *",
             "./scripts/install",
             "./scripts/install *",
+            "loopherd update",
         ]);
     }
     sandbox["excludedCommands"] = json!(excluded);

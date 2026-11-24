@@ -157,6 +157,15 @@ if ! [[ -x "$bin_dir/loopherd" ]] || ! cmp -s "$built" "$bin_dir/loopherd"; then
   trap - EXIT
 fi
 
+# Last install wins, so this replaces a release record; --settings runs (tests) write none.
+if [[ -z "$settings" ]]; then
+  config=${LOOPHERD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/loopherd}
+  checkout=${root//\\/\\\\}
+  mkdir -p "$config"
+  printf 'kind = "source"\ncheckout = "%s"\n' "${checkout//\"/\\\"}" >"$config/install.toml.tmp"
+  mv -f "$config/install.toml.tmp" "$config/install.toml"
+fi
+
 # The ${..+..} form: bash before 4.4 calls an empty array unbound under set -u.
 "$bin_dir/loopherd" install-hook ${args[@]+"${args[@]}"}
 

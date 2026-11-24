@@ -751,7 +751,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   lead's mailbox saying its broker couldn't move, a lead's
   `<lead>'s broker predates this loopherd` error, its `can't read` reply
   error, or `loopherd doctor`'s warning that a broker doesn't run the
-  loopherd on PATH (which `scripts/install` shows). Run it from your own
+  loopherd on PATH (which `scripts/install` and `loopherd update` show). Run it from your own
   shell, never a lead's or an `after_merge`, as a background task: it can
   wait out a feed. It asks the broker to stop once its request in flight
   is answered, then starts one on the installed binary, which serves what
@@ -935,7 +935,8 @@ What differs from the shepherd:
 
   When `merge`, `install` or `rebase` is off, the PreToolUse hook also
   blocks the Bash commands that need it (`gh pr merge` or the merge API, a
-  `scripts/install` or `loopherd install-hook`, a rebase or force-push), in
+  `scripts/install`, `loopherd install-hook` or `loopherd update`, a rebase or
+  force-push), in
   your pane and in any Claude nested in it, with a line naming the switch;
   ask instead. A herd file or `config.toml` it can't read blocks all three. A `feed` from
   your pane runs none of `after_merge` when the hook would deny any command
@@ -987,7 +988,8 @@ What differs from the shepherd:
   too, so say so in your last message and end your turn.
   Your `watch` still calls herdr itself, not through your broker. Run
   `loopherd watch` bare, as its own Bash call, to run it outside the
-  sandbox (D104), and `scripts/install` too with `install` on: a
+  sandbox (D104), and `scripts/install` or a bare `loopherd update` (no
+  flags) too with `install` on: a
   `cd x &&`, a redirect, `$(…)` or a path to the binary keeps it inside,
   where it can't write its files in `reports/`. Your watch refuses `--settings`. `revive` is the shepherd's
   or the human's. `tell`, `read`, `restart` and `prompt` reach only your

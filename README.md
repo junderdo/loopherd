@@ -67,7 +67,8 @@ It takes `--no-splash` (or `LOOPHERD_NO_SPLASH=1`), `--with-agents`,
 The same script is served as
 `https://github.com/junderdo/loopherd/releases/latest/download/install.sh`.
 
-**Update:** run the one-liner again.
+**Update:** `loopherd update` (`--check` to only look, `--version vX.Y.Z`
+to pick a release, older ones included).
 
 </td><td>
 
