@@ -1366,7 +1366,8 @@ impl Broker<'_> {
             Some(_) if record.attended.is_some() && !matches!(op, Op::Read { .. }) => {
                 Some(format!(
                     "{target} is attended: the human works in its pane, so {lead} leaves it to them \
-                 until its merge (D112)"
+                 for its whole life; once merged, its done check reaps it, or the shepherd or the \
+                 human retires it (D112)"
                 ))
             }
             Some(_) if record.may_be_lead() => Some(format!(
@@ -2763,7 +2764,8 @@ mod tests {
         world.add(grill("grill-1"));
         let serving = world.serve(telling_herdr());
         let why = "grill-1 is attended: the human works in its pane, so lead-h leaves it to them \
-                   until its merge (D112)";
+                   for its whole life; once merged, its done check reaps it, or the shepherd or \
+                   the human retires it (D112)";
 
         for op in [
             tell("grill-1", "hi"),
@@ -2799,6 +2801,35 @@ mod tests {
         );
 
         assert!(!world.ledger().entries().unwrap()["grill-1"].retired);
+        world.retire("lead-h");
+        let (_, herdr) = serving.join().unwrap();
+        assert_eq!(herdr.calls(), 0);
+    }
+
+    #[test]
+    fn a_lead_s_broker_still_refuses_an_attended_member_once_it_is_retired() {
+        let world = World::new();
+        with_grill(&world);
+        let mut retired = grill("grill-1");
+        retired.retired = true;
+        world.add(retired);
+        let serving = world.serve(telling_herdr());
+
+        for op in [
+            retire_op("grill-1", true, false),
+            release_op("grill-1", false),
+        ] {
+            assert_eq!(
+                format!("{:#}", world.client().call(&op).unwrap_err()),
+                format!(
+                    "lead-h's broker refused {}: grill-1 is attended: the human works in its \
+                     pane, so lead-h leaves it to them for its whole life; once merged, its done \
+                     check reaps it, or the shepherd or the human retires it (D112)",
+                    op.command()
+                )
+            );
+        }
+
         world.retire("lead-h");
         let (_, herdr) = serving.join().unwrap();
         assert_eq!(herdr.calls(), 0);
