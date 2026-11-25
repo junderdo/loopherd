@@ -1587,6 +1587,137 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
     }
 }
 
+/// Whether some process holds the flock on `file`, probed without blocking.
+fn flock_held(file: &Path) -> bool {
+    use std::os::fd::AsRawFd;
+    let Ok(file) = std::fs::File::open(file) else {
+        return false;
+    };
+    // SAFETY: flock takes no pointers; the fd outlives the call.
+    unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) != 0 }
+}
+
+#[test]
+fn a_leads_watch_ends_with_its_killed_claude_so_revive_prompts_the_re_arm() {
+    if !live_enabled() {
+        return;
+    }
+    let state = tempfile::tempdir().unwrap();
+    let config = state.path().join("loopherd/config");
+    // Its own server, with the human's home so Claude is signed in: the lead's bare
+    // `loopherd watch` reads its pane's environment, which the dev server can't point here.
+    let server = IsolatedServer::start_with(&[
+        ("HOME", std::env::var_os("HOME").unwrap().as_os_str()),
+        ("XDG_STATE_HOME", state.path().as_os_str()),
+        ("LOOPHERD_CONFIG_DIR", config.as_os_str()),
+    ]);
+    // This checkout is already trusted; a fresh repo would stop the lead at the trust dialog.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-killed-{}", std::process::id());
+    let name = format!("lead-{herd}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree);
+    server.ok(&[
+        "workspace",
+        "create",
+        "--label",
+        &herd,
+        "--cwd",
+        repo.to_str().unwrap(),
+    ]);
+    let herds = config.join("herds");
+    std::fs::create_dir_all(&herds).unwrap();
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "{}[lead]\nprompt = \"\"\"This is loopherd's live test of your watch. Make exactly \
+             one Bash tool call with run_in_background set to true and the command exactly \
+             as written: loopherd watch --timeout 600 Then end your turn without waiting \
+             for it.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &herd),
+        ),
+    )
+    .unwrap();
+    let loopherd = || {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
+        cmd.env("XDG_STATE_HOME", state.path())
+            .env("LOOPHERD_CONFIG_DIR", &config)
+            .env("HERDR_SOCKET_PATH", &server.socket)
+            .env_remove("HERDR_PANE_ID")
+            .env_remove("LOOPHERD_BROKER_OF");
+        cmd
+    };
+    let out = loopherd()
+        .args(["lead", &herd, "--", "--permission-mode", "auto"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(0), "{out:?}");
+
+    let watching = || {
+        server.loopherds().into_iter().any(|(pid, _)| {
+            let args = std::fs::read(format!("/proc/{pid}/cmdline")).unwrap_or_default();
+            args.split(|b| *b == 0).nth(1) == Some(b"watch".as_slice())
+        })
+    };
+    let wait_until = |what: &str, secs: u64, done: &dyn Fn() -> bool| {
+        let given_up = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+        while !done() {
+            assert!(std::time::Instant::now() < given_up, "{what}");
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        }
+    };
+    wait_until("the lead's watch never started", 180, &watching);
+    let lock = state
+        .path()
+        .join(format!("loopherd/reports/watch-{name}.lock"));
+    assert!(flock_held(&lock), "{}", lock.display());
+
+    let agent = server
+        .herdr()
+        .args(["agent", "get", &name])
+        .output()
+        .unwrap();
+    let agent: Value = serde_json::from_slice(&agent.stdout).unwrap();
+    let pane = agent["result"]["agent"]["pane_id"].as_str().unwrap();
+    let info = server
+        .herdr()
+        .args(["pane", "process-info", "--pane", pane])
+        .output()
+        .unwrap();
+    let info: Value = serde_json::from_slice(&info.stdout).unwrap();
+    let claude = info["result"]["process_info"]["foreground_processes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|p| p["name"] == "claude")
+        .and_then(|p| p["pid"].as_i64())
+        .expect("the lead's pane runs no claude");
+    // Unlike /exit, SIGHUP or SIGTERM, a kill leaves Claude no chance to stop its background tasks.
+    // SAFETY: kill takes no pointers.
+    unsafe { libc::kill(claude as i32, libc::SIGKILL) };
+
+    wait_until("the lead's watch outlived its killed Claude", 15, &|| {
+        !watching()
+    });
+    assert!(!flock_held(&lock), "{} is still held", lock.display());
+    let out = loopherd()
+        .args(["revive", "--name", &name])
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("(prompted to re-arm its watch)"),
+        "{stdout}{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
 /// A file in the first drvfs mount listed in `/proc/mounts`, if this machine has one.
 fn file_on_a_windows_drive() -> Option<PathBuf> {
     let mounts = std::fs::read_to_string("/proc/mounts").ok()?;
