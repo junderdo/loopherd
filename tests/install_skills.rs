@@ -15,6 +15,11 @@ const PLUGIN: &str = "mattpocock-skills@claude-plugins-official";
 
 /// A dir of links to everything on the test's PATH except `claude`.
 fn path_without_claude(dir: &Path) -> String {
+    path_without(dir, "claude")
+}
+
+/// A dir of links to everything on the test's PATH except `name`.
+fn path_without(dir: &Path, name: &str) -> String {
     fs::create_dir_all(dir).unwrap();
     for bin in std::env::var("PATH").unwrap().split(':') {
         let Ok(entries) = fs::read_dir(bin) else {
@@ -22,7 +27,7 @@ fn path_without_claude(dir: &Path) -> String {
         };
         for entry in entries.flatten() {
             let link = dir.join(entry.file_name());
-            if entry.file_name() != "claude" && !link.exists() {
+            if entry.file_name() != name && !link.exists() {
                 std::os::unix::fs::symlink(entry.path(), link).ok();
             }
         }
@@ -103,7 +108,8 @@ case "$*" in
     # Like claude's node, outlives the TERM timeout(1) sends.
     [ ! -e '{stub_dir}/reads-stdin' ] || {{ trap '' TERM; read -r _ || :; }}
     [ ! -e '{stub_dir}/reads-tty' ] || {{ trap '' TERM; read -r _ </dev/tty || :; }}
-    [ ! -e '{stub_dir}/hangs' ] || exec sleep 30 ;;
+    # Not exec: a child holding stdout must die with the bound too.
+    [ ! -e '{stub_dir}/hangs' ] || {{ sleep 30; exit 0; }} ;;
 esac
 case "$*" in
   "plugin list --json") cat '{stub_dir}/installed.json' 2>/dev/null || echo '[]' ;;
@@ -181,6 +187,25 @@ esac
             ),
         )
         .unwrap();
+    }
+
+    /// Stubs `setsid` and `timeout` to log their arguments and run the rest.
+    fn log_wrappers(&self) {
+        let log = self.stub.join("log");
+        executable(
+            &self.fake_bin.join("setsid"),
+            format!(
+                "#!/bin/sh\necho \"setsid $*\" >> '{}'\nexec \"$@\"\n",
+                log.display()
+            ),
+        );
+        executable(
+            &self.fake_bin.join("timeout"),
+            format!(
+                "#!/bin/sh\necho \"timeout $*\" >> '{}'\nwhile [ \"${{1#-}}\" != \"$1\" ]; do [ \"$1\" != -k ] || shift; shift; done\nshift\nexec \"$@\"\n",
+                log.display()
+            ),
+        );
     }
 
     fn skill(&self, name: &str) {
@@ -837,29 +862,50 @@ fn a_relative_settings_path_gives_claude_an_absolute_config_dir() {
 }
 
 #[test]
-fn the_read_only_claude_calls_run_under_a_timeout() {
+fn the_read_only_claude_calls_run_under_a_timeout_in_their_own_session() {
     let sandbox = Sandbox::new();
-    executable(
-        &sandbox.fake_bin.join("timeout"),
-        format!(
-            "#!/bin/sh\necho \"timeout $*\" >> '{}/log'\nwhile [ \"${{1#-}}\" != \"$1\" ]; do [ \"$1\" != -k ] || shift; shift; done\nshift\nexec \"$@\"\n",
-            sandbox.stub.display()
-        ),
-    );
+    sandbox.log_wrappers();
 
     sandbox.install(&["--with-skills"]);
 
+    for call in ["plugin list --json", "plugin marketplace list --json"] {
+        for line in [
+            format!("setsid timeout -k 5 10 claude {call}"),
+            format!("timeout -k 5 10 claude {call}"),
+        ] {
+            assert!(sandbox.log().contains(&line), "{line}: {:?}", sandbox.log());
+        }
+    }
+}
+
+#[test]
+fn without_setsid_the_read_only_claude_calls_still_run_under_a_timeout() {
+    let sandbox = Sandbox::new();
+    sandbox.log_wrappers();
+    fs::remove_file(sandbox.fake_bin.join("setsid")).unwrap();
+    let path = format!(
+        "{}:{}",
+        sandbox.fake_bin.display(),
+        path_without(&sandbox.stub.join("path"), "setsid")
+    );
+    let mut cmd = sandbox.command(&sandbox.root.join("scripts/install"), &path);
+
+    let out = cmd
+        .arg("--with-skills")
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+
+    assert!(out.status.success(), "{out:?}");
     assert!(
         sandbox
             .log()
-            .contains(&"timeout -k 5 10 setsid claude plugin list --json".to_string()),
+            .contains(&"timeout -k 5 10 claude plugin list --json".to_string()),
         "{:?}",
         sandbox.log()
     );
     assert!(
-        sandbox
-            .log()
-            .contains(&"timeout -k 5 10 setsid claude plugin marketplace list --json".to_string()),
+        !sandbox.log().iter().any(|l| l.starts_with("setsid")),
         "{:?}",
         sandbox.log()
     );

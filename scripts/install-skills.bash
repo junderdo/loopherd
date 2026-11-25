@@ -9,11 +9,12 @@ skills_id="$skills_plugin@$skills_marketplace"
 # Runs a read-only claude call. stdin is /dev/null: under `curl | sh` it is
 # the terminal, which a claude would read from or stop on. setsid leaves it
 # no terminal to stop on at all: uutils' timeout never KILLs a stopped child
-# (LH-620). No --foreground: BusyBox's timeout lacks it (LH-613).
+# (LH-620). setsid goes outside timeout, so claude's children stay in the
+# group timeout kills. No --foreground: BusyBox's timeout lacks it (LH-613).
 claude_read() {
   local run=(claude "$@")
-  ! command -v setsid >/dev/null || run=(setsid "${run[@]}")
   ! command -v timeout >/dev/null || run=(timeout -k 5 10 "${run[@]}")
+  ! command -v setsid >/dev/null || run=(setsid "${run[@]}")
   "${run[@]}" </dev/null 2>/dev/null
 }
 
