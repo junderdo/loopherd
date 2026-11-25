@@ -1021,6 +1021,22 @@ fn a_failed_plain_auth_status_without_a_login_is_refused_with_ghs_own_error() {
 }
 
 #[test]
+fn a_plain_auth_status_that_exits_0_without_a_login_is_refused_with_ghs_own_output() {
+    let fixture = Fixture::new(&[]);
+    fixture.gh_json(
+        "auth-plain.out",
+        "github.com\n  X Timeout trying to log in to github.com account acme (keyring)\n",
+    );
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&[]),
+        "loopherd init: gh auth status --hostname github.com: github.com\n  \
+         X Timeout trying to log in to github.com account acme (keyring)\n",
+    );
+}
+
+#[test]
 fn the_plain_auth_status_fallback_without_a_login_passes_on_ghs_advice() {
     let fixture = Fixture::new(&[]);
     fixture.gh_json(
