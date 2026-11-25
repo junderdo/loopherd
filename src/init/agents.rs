@@ -21,6 +21,7 @@ const LOOPHERD_DOC: &str = "docs/agents/loopherd.md";
 pub const SHEPHERD_DOC: &str = "docs/agents/shepherd.md";
 
 /// A file init writes into the repo, uncommitted.
+#[derive(Clone)]
 pub struct Doc {
     pub path: &'static str,
     pub text: String,

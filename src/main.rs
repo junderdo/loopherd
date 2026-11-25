@@ -126,9 +126,13 @@ enum Command {
     /// pane included) it asks for each with that as the default, asking again
     /// for a taken herd name or an existing lead prompt, and confirms before
     /// writing; the repo, default branch and confirm questions have no flag.
-    /// Without one it refuses, changing nothing, when the herd file exists,
-    /// or the lead prompt does without --no-lead. Either way it refuses a
-    /// repo another herd runs.
+    /// Without one it refuses, changing nothing, when the herd file exists
+    /// for another repo, or the lead prompt does without --no-lead.
+    /// In a repo whose herd exists it re-asks max, context_limit, merge_guard,
+    /// a lead when there is none, and the checks, gh account and default
+    /// branch where their text is still init's, showing each change as a diff
+    /// to confirm, then offers the herd's pending `herd upgrade` changes.
+    /// Without a terminal, flags change their settings and nothing is upgraded.
     Init(InitArgs),
     /// List herd files with a usage line per template; exits 1 if any is invalid.
     Herds {
@@ -1107,13 +1111,7 @@ fn run_herd(action: HerdAction) -> Result<i32> {
             false => println!("{key} was not set in {herd}"),
         },
         HerdAction::Upgrade { herd } => {
-            let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
-            let running_leads = ledger
-                .entries()?
-                .into_values()
-                .filter(|r| r.role == Some(Role::Lead) && !r.retired)
-                .filter_map(|r| r.herd)
-                .collect();
+            let running_leads = running_leads()?;
             let stdin = std::io::stdin();
             let mut input = stdin.lock();
             let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
@@ -2981,6 +2979,8 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
         merge_guard: args.merge_guard,
         context_limit: args.context_limit,
         with: &args.with,
+        // Only a re-run's migration offers read it, to note a running lead.
+        running_leads: &running_leads().unwrap_or_default(),
     };
     if args.diff {
         return Ok(match init::diff(&paths, req)? {
@@ -2995,6 +2995,17 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
         println!("{line}");
     }
     Ok(0)
+}
+
+/// The herds whose lead is in the ledger and not retired.
+fn running_leads() -> Result<std::collections::BTreeSet<String>> {
+    let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+    Ok(ledger
+        .entries()?
+        .into_values()
+        .filter(|r| r.role == Some(Role::Lead) && !r.retired)
+        .filter_map(|r| r.herd)
+        .collect())
 }
 
 fn run_herds(settings: Option<PathBuf>) -> Result<i32> {
