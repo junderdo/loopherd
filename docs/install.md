@@ -96,7 +96,11 @@ The guide a shepherd or lead follows is the loopherd skill: `loopherd
 --skill` prints it (`--section lead` prints one section), and `install-hook`
 installs it for Claude: the file in `~/.agents/skills/loopherd/`, and
 `~/.claude/skills/loopherd` a relative symlink to it, as the `skills` CLI
-lays out a skill.
+lays out a skill. Beside SKILL.md it writes `references/`: these user docs
+(the tour, setup, install, glossary, an annotated herd file and a runbook
+guide), which the skill points to by topic. `loopherd docs [<topic>]`
+prints the same text, and `loopherd doctor` warns when the installed copy
+doesn't match the binary.
 
 ## Uninstall
 

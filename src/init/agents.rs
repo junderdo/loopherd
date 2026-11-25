@@ -1,5 +1,6 @@
-//! The repo's instructions for workers: a loopherd section in `AGENTS.md`
-//! and `docs/agents/loopherd.md`, each written only when missing.
+//! The repo's instructions for workers and the shepherd: a loopherd section
+//! in `AGENTS.md`, `docs/agents/loopherd.md` and a `docs/agents/shepherd.md`
+//! stub, each written only when missing.
 
 use std::fs;
 use std::io::Write;
@@ -13,9 +14,11 @@ const SECTION: &str = include_str!("agents/section.md");
 const LOOPHERD: &str = include_str!("agents/loopherd.md");
 const LOOPHERD_LOCAL: &str = include_str!("agents/loopherd-local.md");
 const LOOPHERD_OTHER: &str = include_str!("agents/loopherd-other.md");
+const SHEPHERD: &str = include_str!("agents/shepherd.md");
 
 const AGENTS_MD: &str = "AGENTS.md";
 const LOOPHERD_DOC: &str = "docs/agents/loopherd.md";
+pub const SHEPHERD_DOC: &str = "docs/agents/shepherd.md";
 
 /// A file init writes into the repo, uncommitted.
 pub struct Doc {
@@ -119,6 +122,9 @@ pub fn missing(repo: &Path, herd: &Herd, tracker_docs: Vec<Doc>) -> Result<Plan>
     if fs::symlink_metadata(repo.join(LOOPHERD_DOC)).is_err() {
         plan.place(repo, loopherd_doc(herd))?;
     }
+    if fs::symlink_metadata(repo.join(SHEPHERD_DOC)).is_err() {
+        plan.place(repo, shepherd_doc())?;
+    }
     let agents_md = repo.join(AGENTS_MD);
     let linked = fs::symlink_metadata(&agents_md).is_ok_and(|m| m.file_type().is_symlink());
     if linked {
@@ -150,9 +156,18 @@ pub fn missing(repo: &Path, herd: &Herd, tracker_docs: Vec<Doc>) -> Result<Plan>
     Ok(plan)
 }
 
-/// Today's `docs/agents/loopherd.md` when the repo has one, for `--diff`.
-pub fn present(repo: &Path, herd: &Herd) -> Result<Option<Doc>> {
-    Ok(read(&repo.join(LOOPHERD_DOC))?.map(|_| loopherd_doc(herd)))
+/// What init would write now over the docs the repo already has, for
+/// `--diff`. Not the shepherd runbook: it's a stub meant to be filled in.
+pub fn present(repo: &Path, herd: &Herd) -> Result<Vec<Doc>> {
+    let mut docs = Vec::new();
+    if read(&repo.join(LOOPHERD_DOC))?.is_some() {
+        docs.push(loopherd_doc(herd));
+    }
+    Ok(docs)
+}
+
+fn shepherd_doc() -> Doc {
+    Doc::new(SHEPHERD_DOC, SHEPHERD.to_string())
 }
 
 fn loopherd_doc(herd: &Herd) -> Doc {
