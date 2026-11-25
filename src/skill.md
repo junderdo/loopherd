@@ -1033,7 +1033,8 @@ What differs from the shepherd:
   `merge` off, your watch also tells the human of every merge to the repo's
   default branch (`[lead] merge_guard = "hook"`, the default), so expect
   that ping for merges the human makes, but not for an attended member's
-  (D140). Grilling is always the human's.
+  (D140). Grilling is always the human's, but for a batch grill (D132),
+  which your prompt describes when your herd has one.
 - **Attended members** are the human's (D112). Your broker refuses `tell`,
   `prompt`, `restart`, `retire` and `release` on one, and `add` of an
   attended template; your watch shows only its `merged` and `gone`. After
@@ -1166,7 +1167,9 @@ What differs from the shepherd:
   `follow_ups_ready` on, file a qualifying follow-up with `--label
   ready-for-agent --label blocked` and the line `blocked-by: <parent key>`
   in its description, in your tracker's key form, so it becomes claimable
-  once the parent card is Done; comment `filed ready: follow-up of PR
+  once the parent card is Done. File it before the parent merges, so the
+  after-merge unblock frees it; if the parent is already Done, unblock in
+  the tracker right after filing. Comment `filed ready: follow-up of PR
   <n>` on it, and send `loopherd report --kind note` naming it, so the
   human can veto it through the shepherd. It qualifies only if it holds
   findings from the parent PR's review files, under the parent card's

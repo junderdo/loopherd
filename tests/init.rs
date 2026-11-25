@@ -42,6 +42,7 @@ case "$1 $2" in
   "repo view") fixture=repo.json ;;
   "label list") fixture=labels.json ;;
   "issue list") fixture=issues.json ;;
+  "issue view") fixture=issue.json ;;
   *) echo "fake gh: unexpected $*" >&2; exit 1 ;;
 esac
 jq -r "$filter" "$dir/$fixture"
@@ -126,8 +127,21 @@ impl Fixture {
     /// `loopherd init` under a file-size limit that `file` outgrows but every
     /// file init writes before it fits; the limit comes from what init writes here.
     fn init_failing_to_write(&self, file: &str) -> Output {
-        assert_ok(&self.init(&[]));
-        let order = ["widgets-lead.md", "widgets-grill.md", "widgets.toml"];
+        self.init_failing_to_write_with(file, &[])
+    }
+
+    /// As [`Fixture::init_failing_to_write`], passing `extra` to init.
+    fn init_failing_to_write_with(&self, file: &str, extra: &[&str]) -> Output {
+        assert_ok(&self.init(extra));
+        let order: Vec<&str> = [
+            "widgets-lead.md",
+            "widgets-grill.md",
+            "widgets-grill-batch.md",
+            "widgets.toml",
+        ]
+        .into_iter()
+        .filter(|name| self.herds().join(name).exists())
+        .collect();
         let sizes: Vec<u64> = order
             .iter()
             .map(|name| fs::metadata(self.herds().join(name)).unwrap().len())
@@ -154,7 +168,8 @@ impl Fixture {
                 env!("CARGO_BIN_EXE_loopherd"),
                 "init",
             ])
-            .args(Fixture::CHECKS);
+            .args(Fixture::CHECKS)
+            .args(extra);
         self.run(&mut command)
     }
 
@@ -651,7 +666,7 @@ fn a_rerun_changes_max_in_a_crlf_herd_file_or_one_without_a_final_newline() {
         ("no final newline", |text: &str| text.trim_end().to_string()),
     ] {
         let fixture = Fixture::new(&["acme"]);
-        assert_ok(&fixture.init(&["--with", "wayfinding"]));
+        assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
         let file = fixture.herds().join("widgets.toml");
         let was = shape(&fs::read_to_string(&file).unwrap());
         fs::write(&file, &was).unwrap();
@@ -674,10 +689,17 @@ fn a_rerun_changes_max_in_a_crlf_herd_file_or_one_without_a_final_newline() {
 #[test]
 fn a_rerun_switches_a_leads_merge_guard_to_credentials_as_a_fresh_init_writes_it() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--merge-guard", "credentials", "--with", "wayfinding"]));
+    assert_ok(&fixture.init(&[
+        "--merge-guard",
+        "credentials",
+        "--with",
+        "wayfinding",
+        "--with",
+        "grill-batch",
+    ]));
     let guarded = fixture.config_listing();
     fs::remove_dir_all(fixture.herds()).unwrap();
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
 
     let out = fixture.loopherd(&["init", "--merge-guard", "credentials"]);
 
@@ -693,7 +715,7 @@ fn a_rerun_switches_a_leads_merge_guard_to_credentials_as_a_fresh_init_writes_it
 #[test]
 fn a_rerun_keeps_a_context_limit_a_later_config_put_over_the_cap() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
     let file = fixture.herds().join("widgets.toml");
     let over = fs::read_to_string(&file).unwrap().replace(
         "[template.issue]\n",
@@ -2050,7 +2072,7 @@ impl Fixture {
     fn init_on_terminal(&self, extra: &[&str], input: &str) -> Output {
         let mut args = vec!["--check", "cargo test"];
         args.extend(extra);
-        self.on_terminal(&args, &format!("\n\n{input}\n\n\n\n\n\n\n\n\n\n"))
+        self.on_terminal(&args, &format!("\n\n{input}\n\n\n\n\n\n\n\n\n\n\n"))
     }
 
     /// `loopherd init <args>` with stdin and stderr on a terminal, typing `input`.
@@ -2369,6 +2391,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
         "trunk",  // default branch
         "",       // groom
         "",       // wayfinding
+        "",       // grill-batch
         "",       // confirm
     ];
 
@@ -2422,7 +2445,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
 fn on_a_terminal_declining_the_summary_writes_nothing() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -2435,7 +2458,7 @@ fn on_a_terminal_declining_the_summary_writes_nothing() {
 #[test]
 fn on_a_terminal_without_a_build_file_init_asks_for_checks_until_one_is_given() {
     let fixture = Fixture::new(&["acme"]);
-    let typed = "\n\n\n\n\nmake lint\nmake test\n\n\n\n\n\n\n\n\n\n\n";
+    let typed = "\n\n\n\n\nmake lint\nmake test\n\n\n\n\n\n\n\n\n\n\n\n";
 
     let out = fixture.on_terminal(&[], typed);
 
@@ -2475,6 +2498,7 @@ fn on_a_terminal_declining_the_suggested_checks_edits_each_then_adds_more() {
         "cargo nextest run",
         "just check",
         "", // no more checks
+        "",
         "",
         "",
         "",
@@ -2537,7 +2561,7 @@ fn on_a_terminal_a_taken_herd_name_or_lead_prompt_is_asked_again() {
     .unwrap();
     fs::write(fixture.herds().join("gadgets-lead.md"), "mine\n").unwrap();
     let typed = [
-        "", "", "gadgets", "", "", "", "y", "n", "", "", "", "", "", "",
+        "", "", "gadgets", "", "", "", "y", "n", "", "", "", "", "", "", "",
     ];
 
     let out = fixture.on_terminal(&["--check", "cargo test"], &(typed.join("\n") + "\n"));
@@ -2611,7 +2635,7 @@ fn on_a_terminal_flags_answer_their_questions() {
 #[test]
 fn on_a_terminal_a_rerun_entered_through_asks_each_setting_and_changes_nothing() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
     let before = fixture.config_listing();
 
     let out = fixture.on_terminal(&[], &"\n".repeat(12));
@@ -2665,7 +2689,12 @@ impl Fixture {
     fn with_herd(tracker: &[&str]) -> Fixture {
         let fixture = Fixture::new(&["acme"]);
         // With every template init offers, so no migration is pending.
-        assert_ok(&fixture.init(&[tracker, &["--with", "wayfinding"]].concat()));
+        // A local tracker's herd has no grill-batch template.
+        let grill_batch: &[&str] = match tracker.contains(&"local") {
+            true => &[],
+            false => &["--with", "grill-batch"],
+        };
+        assert_ok(&fixture.init(&[tracker, &["--with", "wayfinding"], grill_batch].concat()));
         fill_in_the_source(&fixture);
         fixture
     }
@@ -2717,10 +2746,17 @@ fn on_a_terminal_a_rerun_changes_max_for_each_tracker() {
 #[test]
 fn on_a_terminal_a_rerun_adds_a_lead_guarded_by_credentials_as_init_writes_one() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--merge-guard", "credentials", "--with", "wayfinding"]));
+    assert_ok(&fixture.init(&[
+        "--merge-guard",
+        "credentials",
+        "--with",
+        "wayfinding",
+        "--with",
+        "grill-batch",
+    ]));
     let guarded = fixture.config_listing();
     fs::remove_dir_all(fixture.herds()).unwrap();
-    assert_ok(&fixture.init(&["--no-lead", "--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--no-lead", "--with", "wayfinding", "--with", "grill-batch"]));
     let typed = [
         "",            // repo
         "",            // checks
@@ -2744,7 +2780,7 @@ fn on_a_terminal_a_rerun_adds_a_lead_guarded_by_credentials_as_init_writes_one()
 #[test]
 fn on_a_terminal_enter_keeps_a_gh_account_gh_has_since_logged_out_of() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
     fixture.gh_json(
         "auth.json",
         r#"{"hosts": {"github.com": [{"login": "other", "state": "success"}]}}"#,
@@ -2765,7 +2801,7 @@ fn on_a_terminal_enter_keeps_a_gh_account_gh_has_since_logged_out_of() {
 #[test]
 fn on_a_terminal_a_rerun_of_a_herd_from_before_the_grill_still_carries_a_branch() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
     let file = fixture.herds().join("widgets.toml");
     let herd = fs::read_to_string(&file).unwrap();
     let start = herd.find("\n[template.grill]").unwrap();
@@ -2785,7 +2821,7 @@ fn on_a_terminal_a_rerun_of_a_herd_from_before_the_grill_still_carries_a_branch(
 #[test]
 fn on_a_terminal_a_rerun_then_offers_the_herds_pending_migrations() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
     let file = fixture.herds().join("widgets.toml");
     let behind = fs::read_to_string(&file)
         .unwrap()
@@ -2829,7 +2865,7 @@ fn a_rerun_of_an_invalid_herd_says_to_fix_it_first() {
 #[test]
 fn on_a_terminal_a_rerun_shows_a_changed_max_as_its_own_diff_and_applies_it_on_yes() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
     let was = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
     let typed = [
         "",  // repo
@@ -2854,7 +2890,7 @@ fn on_a_terminal_a_rerun_shows_a_changed_max_as_its_own_diff_and_applies_it_on_y
 #[test]
 fn on_a_terminal_a_rerun_carries_a_changed_branch_into_the_herd_files_text() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
     let herd_file = fixture.herds().join("widgets.toml");
     let lead_file = fixture.herds().join("widgets-lead.md");
     let (herd_was, lead_was) = (
@@ -2968,7 +3004,11 @@ fn on_a_terminal_a_rerun_adds_a_lead_as_init_writes_one() {
         let led = fixture.config_listing();
         fs::remove_dir_all(fixture.herds()).unwrap();
         // The repo's tracker doc, written by the first init, now names the tracker.
-        assert_ok(&fixture.init(&["--no-lead", "--with", "wayfinding"]));
+        let grill_batch: &[&str] = match tracker.contains(&"local") {
+            true => &[],
+            false => &["--with", "grill-batch"],
+        };
+        assert_ok(&fixture.init(&[&["--no-lead", "--with", "wayfinding"], grill_batch].concat()));
         fill_in_the_source(&fixture);
         let typed = [
             "",  // repo
@@ -3103,7 +3143,7 @@ fn on_a_terminal_a_repo_answer_outside_git_is_asked_again_naming_no_flag() {
 
     let out = fixture.on_terminal(
         &["--check", "cargo test"],
-        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n\n\n", outside.display()),
+        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", outside.display()),
     );
 
     assert_ok(&out);
@@ -3216,8 +3256,8 @@ fn on_a_terminal_the_summary_names_the_labels_and_docs_writing_creates() {
     assert!(
         text(&out.stdout).contains(
             "Writing it also creates the labels ready-for-agent, needs-info, ready-for-human, \
-             blocked, wayfinding:research, wayfinding:domain and wayfinding:prototype in \
-             acme/widgets where missing, and writes \
+             blocked, wayfinding:research, wayfinding:domain, wayfinding:prototype, grilling \
+             and grill:batch in acme/widgets where missing, and writes \
              docs/agents/issue-tracker.md, docs/agents/triage-labels.md, \
              docs/agents/loopherd.md, docs/agents/shepherd.md and AGENTS.md in the repo, \
              uncommitted.\r\n"
@@ -3267,7 +3307,7 @@ fn on_a_terminal_a_repo_answer_git_refuses_to_read_shows_gits_reason() {
             ("GIT_CONFIG_VALUE_0", &repo),
         ],
         &["--check", "cargo test"],
-        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n\n\n", other.display()),
+        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n\n\n\n", other.display()),
     );
 
     assert_ok(&out);
@@ -3945,7 +3985,7 @@ fn on_a_terminal_declining_the_summary_leaves_an_existing_agents_md_as_it_was() 
     let fixture = Fixture::new(&["acme"]);
     fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\n").unwrap();
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -4691,7 +4731,7 @@ fn on_a_terminal_a_gh_account_keeps_a_github_origins_local_herd_on_github() {
             "--gh-account",
             "acme",
         ],
-        "\n\n\n\n\n\n\n\n\n\n\n",
+        "\n\n\n\n\n\n\n\n\n\n\n\n",
     );
 
     assert_ok(&out);
@@ -4712,7 +4752,7 @@ fn on_a_terminal_a_github_origins_local_herd_takes_enter_for_no_github() {
     let out = fixture.on_terminal_with(
         &envs,
         &["--check", "cargo test", "--tracker", "local"],
-        "\n\n\n\n\n\n\n\n\n\n\n",
+        "\n\n\n\n\n\n\n\n\n\n\n\n",
     );
 
     assert!(
@@ -6165,7 +6205,7 @@ fn on_a_terminal_a_detached_head_without_origin_head_asks_for_the_default_branch
     let mut args = vec!["--check", "cargo test"];
     args.extend(OTHER);
 
-    let out = fixture.on_terminal(&args, "\n\n\n\n\n\n\nmain\n\n\n\n");
+    let out = fixture.on_terminal(&args, "\n\n\n\n\n\n\nmain\n\n\n\n\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -6734,6 +6774,7 @@ fn on_a_terminal_answering_no_to_groom_writes_none() {
         "",  // default branch
         "n", // groom
         "",  // wayfinding
+        "",  // grill-batch
         "",  // confirm
     ];
 
@@ -6945,7 +6986,7 @@ fn on_a_terminal_each_question_explains_itself_above_its_prompt() {
     )
     .unwrap();
 
-    let out = fixture.on_terminal(&[], &"\n".repeat(14));
+    let out = fixture.on_terminal(&[], &"\n".repeat(15));
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -7064,6 +7105,27 @@ fn without_wayfinding_init_writes_what_it_wrote_before_routing_byte_for_byte() {
         let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
             "tests/fixtures/init/{tracker}-without-wayfinding.txt"
         ));
+        assert_eq!(
+            fixture.written(),
+            fs::read_to_string(&golden).unwrap(),
+            "{tracker}"
+        );
+    }
+}
+
+#[test]
+fn with_only_wayfinding_init_writes_what_it_wrote_before_grill_batch_byte_for_byte() {
+    // herd upgrade adds grill-batch only over a [queue] that is init's own.
+    for (tracker, args) in [
+        ("github", &["--with", "wayfinding"][..]),
+        ("local", &["--tracker", "local", "--with", "wayfinding"][..]),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+
+        assert_ok(&fixture.init(args));
+
+        let golden = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join(format!("tests/fixtures/init/{tracker}-with-wayfinding.txt"));
         assert_eq!(
             fixture.written(),
             fs::read_to_string(&golden).unwrap(),
@@ -7465,6 +7527,7 @@ fn on_a_terminal_answering_no_to_wayfinding_writes_the_single_template_queue() {
         "",  // default branch
         "",  // groom
         "n", // wayfinding
+        "n", // grill-batch
         "",  // confirm
     ];
 
@@ -7707,7 +7770,7 @@ fn on_a_terminal_the_summary_lists_the_attended_grill() {
     assert_ok(&out);
     let shown = text(&out.stdout);
     assert!(
-        shown.contains("  groom   yes\r\n  wayfinding yes\r\n  also    grill (attended)\r\n"),
+        shown.contains("  groom   yes\r\n  wayfinding yes\r\n  grill-batch yes\r\n  also    grill (attended)\r\n"),
         "{shown}"
     );
 }
@@ -7934,7 +7997,7 @@ fn herd_upgrade_gives_a_herd_without_a_grill_the_one_init_writes_today() {
 #[test]
 fn herd_upgrade_without_a_terminal_lists_a_missing_grill_and_writes_nothing() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
     assert_ok(&fixture.loopherd(&["herd", "unset", "widgets", "template.grill"]));
     let before = fixture.config_listing();
 
@@ -7958,7 +8021,9 @@ fn herd_upgrade_gives_a_herd_without_wayfinding_the_routing_and_template_init_wr
         let fixture = Fixture::new(&["acme"]);
         assert_ok(&fixture.init(args));
 
-        let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n") else {
+        // Takes wayfinding and declines the grill-batch offered after it.
+        let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\nn\n")
+        else {
             return;
         };
 
@@ -7985,7 +8050,7 @@ fn herd_upgrade_skips_wayfinding_over_a_source_the_human_edited() {
     assert_ok(&fixture.loopherd(&["herd", "set", "widgets", "queue.source", "'echo'"]));
     let before = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
 
-    let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n") else {
+    let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n\n") else {
         return;
     };
 
@@ -7999,4 +8064,584 @@ fn herd_upgrade_skips_wayfinding_over_a_source_the_human_edited() {
         fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap(),
         before
     );
+}
+
+const GRILL_BATCH_ISSUES: &str = r#"[
+  {"number": 7, "title": "Add the frobnicator!", "labels": [{"name": "ready-for-agent"}]},
+  {"number": 21, "title": "Pick a queue model", "labels": [{"name": "grilling"}, {"name": "Grill:Batch"}]},
+  {"number": 22, "title": "Name the herd", "labels": [{"name": "grilling"}, {"name": "ready-for-agent"}]},
+  {"number": 23, "title": "Settle merges", "labels": [{"name": "grilling"}, {"name": "grill:batch"}, {"name": "needs-info"}]},
+  {"number": 24, "title": "Unready", "labels": []},
+  {"number": 25, "title": "Survey queues", "labels": [{"name": "ready-for-agent"}, {"name": "wayfinding:research"}]},
+  {"number": 26, "title": "Blocked grill", "labels": [{"name": "grilling"}, {"name": "grill:batch"}, {"name": "blocked"}]}
+]"#;
+
+fn grill_batch(fixture: &Fixture) -> toml::Table {
+    herd_toml(fixture)["template"]["grill-batch"]
+        .as_table()
+        .expect("a [template.grill-batch]")
+        .clone()
+}
+
+fn grill_batch_prompt(fixture: &Fixture) -> String {
+    fs::read_to_string(fixture.herds().join("widgets-grill-batch.md")).unwrap()
+}
+
+#[test]
+fn with_grill_batch_the_github_queue_routes_batch_grills_ready_or_not_and_leaves_out_live_ones() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("issues.json", GRILL_BATCH_ISSUES);
+
+    assert_ok(&fixture.init(&["--with", "grill-batch"]));
+
+    let queue = herd_toml(&fixture)["queue"].as_table().unwrap().clone();
+    assert!(!queue.contains_key("template"), "{queue:?}");
+    assert_eq!(
+        queue["templates"],
+        toml::Value::Array(vec!["issue".into(), "grill-batch".into()])
+    );
+    assert_eq!(
+        fixture.github_tasks(),
+        "issue 7 feat tdd add-the-frobnicator\n\
+         grill-batch 21 docs grilling pick-a-queue-model\n\
+         issue 25 feat tdd survey-queues\n"
+    );
+}
+
+#[test]
+fn with_grill_batch_and_wayfinding_the_github_queue_routes_to_all_three_templates() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("issues.json", GRILL_BATCH_ISSUES);
+
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--with", "grill-batch"]));
+
+    assert_eq!(
+        herd_toml(&fixture)["queue"]["templates"],
+        toml::Value::Array(vec![
+            "issue".into(),
+            "wayfinding".into(),
+            "grill-batch".into()
+        ])
+    );
+    assert_eq!(
+        fixture.github_tasks(),
+        "issue 7 feat tdd add-the-frobnicator\n\
+         grill-batch 21 docs grilling pick-a-queue-model\n\
+         wayfinding 25 docs research survey-queues\n"
+    );
+}
+
+#[test]
+fn with_grill_batch_the_github_backlog_keeps_live_grills_and_waiting_batches() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("issues.json", GRILL_BATCH_ISSUES);
+    assert_ok(&fixture.init(&["--with", "grill-batch"]));
+
+    let backlog = fixture.herd_get("queue.backlog");
+    let path = format!(
+        "{}:{}",
+        fixture.gh_dir().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let out = Command::new("sh")
+        .args(["-c", &backlog])
+        .env("PATH", path)
+        .output()
+        .unwrap();
+
+    assert_ok(&out);
+    assert_eq!(
+        text(&out.stdout),
+        "22 Name the herd\n23 Settle merges\n24 Unready\n"
+    );
+}
+
+#[test]
+fn the_github_grill_batch_template_takes_the_issues_settings_on_a_docs_branch() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--with", "grill-batch", "--context-limit", "150000"]));
+
+    let template = grill_batch(&fixture);
+    let issue = herd_toml(&fixture)["template"]["issue"].clone();
+    let mut keys: Vec<&str> = template.keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "branch",
+            "context_limit",
+            "done",
+            "merged",
+            "name",
+            "params",
+            "prompt_file"
+        ]
+    );
+    assert_eq!(template["params"], issue["params"]);
+    assert_eq!(
+        template["name"].as_str(),
+        Some("{herd}-grill-batch-{number}")
+    );
+    assert_eq!(template["branch"].as_str(), Some("docs/{number}-{slug}"));
+    assert_eq!(template["merged"], issue["merged"]);
+    assert_eq!(template["context_limit"], issue["context_limit"]);
+    assert_eq!(
+        template["prompt_file"].as_str(),
+        Some("widgets-grill-batch.md")
+    );
+}
+
+impl Fixture {
+    /// Whether the grill-batch `done` check passes for issue 21, with gh
+    /// answering `issue view` from `issue`.
+    fn github_batch_done(&self, issue: &str) -> bool {
+        self.gh_json("issue.json", issue);
+        let done = grill_batch(self)["done"]
+            .as_str()
+            .unwrap()
+            .replace("{number}", "21");
+        let path = format!(
+            "{}:{}",
+            self.gh_dir().display(),
+            std::env::var("PATH").unwrap()
+        );
+        Command::new("sh")
+            .args(["-c", &done])
+            .env("PATH", path)
+            .status()
+            .unwrap()
+            .success()
+    }
+}
+
+#[test]
+fn the_github_grill_batch_is_done_once_its_issue_is_closed_or_waits_on_the_human() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--with", "grill-batch"]));
+
+    assert!(fixture.github_batch_done(r#"{"state": "CLOSED", "labels": []}"#));
+    assert!(fixture.github_batch_done(
+        r#"{"state": "OPEN", "labels": [{"name": "grilling"}, {"name": "Needs-Info"}]}"#
+    ));
+    assert!(!fixture.github_batch_done(
+        r#"{"state": "OPEN", "labels": [{"name": "grilling"}, {"name": "grill:batch"}]}"#
+    ));
+}
+
+#[test]
+fn the_github_grill_batch_prompt_posts_a_batch_waits_then_writes_the_accepted_decision() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--with", "grill-batch"]));
+
+    let prompt = grill_batch_prompt(&fixture);
+
+    let gh = "GH_TOKEN=$(gh auth token --user acme) gh";
+    assert_has(
+        &prompt,
+        &[
+            "You're {name}, batch-grilling GitHub issue #{number} of acme/widgets",
+            &format!("`{gh} issue view {{number}} --repo acme/widgets --comments`"),
+            &format!(
+                "`{gh} issue comment {{number}} --repo acme/widgets --body \"claimed by {{name}}\"`"
+            ),
+            "nothing is filed, marked ready,\ncommitted or pushed",
+            "`Batch grill #{number}, round <k>`",
+            "Invoke the `grilling` skill, in batch mode",
+            &format!("`{gh} issue comment {{number}} --repo acme/widgets --body-file <file>`"),
+            &format!("`{gh} issue edit {{number}} --repo acme/widgets --add-label needs-info`"),
+            "`loopherd release {name}`",
+            "`accept all`",
+            "`discuss <n>`",
+            "`docs/adr/<NNNN>-<slug>.md`",
+            "the body ending with the line `Closes #{number}`",
+            "`loopherd report --kind done \"<PR link and one-line summary>\"`",
+        ],
+    );
+    let post = prompt.find("--body-file").unwrap();
+    let report = prompt.find("--kind question").unwrap();
+    let wait = prompt.find("--add-label needs-info").unwrap();
+    assert!(post < report && report < wait, "{prompt}");
+}
+
+#[test]
+fn with_grill_batch_init_creates_the_grilling_labels_where_missing() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("labels.json", r#"[{"name": "Grilling"}]"#);
+
+    assert_ok(&fixture.init(&["--with", "grill-batch"]));
+
+    let calls = fixture.gh_calls();
+    assert!(
+        calls.contains("label create grill:batch --repo acme/widgets"),
+        "{calls}"
+    );
+    assert!(!calls.contains("label create grilling"), "{calls}");
+}
+
+#[test]
+fn without_grill_batch_init_creates_no_grilling_label_and_writes_no_prompt() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&[]));
+
+    assert!(
+        !fixture.gh_calls().contains("grill"),
+        "{}",
+        fixture.gh_calls()
+    );
+    assert!(!fixture.herds().join("widgets-grill-batch.md").exists());
+    assert!(herd_toml(&fixture)["template"].get("grill-batch").is_none());
+}
+
+#[test]
+fn with_grill_batch_herds_is_valid_and_feed_names_the_batch_members_template() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("issues.json", GRILL_BATCH_ISSUES);
+    assert_ok(&fixture.init(&["--with", "grill-batch", "--max", "4"]));
+
+    let herds = fixture.loopherd(&["herds"]);
+    let feed = fixture.loopherd(&["feed", "widgets", "--dry-run"]);
+
+    assert_ok(&herds);
+    assert!(
+        text(&herds.stdout).contains("templates issue, grill-batch"),
+        "{}",
+        text(&herds.stdout)
+    );
+    assert_ok(&feed);
+    assert!(
+        text(&feed.stdout).contains("would add widgets-grill-batch-21 (template grill-batch)"),
+        "{}",
+        text(&feed.stdout)
+    );
+}
+
+#[test]
+fn init_prints_the_grill_batch_prompt_it_wrote() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&["--with", "grill-batch"]);
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains(&format!(
+            "wrote {}",
+            fixture.herds().join("widgets-grill-batch.md").display()
+        )),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn init_refuses_changing_nothing_when_the_grill_batch_prompt_exists() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.herds()).unwrap();
+    fs::write(fixture.herds().join("widgets-grill-batch.md"), "mine").unwrap();
+    let before = fixture.config_listing();
+
+    let out = fixture.init(&["--with", "grill-batch"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "loopherd init: {} already exists; init never replaces a grill-batch prompt\n",
+            fixture.herds().join("widgets-grill-batch.md").display()
+        )
+    );
+    assert_eq!(fixture.config_listing(), before);
+    assert_eq!(fixture.gh_calls(), "");
+}
+
+#[test]
+fn a_failed_grill_batch_prompt_or_herd_file_write_leaves_no_file() {
+    for file in ["widgets-grill-batch.md", "widgets.toml"] {
+        let fixture = Fixture::new(&["acme"]);
+
+        let out = fixture.init_failing_to_write_with(file, &["--with", "grill-batch"]);
+
+        assert_eq!(out.status.code(), Some(1), "{file}");
+        assert!(!fixture.herds().exists(), "{file}");
+    }
+}
+
+#[test]
+fn diff_shows_the_grill_batch_template_and_prompt_init_would_add() {
+    let batch = Fixture::new(&["acme"]);
+    assert_ok(&batch.init(&["--with", "grill-batch"]));
+    let plain = Fixture::new(&["acme"]);
+    assert_ok(&plain.init(&[]));
+
+    let unchanged = batch.init(&["--diff"]);
+    let added = plain.init(&["--diff", "--with", "grill-batch"]);
+
+    assert_ok(&unchanged);
+    assert_eq!(text(&unchanged.stdout), "");
+    assert_eq!(added.status.code(), Some(1), "{}", text(&added.stderr));
+    let shown = text(&added.stdout);
+    assert!(shown.contains("\n+[template.grill-batch]\n"), "{shown}");
+    assert!(
+        shown.contains("\n+templates = [\"issue\", \"grill-batch\"]\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&format!(
+            "+++ {} (init now)",
+            plain.herds().join("widgets-grill-batch.md").display()
+        )),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_local_tracker_is_offered_no_grill_batch_and_upgrade_leaves_it_out() {
+    let fixture = Fixture::new(&["acme"]);
+    let refused = Fixture::new(&["acme"]);
+
+    let out = refused.init(&["--tracker", "local", "--with", "grill-batch"]);
+    assert_ok(&fixture.init(&["--tracker", "local", "--with", "wayfinding"]));
+    let upgrade = fixture.loopherd(&["herd", "upgrade", "widgets"]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).contains("no grill-batch template: a local tracker's herd has none yet"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!refused.herds().join("widgets.toml").exists());
+    assert!(herd_toml(&fixture)["template"].get("grill-batch").is_none());
+    assert!(!fixture.herds().join("widgets-grill-batch.md").exists());
+    assert_ok(&upgrade);
+    assert_eq!(text(&upgrade.stdout), "herd widgets is up to date\n");
+}
+
+#[test]
+fn on_a_terminal_a_local_tracker_isnt_asked_for_grill_batch() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.commit_local_issues_under_github_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    let envs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let out = fixture.on_terminal_with(
+        &envs,
+        &["--check", "cargo test", "--tracker", "local"],
+        "\n\n\n\n\n\n\n\n\n\n\n\n",
+    );
+
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("No grill-batch template: a local tracker's herd has none yet."),
+        "{shown}"
+    );
+    assert!(!shown.contains("Add a grill-batch template"), "{shown}");
+    assert!(shown.contains("  grill-batch no\r\n"), "{shown}");
+}
+
+#[test]
+fn with_grill_batch_another_tracker_leaves_routing_and_done_to_fill_in() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&[
+        "--tracker",
+        "other",
+        "--tracker-desc",
+        "Issues live in Linear.",
+        "--with",
+        "grill-batch",
+    ]);
+
+    assert_ok(&out);
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.contains("templates = [\"issue\", \"grill-batch\"]"),
+        "{herd}"
+    );
+    assert!(herd.contains("<template> is\n# grill-batch"), "{herd}");
+    assert!(
+        herd.contains("once task {number} is closed, or open and\n# marked needs-info"),
+        "{herd}"
+    );
+    assert!(
+        text(&out.stdout).contains("[template.grill-batch] done"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_has(
+        &grill_batch_prompt(&fixture),
+        &[
+            "batch-grilling task {number}",
+            "`Batch grill #{number}, round <k>`",
+            "(fill in)",
+        ],
+    );
+}
+
+#[test]
+fn with_grill_batch_the_lead_and_the_loopherd_doc_say_how_a_batch_is_released() {
+    for args in [
+        &[][..],
+        &["--tracker", "other", "--tracker-desc", "Linear."][..],
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        let mut with = args.to_vec();
+        with.extend(["--with", "grill-batch"]);
+        assert_ok(&fixture.init(&with));
+
+        let lead = fs::read_to_string(fixture.herds().join("widgets-lead.md")).unwrap();
+        let doc = repo_file(&fixture, "docs/agents/loopherd.md");
+
+        for text in [&lead, &doc] {
+            assert_has(
+                text,
+                &["grill:batch", "needs-info", "`loopherd release <member>`"],
+            );
+        }
+        assert!(!lead.contains("Grilling is always the human's."), "{lead}");
+    }
+}
+
+#[test]
+fn with_grill_batch_a_github_herd_name_too_long_for_a_grill_batch_name_is_refused() {
+    let fitting = Fixture::new(&["acme"]);
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fitting.init(&["--with", "grill-batch", "--herd", "widgets-batch"]);
+    let too_long = fixture.init(&["--with", "grill-batch", "--herd", "widgets-batchy"]);
+
+    assert_ok(&out);
+    assert!(!too_long.status.success());
+    assert!(
+        text(&too_long.stderr)
+            .contains("the herd name widgets-batchy leaves no room for grill-batch members' names"),
+        "{}",
+        text(&too_long.stderr)
+    );
+    assert!(!fixture.herds().join("widgets-batchy.toml").exists());
+}
+
+#[test]
+fn on_a_terminal_init_asks_for_a_grill_batch_template_and_enter_adds_it() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains(
+            "Add a grill-batch template, so grilling tasks marked for batch mode run \
+             unattended? [Y/n]: "
+        ),
+        "{shown}"
+    );
+    let explanation = shown.find("Answers a grilling task's questions").unwrap();
+    assert!(
+        explanation < shown.find("Add a grill-batch template").unwrap(),
+        "{shown}"
+    );
+    assert!(shown.contains("  grill-batch yes\r\n"), "{shown}");
+    grill_batch(&fixture);
+}
+
+#[test]
+fn on_a_terminal_an_existing_grill_batch_prompt_is_asked_again() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.herds()).unwrap();
+    fs::write(fixture.herds().join("widgets-grill-batch.md"), "mine\n").unwrap();
+    let typed = [
+        "", "",  // repo, herd name
+        "",  // tracker
+        "",  // owner/name
+        "",  // max
+        "",  // lead
+        "",  // merge_guard
+        "",  // context_limit
+        "",  // gh account
+        "",  // default branch
+        "",  // groom
+        "",  // wayfinding
+        "",  // grill-batch, refused
+        "n", // grill-batch, asked again
+        "",  // confirm
+    ];
+
+    let out = fixture.on_terminal(&["--check", "cargo test"], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains(
+            "widgets-grill-batch.md already exists; init never replaces a grill-batch prompt; \
+             answer n or remove it"
+        ),
+        "{shown}"
+    );
+    assert!(shown.contains("  grill-batch no\r\n"), "{shown}");
+    assert!(herd_toml(&fixture)["template"].get("grill-batch").is_none());
+    assert_eq!(
+        fs::read_to_string(fixture.herds().join("widgets-grill-batch.md")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[test]
+fn on_a_terminal_answering_no_to_grill_batch_writes_none() {
+    let fixture = Fixture::new(&["acme"]);
+    let typed = [
+        "", "",  // repo, herd name
+        "",  // tracker
+        "",  // owner/name
+        "",  // max
+        "",  // lead
+        "",  // merge_guard
+        "",  // context_limit
+        "",  // gh account
+        "",  // default branch
+        "",  // groom
+        "n", // wayfinding
+        "n", // grill-batch
+        "",  // confirm
+    ];
+
+    let out = fixture.on_terminal(&["--check", "cargo test"], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("  grill-batch no\r\n"),
+        "{}",
+        text(&out.stdout)
+    );
+    let herd = herd_toml(&fixture);
+    assert_eq!(herd["queue"]["template"].as_str(), Some("issue"));
+    assert!(herd["template"].get("grill-batch").is_none());
+    assert!(!fixture.herds().join("widgets-grill-batch.md").exists());
+}
+
+#[test]
+fn herd_upgrade_gives_a_herd_without_grill_batch_the_routing_template_and_prompt_init_writes() {
+    let routed = Fixture::new(&["acme"]);
+    assert_ok(&routed.init(&["--with", "wayfinding", "--with", "grill-batch"]));
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+
+    let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n") else {
+        return;
+    };
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("grill-batch — Adds [template.grill-batch]"),
+        "{shown}"
+    );
+    let routing = |fixture: &Fixture| {
+        let herd = herd_toml(fixture);
+        format!("{:?}\n{:?}", herd["queue"], herd["template"]["grill-batch"])
+            .replace(&fixture.root.path().display().to_string(), "<root>")
+    };
+    assert_eq!(routing(&fixture), routing(&routed), "{shown}");
+    assert_eq!(grill_batch_prompt(&fixture), grill_batch_prompt(&routed));
+    assert_ok(&fixture.loopherd(&["herds"]));
 }

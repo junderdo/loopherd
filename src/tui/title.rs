@@ -74,11 +74,10 @@ impl Outlines {
         }
         // Last, since a long reason is cut off at the box's edge.
         if let Some(pause) = &herd.paused {
-            let reason = pause
-                .shown_reason()
-                .map_or(String::new(), |r| format!(" — {r}"));
+            // The glyph says paused, leaving the width to the reason.
+            let shown = pause.shown_reason().unwrap_or_else(|| "paused".into());
             spans.push(Span::raw("  "));
-            spans.push(Span::styled(format!("⏸ paused{reason}"), theme.paused()));
+            spans.push(Span::styled(format!("⏸ {shown}"), theme.paused()));
         }
         spans.push(Span::raw(" "));
         Line::from(spans)

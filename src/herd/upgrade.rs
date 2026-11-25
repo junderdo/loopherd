@@ -87,7 +87,7 @@ enum Change {
     },
 }
 
-static MIGRATIONS: [Migration; 6] = [
+static MIGRATIONS: [Migration; 7] = [
     Migration {
         id: "lead-review-rounds",
         explanation: "Writes the lead's review-round limit into its prompt where init puts it,\n\
@@ -130,7 +130,29 @@ static MIGRATIONS: [Migration; 6] = [
         lead_reads_at_start: false,
         state: |herd| template(herd, "wayfinding"),
     },
+    Migration {
+        id: "grill-batch",
+        explanation: "Adds [template.grill-batch] and routes the queue's grilling tasks marked grill:batch\n\
+                      to it; its worker answers the grill itself and posts one batch for the human.",
+        lead_reads_at_start: false,
+        state: grill_batch,
+    },
 ];
+
+/// Not for a local tracker's herd, whose source init writes to read `.scratch/`
+/// issue files: init offers it no batch grill.
+fn grill_batch(herd: &Herd) -> State {
+    let source = herd
+        .doc
+        .get("queue")
+        .and_then(|q| q.get("source"))
+        .and_then(Item::as_str)
+        .unwrap_or_default();
+    match source.contains(" -- .scratch)") {
+        true => State::Current,
+        false => template(herd, "grill-batch"),
+    }
+}
 
 fn template(herd: &Herd, name: &'static str) -> State {
     match herd.doc.get("template").and_then(|t| t.get(name)) {
@@ -799,6 +821,10 @@ prompt = "grill {number}"
 params = ["number"]
 prompt = "answer {number}"
 
+[template.grill-batch]
+params = ["number"]
+prompt = "batch {number}"
+
 [lead]
 prompt = "lead {herd} to {herd} drained in {review_rounds} rounds"
 # From [lead_defaults] when init ran.
@@ -895,7 +921,7 @@ merge = false # the human merges
                  On, the lead files a reviewer's in-scope follow-ups ready for agents.\n\
                  --- {file}\n\
                  +++ {file}\n\
-                 @@ -24,3 +24,4 @@\n \
+                 @@ -28,3 +28,4 @@\n \
                  prompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n \
                  # From [lead_defaults] when init ran.\n \
                  merge = false # the human merges\n\
@@ -1137,7 +1163,8 @@ merge = false # the human merges
     }
 
     const GRILLLESS: &str = "# Herd h\nrepo = \"/src/repo\"\n\n[template.wayfinding]\nparams = []\n\
-                             prompt = \"answer\"\n\n[template.issue]\nparams = [\"number\"]\n\
+                             prompt = \"answer\"\n\n[template.grill-batch]\nparams = []\n\
+                             prompt = \"batch\"\n\n[template.issue]\nparams = [\"number\"]\n\
                              prompt = \"work {number}\"\ndone = \"exit 0\"\n";
 
     #[test]
@@ -1155,7 +1182,7 @@ merge = false # the human merges
                  and its prompt file beside the herd file. Feed never spawns it.\n\
                  --- {file}\n\
                  +++ {file}\n\
-                 @@ -9,3 +9,9 @@\n \
+                 @@ -13,3 +13,9 @@\n \
                  params = [\"number\"]\n \
                  prompt = \"work {{number}}\"\n \
                  done = \"exit 0\"\n\
@@ -1238,7 +1265,8 @@ merge = false # the human merges
     const UNROUTED: &str = "# Herd h\nrepo = \"/src/repo\"\n\n[queue]\ntemplate = \"issue\"\n\
                             # Prints tasks.\nsource = \"list\"\nmax = 2\n\n[template.issue]\n\
                             params = [\"number\"]\nprompt = \"work {number}\"\n\n[template.grill]\n\
-                            params = [\"number\"]\nattended = true\nprompt = \"grill {number}\"\n";
+                            params = [\"number\"]\nattended = true\nprompt = \"grill {number}\"\n\n\
+                            [template.grill-batch]\nparams = [\"number\"]\nprompt = \"batch {number}\"\n";
 
     #[test]
     fn a_herd_without_wayfinding_is_offered_it_and_a_yes_writes_the_template_and_its_routing() {
@@ -1265,10 +1293,10 @@ merge = false # the human merges
                  +source = \"routed list\"\n \
                  max = 2\n \n \
                  [template.issue]\n\
-                 @@ -15,3 +15,7 @@\n \
+                 @@ -19,3 +19,7 @@\n \
+                 [template.grill-batch]\n \
                  params = [\"number\"]\n \
-                 attended = true\n \
-                 prompt = \"grill {{number}}\"\n\
+                 prompt = \"batch {{number}}\"\n\
                  +\n\
                  +[template.wayfinding]\n\
                  +params = [\"number\"]\n\
@@ -1419,7 +1447,7 @@ merge = false # the human merges
         )
         .unwrap();
 
-        let printed = answered(&paths, None, "\n\n\n", &[]);
+        let printed = answered(&paths, None, "\n\n\n\n", &[]);
 
         assert!(
             printed.contains("Not applied: can't render it: template is not a table\n"),
@@ -1443,15 +1471,19 @@ merge = false # the human merges
             )
         );
     }
-    const LEAD_PROMPT: &str = include_str!("../init/lead.md");
+    /// The lead prompt init writes for a herd without a batch grill.
+    fn init_lead_prompt() -> String {
+        include_str!("../init/lead.md").replace("@GRILLING@", "Grilling is always the human's.")
+    }
     const REVIEW_ROUNDS_LINE: &str = "Your review-round limit: {review_rounds}.\n\n";
     const DRAINED_RULE: &str =
         "re-arm after every exit but `{herd} drained`: on that, report done and\n   stop.";
 
     /// The lead prompt init wrote before `lead-review-rounds` and `lead-drained`.
     fn old_lead_prompt() -> String {
-        assert!(LEAD_PROMPT.contains(REVIEW_ROUNDS_LINE) && LEAD_PROMPT.contains(DRAINED_RULE));
-        LEAD_PROMPT
+        let prompt = init_lead_prompt();
+        assert!(prompt.contains(REVIEW_ROUNDS_LINE) && prompt.contains(DRAINED_RULE));
+        prompt
             .replace(REVIEW_ROUNDS_LINE, "")
             .replace(DRAINED_RULE, "re-arm after every exit.")
     }
@@ -1476,7 +1508,7 @@ merge = false # the human merges
         let (_dir, paths) = led_by_file(&old_lead_prompt());
         let herd = text(&paths);
         let printed = answered(&paths, Some("h"), "y\ny\n", &[]);
-        assert_eq!(lead_prompt_text(&paths), LEAD_PROMPT);
+        assert_eq!(lead_prompt_text(&paths), init_lead_prompt());
         assert_eq!(text(&paths), herd);
         let file = paths.herds.join("h-lead.md").display().to_string();
         assert!(

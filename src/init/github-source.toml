@@ -4,25 +4,25 @@
 # $types maps a label to the branch type (else feat); a skill:<name> label
 # names the skill the worker builds with (else tdd).@ROUTING_NOTE@
 source = '''
-@GH@ issue list --repo @OWNER_REPO@ --state open --label @READY_FOR_AGENT@ --limit 1000 --json number,title,labels --jq '
+@GH@ issue list --repo @OWNER_REPO@ --state open @READY_LABEL@--limit 1000 --json number,title,labels --jq '
   {"bug": "fix", "documentation": "docs"} as $types
   | sort_by(.number)[]
   | [.labels[].name | ascii_downcase] as $labels
   | select(any($labels[]; . == "blocked" or . == "@NEEDS_INFO_LC@" or . == "@READY_FOR_HUMAN_LC@") | not)
-  | ([$labels[] | $types[.] | values][0] // "feat") as $type
+@GITHUB_GRILLING@  | ([$labels[] | $types[.] | values][0] // "feat") as $type
   | ([$labels[] | select(startswith("skill:")) | ltrimstr("skill:") | select(test("^[a-z0-9._:-]+$"))][0] // "tdd") as $skill
 @ROUTE@  | ([.title | ascii_downcase | scan("[a-z0-9]+")][:5] | join("-")) as $slug
   | "@TASK_HEAD@ \(if $slug == "" then "issue" else $slug end)"'
 '''
 # Prints "<number> <title>" per open issue the source leaves out, but for
 # blocked ones, oldest first, matching labels whatever their case. Ones waiting
-# on the human stay, @READY_FOR_AGENT@ or not: they are what a dry queue forgets.
+# on the human stay, @READY_FOR_AGENT@ or not: they are what a dry queue forgets.@BACKLOG_NOTE@
 backlog = '''
 @GH@ issue list --repo @OWNER_REPO@ --state open --limit 1000 --json number,title,labels --jq '
   sort_by(.number)[]
   | [.labels[].name | ascii_downcase] as $labels
   | select(any($labels[]; . == "blocked") | not)
-  | select(any($labels[]; . == "@READY_FOR_AGENT_LC@") | not
+  | select(@GITHUB_CLAIMABLE@ | not
       or any($labels[]; . == "@NEEDS_INFO_LC@" or . == "@READY_FOR_HUMAN_LC@"))
   | "\(.number) \(.title)"'
 '''

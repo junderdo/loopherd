@@ -1,0 +1,3 @@
+# Done once the issue is closed, or open and labelled @NEEDS_INFO@ while its
+# batch waits on the human.
+done = "@GH_TOKEN@ gh issue view {number} --repo @OWNER_REPO@ --json state,labels --jq '.state == \"CLOSED\" or any(.labels[].name | ascii_downcase; . == \"@NEEDS_INFO_LC@\")' | grep -qx true"
