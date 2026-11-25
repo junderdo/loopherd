@@ -435,11 +435,19 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    waits in the mailbox for the next watch. First restart any member
    whose `handoff` and `finished` lines you've already read and that is
    yours to restart, so the herd doesn't wait on the next shepherd.
-2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd/handoff.md`
+2. Read `loopherd reports --all --since <your last watch wake, or your
+   session start>` and note every `question` or `done` report you haven't
+   acted on, gate requests included, and who is waiting on what. Do this
+   whether or not a watch is armed: a report that arrived while none was
+   never woke you, and the next shepherd's watch may not print it for
+   hours. `reports --all` marks nothing read, so it takes nothing from
+   the next watch.
+3. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd/handoff.md`
    (`~/.local/state` when it's unset; no member may be named `shepherd`), in the outline above: what each
    member is doing and what you owe it (verifications running, PRs to
-   check after merge), then next steps, then gotchas.
-3. Tell the human, with the path spelled out in full:
+   check after merge), with each report from step 2 listed under State,
+   then next steps, then gotchas.
+4. Tell the human, with the path spelled out in full:
    > I'm past my context limit and wrote my handoff.
    > Run `/clear`, then send any message (e.g. `go`), and I resume from it.
    >
@@ -451,9 +459,10 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    session after your handoff is written moves it to `handoffs/shepherd/prev.md` and adds the
    resume to the new session's context.
 
-   With `[shepherd] self_restart = true` in `config.toml`
-   (`loopherd config get shepherd.self_restart`), first run `loopherd
-   restart --self` in this turn. When it arms, tell the human in your last
+   Self-restart is on unless `config.toml` sets
+   `[shepherd] self_restart = false`
+   (`loopherd config get shepherd.self_restart`); while it is on, first run
+   `loopherd restart --self` in this turn. When it arms, tell the human in your last
    message, above the lines above: you restart yourself in this pane in 5
    minutes, and any prompt here stops that. Then end your turn. A detached
    waiter sends `/clear` and `go` once your turn has ended, herdr shows the
@@ -1209,6 +1218,14 @@ What differs from the shepherd:
   and Monitor you started (TaskStop each), your watch among them, write it, report `--kind handoff`, run `loopherd restart
   --self`, and end your turn; you restart in this pane once that turn
   stops. Restart your workers when they hand off; never with `--force`.
+- **Getting ready for a revive.** Keep your watch armed and keep working
+  until the human quits your Claude: a quit Claude ends its watch and
+  frees its lock, and `loopherd revive` has no check that a running shell
+  fails. Stopping background shells and Monitors applies only before
+  `restart --self`, whose stop must read finished. Any handoff you write,
+  for any reason, is followed by `loopherd report --kind handoff`, never a
+  plain `note`: a plain `loopherd restart` refuses a member that hasn't
+  handed off since it started.
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/<default branch>` rather than `git pull`, and
   never commit in it.

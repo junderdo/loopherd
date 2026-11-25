@@ -42,6 +42,10 @@ pub const DEFAULT_BRANCH: &str = "\
 The branch workers cut their branches from and open pull requests against.
 Change it only when origin's default isn't where work merges.";
 
+pub const GROOM: &str = "\
+A groomer triages unready tasks when the herd runs low, for you to approve.
+Say no if you keep the backlog ready yourself.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -59,6 +63,7 @@ mod tests {
             CONTEXT_LIMIT,
             GH_ACCOUNT,
             DEFAULT_BRANCH,
+            GROOM,
         ] {
             let lines: Vec<&str> = text.lines().collect();
             assert!((1..=2).contains(&lines.len()), "{text}");

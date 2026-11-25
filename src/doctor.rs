@@ -88,7 +88,7 @@ pub fn checks(
     checks.extend(herdr_checks);
     match setup {
         Ok(setup) => {
-            checks.extend(config_checks(&setup.paths, &install.settings));
+            checks.extend(config_checks(&setup.paths, install));
             checks.extend(herd_checks(&setup.paths, herd));
             checks.extend(unix_socket_checks(install, &setup.paths, herd));
             checks.extend(state_checks(
@@ -233,7 +233,7 @@ fn install_record_check(paths: &Paths) -> Check {
     }
 }
 
-fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
+fn config_checks(paths: &Paths, install: &Install) -> Vec<Check> {
     let config = crate::herd::config_file(paths);
     let by_hand = format!("fix {} by hand", config.display());
     let mut checks = vec![install_record_check(paths)];
@@ -247,12 +247,9 @@ fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
             None
         }
     };
-    let self_restart = file
-        .as_ref()
-        .and_then(|f| f.shepherd.as_ref()?.self_restart)
-        .unwrap_or(false);
-    if self_restart {
-        checks.extend(self_restart_checks(&config, settings));
+    if let Some(file) = &file {
+        let set = file.shepherd.as_ref().and_then(|s| s.self_restart);
+        checks.extend(self_restart_checks(set, &config, install));
     }
     if crate::herd::parses_as_toml(&config) {
         match crate::notify::load(&config) {
@@ -288,25 +285,28 @@ fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
     checks
 }
 
-/// With `[shepherd] self_restart` on: a prompt can't cancel a self-restart
-/// without the UserPromptSubmit hook, and a give-up goes unseen unless
-/// `[notify]` sends it.
-fn self_restart_checks(config: &Path, settings: &Path) -> Vec<Check> {
+/// With `[shepherd] self_restart` on, set or by default: a prompt can't cancel
+/// a self-restart without the UserPromptSubmit hook. Only an explicit `true`
+/// asks for `[notify]`, since a give-up still labels the pane.
+fn self_restart_checks(set: Option<bool>, config: &Path, install: &Install) -> Vec<Check> {
     let mut checks = vec![];
-    if !crate::install_hook::prompt_hook_installed(settings).unwrap_or(false) {
+    if set == Some(false) {
+        return checks;
+    }
+    if !crate::install_hook::prompt_hook_installed(&install.settings).unwrap_or(false) {
         checks.push(warning(
             "self_restart",
             format!(
                 "[shepherd] self_restart is on, but loopherd's UserPromptSubmit hook isn't in {}, \
                  so restart --self refuses",
-                settings.display()
+                install.settings.display()
             ),
-            "loopherd install-hook".into(),
+            install_hook(install),
         ));
     }
     let sends = crate::notify::load(config)
         .is_ok_and(|n| n.is_some_and(|n| n.sends(crate::notify::Kind::SelfRestart)));
-    if !sends {
+    if set == Some(true) && !sends {
         checks.push(warning(
             "self_restart",
             "[shepherd] self_restart is on, but [notify] doesn't send self_restart, so a give-up \
@@ -1984,14 +1984,17 @@ mod tests {
     #[test]
     fn a_missing_prompt_hook_warns_unless_pane_label_is_on() {
         let mut m = machine(&without("UserPromptSubmit"));
-        let line = format!(
-            "UserPromptSubmit hook: not in {}; fix: loopherd install-hook\n",
-            m.install.settings.display()
+        let settings = m.install.settings.display().to_string();
+        let line =
+            format!("UserPromptSubmit hook: not in {settings}; fix: loopherd install-hook\n");
+        let self_restart = format!(
+            "warning self_restart: [shepherd] self_restart is on, but loopherd's UserPromptSubmit \
+             hook isn't in {settings}, so restart --self refuses; fix: loopherd install-hook\n"
         );
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("warning {line}doctor: 18 ok, 1 warnings, 0 failures\n"),
+                format!("warning {line}{self_restart}doctor: 18 ok, 2 warnings, 0 failures\n"),
                 0
             )
         );
@@ -1999,7 +2002,7 @@ mod tests {
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("failure {line}doctor: 18 ok, 0 warnings, 1 failures\n"),
+                format!("failure {line}{self_restart}doctor: 18 ok, 1 warnings, 1 failures\n"),
                 1
             )
         );
@@ -2025,7 +2028,7 @@ mod tests {
         m.install.settings = m.dir.path().join("absent.json");
         let (out, code) = run(&m, &herdr());
         assert!(
-            out.ends_with("doctor: 12 ok, 3 warnings, 4 failures\n"),
+            out.ends_with("doctor: 12 ok, 4 warnings, 4 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -2045,7 +2048,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.ends_with("doctor: 11 ok, 0 warnings, 1 failures\n"),
+            out.ends_with("doctor: 11 ok, 1 warnings, 1 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -2232,9 +2235,9 @@ mod tests {
         let data: Value = serde_json::from_str(&json(&checks)).unwrap();
         assert_eq!(
             (&data["ok"], &data["warnings"], &data["failures"]),
-            (&json!(18), &json!(1), &json!(0))
+            (&json!(18), &json!(2), &json!(0))
         );
-        assert_eq!(data["checks"].as_array().unwrap().len(), 19);
+        assert_eq!(data["checks"].as_array().unwrap().len(), 20);
         assert_eq!(
             data["checks"][4],
             json!({
@@ -4453,10 +4456,35 @@ mod tests {
         );
 
         let m = machine(&ALL[..4]);
-        std::fs::write(m.config(), format!("{CONFIG}{notify}")).unwrap();
+        std::fs::write(
+            m.config(),
+            format!("{CONFIG}[shepherd]\nself_restart = false\n"),
+        )
+        .unwrap();
         let found = problems(&m, &herdr());
         assert!(
             !found.iter().any(|p| p.contains("self_restart")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn self_restart_on_by_default_warns_only_about_the_prompt_hook() {
+        let m = machine(&ALL);
+        std::fs::write(m.config(), CONFIG).unwrap();
+        assert_eq!(problems(&m, &herdr()), Vec::<String>::new());
+
+        let m = machine(&ALL[..4]);
+        std::fs::write(m.config(), CONFIG).unwrap();
+        let found: Vec<String> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.contains("self_restart"))
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with(
+                "warning self_restart: [shepherd] self_restart is on, but loopherd's UserPromptSubmit hook isn't in"
+            ),
             "{found:?}"
         );
     }
