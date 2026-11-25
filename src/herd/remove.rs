@@ -19,10 +19,10 @@ pub struct Removal {
     pub keep_history: bool,
 }
 
-/// Removes `herd`'s file, lead prompt and pause, every run of it in the
-/// ledger, archived ones included, and the mailboxes and handoffs of names
-/// left with no run in loopherd's `state` dir, pushing a line
-/// per thing removed or kept to `out`, including before an error. Refuses,
+/// Removes `herd`'s file, its lead's and templates' prompts, its pause,
+/// every run of it in the ledger, archived ones included, and the mailboxes
+/// and handoffs of names left with no run in loopherd's `state` dir, pushing
+/// a line per thing removed or kept to `out`, including before an error. Refuses,
 /// changing nothing, while any member is not retired, ran on another herdr
 /// session, or herdr may still show its agent or pane, or herdr can't say.
 /// Stats every file before deleting any. Never touches worktrees, branches
@@ -60,10 +60,12 @@ pub fn remove(
 
     let mut own = vec![paths.paused.join(herd)];
     if has_file {
-        match lead_prompt(paths, herd, &file) {
-            Ok(Some(prompt)) => own.push(prompt),
-            Ok(None) => {}
-            Err(kept) => out.push(format!("kept {kept}")),
+        for prompt in own_prompts(paths, herd, &file) {
+            match prompt {
+                Ok(Some(prompt)) => own.push(prompt),
+                Ok(None) => {}
+                Err(kept) => out.push(format!("kept {kept}")),
+            }
         }
         own.push(file);
     }
@@ -282,12 +284,20 @@ fn present(path: &Path) -> Result<bool> {
     }
 }
 
-/// The `[lead]` `prompt_file` of `herd`'s `file`, when it is a regular file
-/// in the herds dir and no other herd file names it; `Err` says why one is kept.
-fn lead_prompt(paths: &Paths, herd: &str, file: &Path) -> Result<Option<PathBuf>, String> {
-    let Some(named) = prompt_files(paths, file).ok().and_then(|f| f.lead) else {
-        return Ok(None);
-    };
+/// Each distinct `prompt_file` of `herd`'s `file`, lead's and templates',
+/// as `Some` when it is a regular file in the herds dir and no other herd
+/// file names it; `Err` says why one is kept.
+fn own_prompts(paths: &Paths, herd: &str, file: &Path) -> Vec<Result<Option<PathBuf>, String>> {
+    let mut named = prompt_files(paths, file).unwrap_or_default();
+    named.sort();
+    named.dedup();
+    named
+        .into_iter()
+        .map(|n| owned_prompt(paths, herd, n))
+        .collect()
+}
+
+fn owned_prompt(paths: &Paths, herd: &str, named: PathBuf) -> Result<Option<PathBuf>, String> {
     let Ok(prompt) = named.canonicalize() else {
         return Ok(None);
     };
@@ -312,7 +322,6 @@ fn lead_prompt(paths: &Paths, herd: &str, file: &Path) -> Result<Option<PathBuf>
     {
         let names_it = match prompt_files(paths, other) {
             Ok(files) => files
-                .all
                 .iter()
                 .any(|f| f.canonicalize().ok() == Some(prompt.clone())),
             Err(_) => true,
@@ -324,14 +333,9 @@ fn lead_prompt(paths: &Paths, herd: &str, file: &Path) -> Result<Option<PathBuf>
     Ok(Some(named))
 }
 
-struct PromptFiles {
-    lead: Option<PathBuf>,
-    /// The lead's and every template's.
-    all: Vec<PathBuf>,
-}
-
-/// Read leniently, so a herd file `herds` calls invalid still counts.
-fn prompt_files(paths: &Paths, file: &Path) -> Result<PromptFiles> {
+/// The lead's and every template's, read leniently, so a herd file `herds`
+/// calls invalid still counts.
+fn prompt_files(paths: &Paths, file: &Path) -> Result<Vec<PathBuf>> {
     let text = std::fs::read_to_string(file)?;
     let table: toml::Table = text.parse()?;
     let resolve = |t: &toml::Value| {
@@ -346,8 +350,8 @@ fn prompt_files(paths: &Paths, file: &Path) -> Result<PromptFiles> {
         .flat_map(|t| t.values())
         .filter_map(resolve)
         .collect();
-    all.extend(lead.clone());
-    Ok(PromptFiles { lead, all })
+    all.extend(lead);
+    Ok(all)
 }
 
 #[cfg(test)]
@@ -549,6 +553,31 @@ mod tests {
             )),
             "{out}"
         );
+    }
+
+    #[test]
+    fn removes_a_template_prompt_in_the_herds_dir_once_when_the_lead_shares_it() {
+        let mut s = Setup::new();
+        s.write(
+            "herds/old.toml",
+            "repo = \"/r\"\n[lead]\nprompt_file = \"old-lead.md\"\n\
+             [template.grill]\nprompt_file = \"old-grill.md\"\n\
+             [template.again]\nprompt_file = \"./old-lead.md\"\n",
+        );
+        s.write("herds/old-lead.md", "lead\n");
+        s.write("herds/old-grill.md", "grill\n");
+
+        let out = s.remove("old", Removal::default()).unwrap();
+
+        assert_eq!(
+            exists(
+                &s,
+                &["herds/old.toml", "herds/old-lead.md", "herds/old-grill.md"]
+            ),
+            [false; 3],
+            "{out}"
+        );
+        assert_eq!(out.matches("old-lead.md").count(), 1, "{out}");
     }
 
     #[test]
