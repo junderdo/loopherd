@@ -234,14 +234,22 @@ impl Rerun<'_> {
             merge_guard: guard,
             ..base.clone()
         };
-        let [(_, prompt), (_, with_lead)] = &rendered(self.paths, &led)?[..] else {
-            bail!("init rendered no lead prompt");
+        let (with_lead, without_lead) = (rendered(self.paths, &led)?, rendered(self.paths, &base)?);
+        let text_of = |files: &[(PathBuf, String)], path: &Path| {
+            files
+                .iter()
+                .find(|(p, _)| p == path)
+                .map(|(_, text)| text.clone())
         };
-        let [(_, without_lead)] = &rendered(self.paths, &base)?[..] else {
-            bail!("init rendered a lead prompt for a herd without a lead");
+        let (Some(prompt), Some(with_lead), Some(without_lead)) = (
+            text_of(&with_lead, lead_file),
+            text_of(&with_lead, self.herd_file),
+            text_of(&without_lead, self.herd_file),
+        ) else {
+            bail!("init rendered no lead prompt or herd file");
         };
         let was = fs::read_to_string(self.herd_file)?;
-        let table: String = similar::TextDiff::from_lines(without_lead, with_lead)
+        let table: String = similar::TextDiff::from_lines(&without_lead, &with_lead)
             .iter_all_changes()
             .filter(|change| change.tag() == similar::ChangeTag::Insert)
             .map(|change| change.value())
@@ -252,7 +260,7 @@ impl Rerun<'_> {
             Edit {
                 path: lead_file.to_path_buf(),
                 was: String::new(),
-                now: prompt.clone(),
+                now: prompt,
             },
             Edit {
                 path: self.herd_file.to_path_buf(),
