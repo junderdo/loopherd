@@ -5,7 +5,7 @@ mod common;
 mod fakes;
 
 use common::feed_stdin;
-use fakes::executable;
+use fakes::{copied, executable};
 use std::fs;
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
@@ -788,37 +788,32 @@ fn install_without_the_splash_file_still_installs() {
         &scripts.join("install"),
         fs::read_to_string(INSTALL).unwrap(),
     );
-    fs::copy(
+    copied(
         concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-extras"),
         scripts.join("install-extras"),
-    )
-    .unwrap();
-    fs::copy(
+    );
+    copied(
         concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-agents.bash"),
         scripts.join("install-agents.bash"),
-    )
-    .unwrap();
-    fs::copy(
+    );
+    copied(
         concat!(env!("CARGO_MANIFEST_DIR"), "/scripts/install-skills.bash"),
         scripts.join("install-skills.bash"),
-    )
-    .unwrap();
-    fs::copy(
+    );
+    copied(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/scripts/install-herdr-plugin.bash"
         ),
         scripts.join("install-herdr-plugin.bash"),
-    )
-    .unwrap();
-    fs::copy(
+    );
+    copied(
         concat!(
             env!("CARGO_MANIFEST_DIR"),
             "/scripts/install-herdr-keys.bash"
         ),
         scripts.join("install-herdr-keys.bash"),
-    )
-    .unwrap();
+    );
     let sandbox = Sandbox::new(false);
 
     let out = Command::new(scripts.join("install"))

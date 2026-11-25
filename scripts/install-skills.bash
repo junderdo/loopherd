@@ -73,7 +73,7 @@ offer_skills() {
     return 0
   fi
   if [[ "$want" == ask && ! -t 0 ]]; then
-    echo "skipped the $skills_plugin plugin (no terminal); add --with-skills to install it"
+    echo "skipped the $skills_plugin plugin (no terminal); ${LOOPHERD_EXTRAS_NO_TERMINAL:-add --with-skills to install it}"
     return 0
   fi
   if ! command -v claude >/dev/null; then

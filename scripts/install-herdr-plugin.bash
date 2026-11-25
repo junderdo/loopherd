@@ -16,7 +16,7 @@ offer_herdr_plugin() {
     echo "skipped loopherd's herdr plugin: a --settings run never installs it"
     return 0
   fi
-  # Without a terminal, whatever stops the offer early, the skip names the flag.
+  # Without a terminal, whatever stops the offer early, the skip says how to add it.
   herdr_plugin_no_terminal=
   [[ "$want" != ask || -t 0 ]] || herdr_plugin_no_terminal=1
   ours=$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$manifest" 2>/dev/null | head -n 1) || ours=
@@ -55,7 +55,7 @@ offer_herdr_plugin() {
   fi
   if [[ -n "$herdr_plugin_no_terminal" ]]; then
     if [[ -n "$version" ]]; then
-      echo "skipped loopherd's herdr plugin $version (no terminal); add --with-herdr-plugin to update it"
+      echo "skipped loopherd's herdr plugin $version (no terminal); ${LOOPHERD_EXTRAS_NO_TERMINAL:-add --with-herdr-plugin to update it}"
     else
       herdr_plugin_skip
     fi
@@ -116,7 +116,7 @@ herdr_has_plugin_update() {
 # Usage: herdr_plugin_skip [<why>]
 herdr_plugin_skip() {
   if [[ -n "$herdr_plugin_no_terminal" ]]; then
-    echo "skipped loopherd's herdr plugin (no terminal); add --with-herdr-plugin to install it"
+    echo "skipped loopherd's herdr plugin (no terminal); ${LOOPHERD_EXTRAS_NO_TERMINAL:-add --with-herdr-plugin to install it}"
   else
     echo "skipped loopherd's herdr plugin: $1"
   fi

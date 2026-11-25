@@ -6,7 +6,7 @@ mod brokers;
 mod fakes;
 
 use brokers::{Broker, held};
-use fakes::executable;
+use fakes::{copied, executable};
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Read};
 use std::os::fd::AsRawFd;
@@ -245,7 +245,7 @@ fn a_reinstall_while_broker_restart_waits_still_leaves_a_broker_serving() {
     let installed = world.root.path().join("install/loopherd");
     let reinstall = || {
         let part = installed.with_extension("part");
-        fs::copy(env!("CARGO_BIN_EXE_loopherd"), &part).unwrap();
+        copied(env!("CARGO_BIN_EXE_loopherd"), &part);
         fs::rename(&part, &installed).unwrap();
     };
     fs::create_dir(installed.parent().unwrap()).unwrap();
@@ -484,9 +484,7 @@ impl World {
     fn install_from(&self, source: &Path) -> std::path::PathBuf {
         let installed = self.root.path().join("bin/loopherd");
         let part = installed.with_extension("part");
-        // Copied by a child, so no test's fork inherits it open for writing (ETXTBSY).
-        let copied = Command::new("cp").arg(source).arg(&part).status().unwrap();
-        assert!(copied.success());
+        copied(source, &part);
         fs::rename(&part, &installed).unwrap();
         installed
     }
