@@ -670,7 +670,7 @@ fn herd_pending_one_upgrade(s: &Sandbox, declined: &str) {
         s.dir.path().join("config/herds/h.toml"),
         format!(
             "repo = {repo:?}\n{declined}[template.t]\nparams = [\"n\"]\nprompt = \"go\"\n\
-             {GRILL}[lead]\nprompt = \"lead {{herd}}\"\n"
+             {GRILL}[lead]\nprompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n"
         ),
     )
     .unwrap();
@@ -709,7 +709,7 @@ fn declined_upgrades_get_no_info_line() {
 
     let text = stdout(&s.doctor(&["--verbose"]));
 
-    assert!(!text.contains("upgrade"), "{text}");
+    assert!(!text.contains("herd h upgrade"), "{text}");
 }
 
 #[test]

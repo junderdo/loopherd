@@ -4,14 +4,17 @@
 use std::collections::BTreeSet;
 use std::fs;
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
 use toml_edit::{Array, DocumentMut, Item, Value, value};
 
-use super::edit::edit;
-use super::{Paths, SwitchValues, file_of, lead_defaults, load, names};
+use super::edit::{edit, replace};
+use super::{Paths, SwitchValues, expand_home, file_of, lead_defaults, load, names};
+use prompt::{Anchored, Place, Placed};
+
+mod prompt;
 
 /// How an upgrade runs.
 pub struct Upgrade<'a> {
@@ -42,23 +45,54 @@ struct Migration {
     explanation: &'static str,
     /// Whether a running lead only sees the change once restarted or revived.
     lead_reads_at_start: bool,
-    state: fn(&DocumentMut, &SwitchValues) -> State,
+    state: fn(&Herd) -> State,
+}
+
+/// What a migration reads to decide whether a herd has it.
+struct Herd<'a> {
+    doc: &'a DocumentMut,
+    defaults: &'a SwitchValues,
+    paths: &'a Paths,
 }
 
 enum State {
     /// Already there, or not for this herd.
     Current,
-    Pending(Box<dyn Fn(&mut DocumentMut)>),
-    /// The herd's own value sits where the change goes, so it's shown, not made.
+    Pending(Change),
+    /// The change can't be placed without guessing, so it's shown, not made.
     Tailored {
-        place: &'static str,
+        reason: String,
+        place: String,
         snippet: String,
     },
     /// A template init writes, rendered when offered.
     Template(&'static str),
 }
 
-static MIGRATIONS: [Migration; 3] = [
+enum Change {
+    Herd(Box<dyn Fn(&mut DocumentMut)>),
+    /// Worked out again on the file as it reads at each use.
+    Prompt {
+        path: PathBuf,
+        anchored: &'static Anchored,
+    },
+}
+
+static MIGRATIONS: [Migration; 5] = [
+    Migration {
+        id: "lead-review-rounds",
+        explanation: "Writes the lead's review-round limit into its prompt where init puts it,\n\
+                      so the lead reads its {review_rounds} beside its switches.",
+        lead_reads_at_start: true,
+        state: |herd| lead_prompt(herd, &REVIEW_ROUNDS),
+    },
+    Migration {
+        id: "lead-drained",
+        explanation: "Tells the lead to report done and stop on `<herd> drained`,\n\
+                      instead of re-arming its watch after every exit.",
+        lead_reads_at_start: true,
+        state: |herd| lead_prompt(herd, &DRAINED),
+    },
     Migration {
         id: "lead-follow-ups-ready",
         explanation: "Writes the lead's follow_ups_ready switch as [lead_defaults] sets it, else off.\n\
@@ -82,8 +116,8 @@ static MIGRATIONS: [Migration; 3] = [
     },
 ];
 
-fn grill(doc: &DocumentMut, _: &SwitchValues) -> State {
-    match doc.get("template").and_then(|t| t.get("grill")) {
+fn grill(herd: &Herd) -> State {
+    match herd.doc.get("template").and_then(|t| t.get("grill")) {
         Some(_) => State::Current,
         None => State::Template("grill"),
     }
@@ -130,23 +164,108 @@ fn last_position(item: &Item) -> Option<isize> {
     table.position().max(nested)
 }
 
-fn follow_ups_ready(doc: &DocumentMut, defaults: &SwitchValues) -> State {
+const REVIEW_ROUNDS: Anchored = Anchored {
+    has: "{review_rounds}",
+    anchor: "Grilling is always the human's.",
+    place: Place::Before,
+    text: "Your review-round limit: {review_rounds}.\n\n",
+};
+
+const DRAINED: Anchored = Anchored {
+    has: "{herd} drained",
+    anchor: "re-arm after every exit.",
+    place: Place::Replace,
+    text: "re-arm after every exit but `{herd} drained`: on that, report done and\n   stop.",
+};
+
+/// `anchored` placed in the lead's prompt, inline or in its prompt file.
+fn lead_prompt(herd: &Herd, anchored: &'static Anchored) -> State {
+    let Some(lead) = herd.doc.get("lead").and_then(Item::as_table_like) else {
+        return State::Current;
+    };
+    // How often the anchor appears; none when the quoting can't hold the change.
+    let (matches, source) = match (lead.get("prompt"), lead.get("prompt_file")) {
+        (Some(inline), _) => match inline.as_value().and_then(|v| anchored.place_in_toml(v)) {
+            None | Some(Placed::Has) => return State::Current,
+            Some(Placed::Edited(_)) => {
+                return State::Pending(Change::Herd(Box::new(|doc| place_inline(doc, anchored))));
+            }
+            Some(Placed::Unplaced { matches }) => (Some(matches), "[lead]'s prompt".to_string()),
+            Some(Placed::Unquotable) => (None, "[lead]'s prompt".to_string()),
+        },
+        (None, Some(file)) => {
+            let Some(file) = file.as_str() else {
+                return State::Current;
+            };
+            let path = herd.paths.herds.join(expand_home(file, &herd.paths.home));
+            // An unreadable prompt fails the herd's checks, which say so.
+            let Ok(text) = fs::read_to_string(&path) else {
+                return State::Current;
+            };
+            match anchored.place(&text) {
+                Placed::Has => return State::Current,
+                Placed::Edited(_) => return State::Pending(Change::Prompt { path, anchored }),
+                Placed::Unplaced { matches } => (Some(matches), path.display().to_string()),
+                Placed::Unquotable => (None, path.display().to_string()),
+            }
+        }
+        (None, None) => return State::Current,
+    };
+    let anchor = anchored.anchor;
+    let reason = match matches {
+        Some(0) => format!("{anchor:?} is not in {source}"),
+        Some(n) => format!("{anchor:?} appears {n} times in {source}"),
+        None => format!("{source}'s quoting can't hold it as written"),
+    };
+    State::Tailored {
+        reason,
+        place: format!("{source}, {}", anchored.place_name()),
+        snippet: anchored.text.to_string(),
+    }
+}
+
+/// Places `anchored` in the inline prompt as it reads now, so a hand edit
+/// made while the offer waited is kept.
+fn place_inline(doc: &mut DocumentMut, anchored: &Anchored) {
+    let Some(lead) = doc.get_mut("lead").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    let placed = lead
+        .get("prompt")
+        .and_then(Item::as_value)
+        .and_then(|v| anchored.place_in_toml(v));
+    if let Some(Placed::Edited(new)) = placed {
+        lead.insert("prompt", Item::Value(new));
+    }
+}
+
+/// `path` as it reads now and with `anchored` placed; none when it can't be.
+fn placed_in_file(path: &Path, anchored: &Anchored) -> Result<Option<(String, String)>> {
+    let was = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(match anchored.place(&was) {
+        Placed::Edited(now) => Some((was, now)),
+        _ => None,
+    })
+}
+
+fn follow_ups_ready(herd: &Herd) -> State {
     // As init writes it, so a lead inheriting the switch keeps it.
-    let on = defaults.follow_ups_ready.unwrap_or(false);
-    match doc.get("lead").and_then(Item::as_table_like) {
+    let on = herd.defaults.follow_ups_ready.unwrap_or(false);
+    match herd.doc.get("lead").and_then(Item::as_table_like) {
         Some(lead) if !lead.contains_key("follow_ups_ready") => {
-            State::Pending(Box::new(move |doc| {
+            State::Pending(Change::Herd(Box::new(move |doc| {
                 if let Some(lead) = doc.get_mut("lead").and_then(Item::as_table_like_mut) {
                     lead.insert("follow_ups_ready", value(on));
                 }
-            }))
+            })))
         }
         _ => State::Current,
     }
 }
 
-fn merged_repo(doc: &DocumentMut, _: &SwitchValues) -> State {
-    let merged = doc
+fn merged_repo(herd: &Herd) -> State {
+    let merged = herd
+        .doc
         .get("template")
         .and_then(|t| t.get("issue"))
         .and_then(|t| t.get("merged"))
@@ -170,7 +289,8 @@ fn merged_repo(doc: &DocumentMut, _: &SwitchValues) -> State {
          --json number --jq 'length > 0' | grep -qx true"
     );
     State::Tailored {
-        place: "[template.issue]",
+        reason: "this herd's own value is kept".into(),
+        place: "[template.issue]".into(),
         snippet: format!("merged = {}", Value::from(command)),
     }
 }
@@ -186,12 +306,14 @@ pub fn upgrade(
         Some(herd) => vec![herd.to_string()],
         None => names(&paths.herds)?,
     };
+    let mut backups = Backups::new(how.now);
     for herd in &herds {
         if let Err(invalid) = super::checked(&file_of(&paths.herds, herd)?, paths) {
             writeln!(out, "{herd}: skipped, {invalid}")?;
             continue;
         }
-        upgrade_herd(paths, herd, &mut how, out).with_context(|| format!("upgrade {herd}"))?;
+        upgrade_herd(paths, herd, &mut how, &mut backups, out)
+            .with_context(|| format!("upgrade {herd}"))?;
     }
     Ok(())
 }
@@ -227,13 +349,33 @@ fn offered(paths: &Paths, herd: &str, defaults: &SwitchValues) -> Result<Vec<&'s
     Ok(MIGRATIONS
         .iter()
         .filter(|m| !declined.iter().any(|id| id == m.id))
-        .filter(|m| !matches!((m.state)(&doc, defaults), State::Current))
+        .filter(|m| {
+            let herd = Herd {
+                doc: &doc,
+                defaults,
+                paths,
+            };
+            !matches!((m.state)(&herd), State::Current)
+        })
         .collect())
 }
 
-fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Write) -> Result<()> {
+fn upgrade_herd(
+    paths: &Paths,
+    herd: &str,
+    how: &mut Upgrade,
+    backups: &mut Backups,
+    out: &mut dyn Write,
+) -> Result<()> {
     let file = file_of(&paths.herds, herd)?;
     let defaults = lead_defaults(paths)?;
+    let state = |migration: &Migration, doc: &DocumentMut| {
+        (migration.state)(&Herd {
+            doc,
+            defaults: &defaults,
+            paths,
+        })
+    };
     let pending = offered(paths, herd, &defaults)?;
     if pending.is_empty() {
         writeln!(out, "herd {herd} is up to date")?;
@@ -250,12 +392,11 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
         writeln!(out, "  run: loopherd herd upgrade {herd}")?;
         return Ok(());
     };
-    let mut backup = Backup::new(&file, how.now);
     for migration in pending {
         // Read again: an earlier answer may have written the file.
         let doc = read(&file)?;
         let header = format!("{} — {}", migration.id, migration.explanation);
-        let decline = match (migration.state)(&doc, &defaults) {
+        let decline = match state(migration, &doc) {
             State::Current => continue,
             State::Pending(change) => {
                 writeln!(out, "{header}")?;
@@ -265,18 +406,43 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                         "lead-{herd} is running; it reads this at its next restart or revive."
                     )?;
                 }
-                let mut after = doc.clone();
-                change(&mut after);
-                let (was, now) = (doc.to_string(), after.to_string());
-                let shown = file.display().to_string();
+                let (shown, was, now) = match &change {
+                    Change::Herd(change) => {
+                        let mut after = doc.clone();
+                        change(&mut after);
+                        (&file, doc.to_string(), after.to_string())
+                    }
+                    Change::Prompt { path, anchored } => match placed_in_file(path, anchored)? {
+                        Some((was, now)) => (path, was, now),
+                        None => continue,
+                    },
+                };
+                let shown = shown.display().to_string();
                 let diff = similar::TextDiff::from_lines(&was, &now);
                 write!(out, "{}", diff.unified_diff().header(&shown, &shown))?;
                 if ask(input, out, "Apply?", true)? {
-                    backup.take()?;
-                    edit(paths, herd, |doc| {
-                        change(doc);
-                        Ok(true)
-                    })?;
+                    match change {
+                        Change::Herd(change) => {
+                            backups.take(&file)?;
+                            edit(paths, herd, |doc| {
+                                change(doc);
+                                Ok(true)
+                            })?;
+                        }
+                        Change::Prompt { path, anchored } => {
+                            match placed_in_file(&path, anchored)? {
+                                Some((_, now)) => {
+                                    backups.take(&path)?;
+                                    replace(&path, &now)?;
+                                }
+                                None => writeln!(
+                                    out,
+                                    "Not applied: {} changed and no longer takes it.",
+                                    path.display()
+                                )?,
+                            }
+                        }
+                    }
                     false
                 } else {
                     true
@@ -294,7 +460,7 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                     Err(e) => {
                         writeln!(out, "Not applied: can't render it: {e:#}")?;
                         if ask(input, out, "Stop offering this?", false)? {
-                            backup.take()?;
+                            backups.take(&file)?;
                             edit(paths, herd, |doc| {
                                 add_declined(doc, migration.id);
                                 Ok(true)
@@ -332,7 +498,7 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                         write!(out, "{}", diff.unified_diff().header("/dev/null", &shown))?;
                     }
                     if ask(input, out, "Apply?", true)? {
-                        backup.take()?;
+                        backups.take(&file)?;
                         if let Some((path, text)) = &prompt {
                             write_new(path, text)?;
                         }
@@ -356,18 +522,21 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                     }
                 }
             }
-            State::Tailored { place, snippet } => {
+            State::Tailored {
+                reason,
+                place,
+                snippet,
+            } => {
                 writeln!(out, "{header}")?;
-                writeln!(
-                    out,
-                    "Not applied: this herd's own value is kept. It belongs in {place}:"
-                )?;
-                writeln!(out, "  {snippet}")?;
+                writeln!(out, "Not applied: {reason}. It belongs in {place}:")?;
+                for line in snippet.lines() {
+                    writeln!(out, "  {line}")?;
+                }
                 ask(input, out, "Stop offering this?", false)?
             }
         };
         if decline {
-            backup.take()?;
+            backups.take(&file)?;
             edit(paths, herd, |doc| {
                 add_declined(doc, migration.id);
                 Ok(true)
@@ -432,34 +601,31 @@ fn read(file: &Path) -> Result<DocumentMut> {
     text.parse().with_context(|| file.display().to_string())
 }
 
-/// The copy of a herd file taken once per run, before its first write.
-struct Backup<'a> {
-    file: &'a Path,
+/// The copy of each file taken once per run, before its first write.
+struct Backups {
     now: SystemTime,
-    taken: bool,
+    taken: BTreeSet<PathBuf>,
 }
 
-impl<'a> Backup<'a> {
-    fn new(file: &'a Path, now: SystemTime) -> Self {
-        Backup {
-            file,
+impl Backups {
+    fn new(now: SystemTime) -> Self {
+        Backups {
             now,
-            taken: false,
+            taken: BTreeSet::new(),
         }
     }
 
-    fn take(&mut self) -> Result<()> {
-        if self.taken {
+    fn take(&mut self, file: &Path) -> Result<()> {
+        // Writes go to a symlink's target, so that is what is kept.
+        let file = fs::canonicalize(file).with_context(|| format!("read {}", file.display()))?;
+        if self.taken.contains(&file) {
             return Ok(());
         }
-        // edit() writes a symlink's target, so that is what is kept.
-        let file =
-            fs::canonicalize(self.file).with_context(|| format!("read {}", self.file.display()))?;
         let stamp = humantime::format_rfc3339_seconds(self.now);
         let mut name = file.as_os_str().to_owned();
         name.push(format!(".bak-{stamp}"));
         fs::copy(&file, &name).with_context(|| format!("back up {}", file.display()))?;
-        self.taken = true;
+        self.taken.insert(file);
         Ok(())
     }
 }
@@ -489,7 +655,7 @@ attended = true
 prompt = "grill {number}"
 
 [lead]
-prompt = "lead {herd}"
+prompt = "lead {herd} to {herd} drained in {review_rounds} rounds"
 # From [lead_defaults] when init ran.
 merge = false # the human merges
 "#;
@@ -561,7 +727,7 @@ merge = false # the human merges
                  --- {file}\n\
                  +++ {file}\n\
                  @@ -20,3 +20,4 @@\n \
-                 prompt = \"lead {{herd}}\"\n \
+                 prompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n \
                  # From [lead_defaults] when init ran.\n \
                  merge = false # the human merges\n\
                  +follow_ups_ready = false\n\
@@ -975,5 +1141,222 @@ merge = false # the human merges
                 "repo = \"/src/repo\"\ndeclined = [\"grill\"]\n"
             )
         );
+    }
+    const LEAD_PROMPT: &str = include_str!("../init/lead.md");
+    const REVIEW_ROUNDS_LINE: &str = "Your review-round limit: {review_rounds}.\n\n";
+    const DRAINED_RULE: &str =
+        "re-arm after every exit but `{herd} drained`: on that, report done and\n   stop.";
+
+    /// The lead prompt init wrote before `lead-review-rounds` and `lead-drained`.
+    fn old_lead_prompt() -> String {
+        assert!(LEAD_PROMPT.contains(REVIEW_ROUNDS_LINE) && LEAD_PROMPT.contains(DRAINED_RULE));
+        LEAD_PROMPT
+            .replace(REVIEW_ROUNDS_LINE, "")
+            .replace(DRAINED_RULE, "re-arm after every exit.")
+    }
+
+    /// A herd whose lead reads `prompt` from `h-lead.md` and has every other change.
+    fn led_by_file(prompt: &str) -> (tempfile::TempDir, Paths) {
+        let herd = LED.replace(
+            "prompt = \"lead {herd} to {herd} drained in {review_rounds} rounds\"\n",
+            "prompt_file = \"h-lead.md\"\nfollow_ups_ready = false\n",
+        );
+        let (dir, paths) = herds(&herd);
+        fs::write(paths.herds.join("h-lead.md"), prompt).unwrap();
+        (dir, paths)
+    }
+
+    fn lead_prompt_text(paths: &Paths) -> String {
+        fs::read_to_string(paths.herds.join("h-lead.md")).unwrap()
+    }
+
+    #[test]
+    fn yes_to_both_prompt_changes_gives_an_old_lead_prompt_inits_text() {
+        let (_dir, paths) = led_by_file(&old_lead_prompt());
+        let herd = text(&paths);
+        let printed = answered(&paths, Some("h"), "y\ny\n", &[]);
+        assert_eq!(lead_prompt_text(&paths), LEAD_PROMPT);
+        assert_eq!(text(&paths), herd);
+        let file = paths.herds.join("h-lead.md").display().to_string();
+        assert!(
+            printed.starts_with(&format!(
+                "lead-review-rounds — Writes the lead's review-round limit into its prompt where init puts it,\n\
+                 so the lead reads its {{review_rounds}} beside its switches.\n\
+                 --- {file}\n+++ {file}\n"
+            )),
+            "{printed}"
+        );
+        assert!(
+            printed.contains("\n+Your review-round limit: {review_rounds}.\n+\n Grilling"),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(
+                "-   re-arm after every exit. @ON_MERGED@ On `<name> claimable`, feed.\n\
+                 +   re-arm after every exit but `{herd} drained`: on that, report done and\n\
+                 +   stop. @ON_MERGED@ On `<name> claimable`, feed.\n"
+            ),
+            "{printed}"
+        );
+        assert_eq!(
+            answered(&paths, Some("h"), "", &[]),
+            "herd h is up to date\n"
+        );
+    }
+
+    #[test]
+    fn a_prompt_change_backs_up_the_prompt_file_not_the_herd_file() {
+        let (_dir, paths) = led_by_file(&old_lead_prompt());
+        answered(&paths, Some("h"), "y\nn\n", &[]);
+        let mut files: Vec<_> = fs::read_dir(&paths.herds)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| !n.starts_with('.'))
+            .collect();
+        files.sort();
+        assert_eq!(
+            files,
+            [
+                "h-lead.md",
+                "h-lead.md.bak-2026-11-24T10:00:00Z",
+                "h.toml",
+                "h.toml.bak-2026-11-24T10:00:00Z"
+            ]
+        );
+        let kept = fs::read_to_string(paths.herds.join(&files[1])).unwrap();
+        assert_eq!(kept, old_lead_prompt());
+        assert!(text(&paths).contains("declined = [\"lead-drained\"]"));
+    }
+
+    #[test]
+    fn a_lead_prompt_with_each_change_by_hand_is_up_to_date() {
+        let by_hand = "Lead {herd}; stop at {herd} drained.\nAt most {review_rounds} rounds.\n";
+        let (_dir, paths) = led_by_file(by_hand);
+        assert_eq!(
+            answered(&paths, Some("h"), "", &[]),
+            "herd h is up to date\n"
+        );
+        assert_eq!(lead_prompt_text(&paths), by_hand);
+    }
+
+    #[test]
+    fn a_running_lead_is_told_it_reads_a_prompt_change_at_its_next_start() {
+        let (_dir, paths) = led_by_file(&old_lead_prompt());
+        let printed = answered(&paths, Some("h"), "y\ny\n", &["h"]);
+        assert!(
+            printed.starts_with(
+                "lead-review-rounds — Writes the lead's review-round limit into its prompt where init puts it,\n\
+                 so the lead reads its {review_rounds} beside its switches.\n\
+                 lead-h is running; it reads this at its next restart or revive.\n---"
+            ),
+            "{printed}"
+        );
+        assert!(
+            printed.contains(
+                "instead of re-arming its watch after every exit.\n\
+                 lead-h is running; it reads this at its next restart or revive.\n---"
+            ),
+            "{printed}"
+        );
+    }
+
+    #[test]
+    fn a_reworded_anchor_is_shown_where_it_belongs_not_changed() {
+        let reworded = old_lead_prompt().replace("Grilling is always", "Grilling stays");
+        let (_dir, paths) = led_by_file(&reworded);
+        let file = paths.herds.join("h-lead.md").display().to_string();
+        let printed = answered(&paths, Some("h"), "\nn\n", &[]);
+        assert!(
+            printed.starts_with(&format!(
+                "lead-review-rounds — Writes the lead's review-round limit into its prompt where init puts it,\n\
+                 so the lead reads its {{review_rounds}} beside its switches.\n\
+                 Not applied: \"Grilling is always the human's.\" is not in {file}. \
+                 It belongs in {file}, before \"Grilling is always the human's.\":\n  \
+                 Your review-round limit: {{review_rounds}}.\n  \n\
+                 Stop offering this? [y/N] lead-drained — "
+            )),
+            "{printed}"
+        );
+        assert_eq!(lead_prompt_text(&paths), reworded);
+    }
+
+    #[test]
+    fn a_doubled_anchor_is_shown_not_changed_and_can_be_declined() {
+        let doubled = old_lead_prompt().replace(
+            "re-arm after every exit.",
+            "re-arm after every exit. Then re-arm after every exit.",
+        );
+        let (_dir, paths) = led_by_file(&doubled);
+        let file = paths.herds.join("h-lead.md").display().to_string();
+        let printed = answered(&paths, Some("h"), "n\ny\n", &[]);
+        assert!(
+            printed.ends_with(&format!(
+                "lead-drained — Tells the lead to report done and stop on `<herd> drained`,\n\
+                 instead of re-arming its watch after every exit.\n\
+                 Not applied: \"re-arm after every exit.\" appears 2 times in {file}. \
+                 It belongs in {file}, in place of \"re-arm after every exit.\":\n  \
+                 re-arm after every exit but `{{herd}} drained`: on that, report done and\n     \
+                 stop.\n\
+                 Stop offering this? [y/N] "
+            )),
+            "{printed}"
+        );
+        assert_eq!(lead_prompt_text(&paths), doubled);
+        assert!(
+            text(&paths).contains("declined = [\"lead-review-rounds\", \"lead-drained\"]"),
+            "{}",
+            text(&paths)
+        );
+    }
+
+    #[test]
+    fn each_prompt_migration_skips_and_tells_on_a_reworded_or_doubled_anchor() {
+        let grilling = "Grilling is always the human's.";
+        let re_arm = "re-arm after every exit.";
+        let reworded = old_lead_prompt()
+            .replace(grilling, "Grilling stays the human's.")
+            .replace(re_arm, "re-arm after each exit.");
+        let doubled = old_lead_prompt()
+            .replace(grilling, &format!("{grilling} {grilling}"))
+            .replace(re_arm, &format!("{re_arm} Then {re_arm}"));
+        for (prompt, times) in [(reworded, "is not"), (doubled, "appears 2 times")] {
+            let (_dir, paths) = led_by_file(&prompt);
+            let file = paths.herds.join("h-lead.md").display().to_string();
+            let printed = answered(&paths, Some("h"), "\n\n", &[]);
+            for (id, anchor) in [("lead-review-rounds", grilling), ("lead-drained", re_arm)] {
+                assert!(printed.contains(&format!("{id} — ")), "{printed}");
+                assert!(
+                    printed.contains(&format!("Not applied: {anchor:?} {times} in {file}.")),
+                    "{id}: {printed}"
+                );
+            }
+            assert!(!printed.contains("Apply?"), "{printed}");
+            assert_eq!(lead_prompt_text(&paths), prompt);
+            assert!(!text(&paths).contains("declined"), "{}", text(&paths));
+        }
+    }
+
+    #[test]
+    fn an_inline_lead_prompt_is_edited_in_its_own_quoting_and_layout() {
+        let herd = LED.replace(
+            "prompt = \"lead {herd} to {herd} drained in {review_rounds} rounds\"\n",
+            "prompt = \"\"\"\nLead {herd}.\n\nGrilling is always the human's.\n\
+             Watch, and re-arm after every exit.\n\"\"\" # by hand\nfollow_ups_ready = false\n",
+        );
+        let (_dir, paths) = herds(&herd);
+        answered(&paths, Some("h"), "y\ny\n", &[]);
+        assert_eq!(
+            text(&paths),
+            herd.replace(
+                "Grilling is always",
+                "Your review-round limit: {review_rounds}.\n\nGrilling is always"
+            )
+            .replace(
+                "re-arm after every exit.",
+                "re-arm after every exit but `{herd} drained`: on that, report done and\n   stop."
+            )
+        );
+        let prompt = super::super::lead_config(&paths, "h").unwrap();
+        assert!(prompt.prompt.text.contains("Your review-round limit"));
     }
 }

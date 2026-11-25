@@ -2841,11 +2841,10 @@ mod tests {
         }
     }
 
-    /// A herdr whose `lh-1` shows its main view and goes working when prompted.
+    /// A herdr whose `lh-1` shows its main view.
     fn telling_herdr() -> FakeHerdr {
         let herdr = FakeHerdr::new(&[]).with_agent("lh-1");
         herdr.set_screen("w9:p9", MAIN_VIEW);
-        herdr.set_working_on_prompt();
         herdr
     }
 

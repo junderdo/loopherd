@@ -11,6 +11,7 @@ use crate::herdr::{
     Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
 };
 use crate::ledger::{AgentRecord, Attended, Ledger, Process, Role};
+use crate::prompt::ensure_submitted;
 use crate::report::member_of_own_pane;
 use crate::template::Template;
 use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktree, worktree_path};
@@ -127,6 +128,8 @@ pub struct Spawned {
     pub blocked: bool,
     /// Why the mailbox has no `start` entry for it, if it hasn't.
     pub unmarked: Option<String>,
+    /// Why its pasted prompt isn't known to be submitted, if it isn't.
+    pub unsubmitted: Option<String>,
 }
 
 impl Spawned {
@@ -157,6 +160,10 @@ impl Spawned {
             self.session_id.as_deref().unwrap_or("unknown")
         ));
         lines.extend(self.warnings().iter().map(|w| format!("warning: {w}")));
+        if let Some(why) = &self.unsubmitted {
+            lines.push(format!("unsubmitted: {why}"));
+            return (lines.join("\n"), 1);
+        }
         if !self.blocked {
             return (lines.join("\n"), 0);
         }
@@ -254,6 +261,7 @@ pub fn spawn(
                 no_session: None,
                 blocked: true,
                 unmarked,
+                unsubmitted: None,
             });
         }
         Readiness::Ready(agent, no_session) => (agent, no_session),
@@ -266,6 +274,13 @@ pub fn spawn(
     record.prompt_sent = sent.is_ok() && prompt.is_some();
     let unmarked = record_started(ledger, record)?;
     sent?;
+    // The member is recorded and running, so a failed check is reported, not
+    // returned, letting callers finish their bookkeeping for it.
+    let unsubmitted = prompt.as_ref().and_then(|_| {
+        ensure_submitted(herdr, &req.name, &tab.pane_id)
+            .err()
+            .map(|e| format!("{e:#}"))
+    });
     Ok(Spawned {
         tab_id: tab.tab_id,
         pane_id: tab.pane_id,
@@ -274,6 +289,7 @@ pub fn spawn(
         no_session,
         blocked: false,
         unmarked,
+        unsubmitted,
     })
 }
 
@@ -807,6 +823,43 @@ mod tests {
             "{}",
             rec.created
         );
+    }
+
+    #[test]
+    fn a_pasted_prompt_left_unsubmitted_is_submitted_again() {
+        let herdr = herdr();
+        herdr.swallow_enters(2);
+        let mut ledger = MemLedger::default();
+
+        run(&herdr, &mut ledger, &request("a")).unwrap();
+
+        assert_eq!(herdr.prompts(), vec![("a".into(), "start work".into())]);
+        assert_eq!(herdr.submits(), vec!["a", "a"]);
+        assert_eq!(herdr.agent("a").unwrap().status, AgentStatus::Working);
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn a_prompt_still_unsubmitted_after_three_more_enters_exits_1_naming_the_member() {
+        let herdr = herdr();
+        herdr.swallow_enters(4);
+        let mut ledger = MemLedger::default();
+
+        let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
+
+        assert_eq!(
+            spawned.report("a"),
+            (
+                "tab w1:t1\npane w1:p1\nsession session-a\nunsubmitted: a's prompt is still \
+                 unsubmitted in its input box after 3 more Enters: press Enter in pane w1:p1"
+                    .into(),
+                1
+            )
+        );
+        assert_eq!(herdr.prompts().len(), 1);
+        assert_eq!(herdr.submits().len(), 3);
+        assert_eq!(herdr.tabs().len(), 1);
+        assert!(ledger.0["a"].prompt_sent);
     }
 
     #[test]

@@ -2798,6 +2798,43 @@ mod tests {
     }
 
     #[test]
+    fn a_lead_whose_prompt_stays_unsubmitted_still_gets_its_broker_and_exits_1() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let req = LeadRequest {
+            broker: |paths, lead| {
+                let dir = paths.state_dir();
+                fs::create_dir_all(dir)?;
+                fs::write(dir.join("broker-started"), lead)?;
+                Ok(true)
+            },
+            ..request(&[])
+        };
+        let herdr = herdr();
+        herdr.swallow_enters(4);
+
+        let (report, code) = run(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(code, 1);
+        assert!(
+            report.ends_with(
+                "unsubmitted: lead-h's prompt is still unsubmitted in its input box after 3 \
+                 more Enters: press Enter in pane w1:p1"
+            ),
+            "{report}"
+        );
+        let started = fs::read_to_string(setup.root.join("state/broker-started")).unwrap();
+        assert_eq!(started, "lead-h");
+    }
+
+    #[test]
     fn a_broker_that_does_not_start_is_a_warning_naming_revive() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let req = LeadRequest {

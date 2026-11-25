@@ -163,6 +163,8 @@ pub trait Herdr {
     fn wait(&self, name: &str, until: &[AgentStatus], timeout: Duration) -> Result<WaitOutcome>;
     /// Submits `text` without waiting for the agent's turn.
     fn prompt(&self, name: &str, text: &str) -> Result<()>;
+    /// Presses Enter in the agent's input box, submitting whatever it holds.
+    fn submit(&self, name: &str) -> Result<()>;
     /// Brings the agent in `pane_id` to the front of the human's herdr client.
     fn focus(&self, pane_id: &str) -> Result<()>;
     /// The pane the human's herdr client has focused, if any.
@@ -842,6 +844,11 @@ impl Herdr for CliHerdr {
 
     fn prompt(&self, name: &str, text: &str) -> Result<()> {
         self.call_ok(&["agent", "prompt", name, text]).map(drop)
+    }
+
+    fn submit(&self, name: &str) -> Result<()> {
+        self.call_ok(&["agent", "send-keys", name, "enter"])
+            .map(drop)
     }
 
     fn focus(&self, pane_id: &str) -> Result<()> {

@@ -107,8 +107,17 @@ pub(super) fn edit(
     };
     check(herd, &text, paths, fix)
         .with_context(|| format!("refused, {} is unchanged", file.display()))?;
+    replace(&file, &text)?;
+    Ok(true)
+}
+
+/// Replaces `file`, or a symlink's target, with `text` through a temp file
+/// and a rename, keeping its permissions.
+pub(super) fn replace(file: &Path, text: &str) -> Result<()> {
+    // Renaming over a symlink would replace it, so write its target.
+    let file = fs::canonicalize(file).with_context(|| format!("read {}", file.display()))?;
     let written = || format!("write {}", file.display());
-    let dir = file.parent().context("herd file has no directory")?;
+    let dir = file.parent().context("file has no directory")?;
     let mut temp = tempfile::NamedTempFile::new_in(dir).with_context(written)?;
     temp.write_all(text.as_bytes()).with_context(written)?;
     let permissions = fs::metadata(&file).with_context(written)?.permissions();
@@ -116,7 +125,7 @@ pub(super) fn edit(
         .set_permissions(permissions)
         .with_context(written)?;
     temp.persist(&file).with_context(written)?;
-    Ok(true)
+    Ok(())
 }
 
 /// Waits for the lock on `file`'s hidden `.<name>.lock` beside it.
