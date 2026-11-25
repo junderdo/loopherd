@@ -883,6 +883,27 @@ fn ctrl_c_during_the_splash_returns_130_to_a_set_e_caller_whose_exit_trap_runs()
     assert!(!out.contains("after"), "{out}");
 }
 
+/// Bash skips the whole action of a trap that fires while a `break` or
+/// `continue` is unwinding, so a Ctrl+C landing on one would be lost. A
+/// timing test catches that well under one run in a hundred.
+#[test]
+fn the_splash_never_breaks_or_continues_a_loop_under_its_interrupt_trap() {
+    let splash = fs::read_to_string(SPLASH).unwrap();
+
+    let jumps: Vec<_> = splash
+        .lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim_start().starts_with('#'))
+        .filter(|(_, line)| {
+            line.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                .any(|word| word == "break" || word == "continue")
+        })
+        .map(|(at, line)| format!("{}: {}", at + 1, line.trim()))
+        .collect();
+
+    assert!(jumps.is_empty(), "{jumps:#?}");
+}
+
 #[test]
 fn ctrl_c_during_the_splash_stops_install_with_130_before_building() {
     let sandbox = Sandbox::new(false);

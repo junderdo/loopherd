@@ -1,3 +1,4 @@
+mod awaiting;
 mod broker;
 mod config;
 mod context;
@@ -2430,7 +2431,11 @@ fn run_prompt_hook() -> Result<i32> {
             Err(e) => eprintln!("loopherd prompt-hook: warning: shepherd self-restart: {e:#}"),
         }
     }
-    pane_label::prompted(&CliHerdr, &ledger.reports_dir()?, &pane, &input)?;
+    let mailboxes = ledger.reports_dir()?;
+    if let Err(e) = awaiting::prompted(&mailboxes, &pane, &input, SystemTime::now()) {
+        eprintln!("loopherd prompt-hook: warning: answer the lead's wait: {e:#}");
+    }
+    pane_label::prompted(&CliHerdr, &mailboxes, &pane, &input)?;
     Ok(0)
 }
 

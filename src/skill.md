@@ -159,8 +159,9 @@ Init never launches an agent.
    | Line | Means |
    |---|---|
    | `<member> done <time> <text>` | A finished member's report, usually with its output's link. Verify it. |
-   | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. |
+   | `<member> question <time> <text>` | It stopped on a question. Relay it to the human; a lead relays it with its own question report, unless it's a design question and `design_escalation` is on. A lead's question waits until a prompt reaches its pane (yours by `tell`, or the human typing), which `reports --all` records as `<lead> answered <time>`; until then `status` shows `question waiting <age>` on its row (D143). |
    | `<member> note <time> <text>` | Information only, except a `self-restart …` note: that member's handoff is still waiting on a restart (see Handoffs), and a lead's note naming a follow-up it filed ready: tell the human, who may veto it; on a veto, drop the task's ready label, or retire its worker once one claimed it. |
+   | `<lead> gate <time> <text>` | A lead's gate request, for a herd whose shepherd runs its gates: run the gate on the named PR and sha and send the lead the result. Until a prompt reaches its pane, `status` shows `gate waiting <age>` on its row. |
    | `<member> handoff <time> <text>` | It passed its context limit and wrote its handoff. Restart it (see Handoffs) if you read it; a lead restarts itself. |
    | `<member> paused  1 shell, 1 cron` | Turn ended with work in flight that can wake it again. Another paused stop is quiet. |
    | `<member> paused  background unknown` | Turn ended and Claude didn't say what's in flight (also `crons unknown`, or `1 shell; crons unknown`). |
@@ -918,6 +919,10 @@ Shepherd section has the detail):
    origin's branches, and without a `gate` ask the human to add one. It can
    take many minutes, so run it as a background task and act on its
    completion; killed mid-wait, it runs on unread.
+   When the shepherd runs your herd's gates instead, ask with `loopherd
+   report --kind gate "Gate request: #<n> <branch> at <full sha>"`, not a
+   note, and end your turn. Like a question, it waits until a prompt
+   reaches your pane, and `status` shows `gate waiting <age>` on your row.
 5. **After merge** (`gh pr view <n> --json state`): close out the task in
    the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
    `after_merge`; do by hand what its note says didn't run), then `git

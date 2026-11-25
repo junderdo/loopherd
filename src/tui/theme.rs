@@ -278,11 +278,11 @@ impl Theme {
         }
     }
 
-    /// A report's kind: questions in the accent, done green, handoffs in the
+    /// A report's kind: questions and gate requests in the accent, done green, handoffs in the
     /// primary, notes muted.
     pub fn report(&self, kind: Kind) -> Style {
         let style = match kind {
-            Kind::Question => self.fg(self.colors().accent),
+            Kind::Question | Kind::Gate => self.fg(self.colors().accent),
             Kind::Done => self.plain_fg(Color::Green),
             Kind::Handoff => self.fg(self.colors().primary),
             Kind::Note => self.fg(self.colors().muted),
@@ -355,6 +355,7 @@ mod tests {
             retired: None,
             subagents: vec![],
             stalled: None,
+            waiting: None,
         };
         let selected = theme.selected();
         let wordmark = theme.wordmark("ab");

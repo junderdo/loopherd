@@ -57,6 +57,15 @@ pub struct Member {
     /// filled by the caller.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stalled: Option<u64>,
+    /// A lead's oldest unanswered question or gate request; filled by the caller.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct Waiting {
+    pub kind: crate::report::Kind,
+    pub minutes: u64,
 }
 
 /// A subagent a member's Claude started and hasn't finished.
@@ -302,6 +311,7 @@ pub(crate) fn member(
         }),
         subagents: vec![],
         stalled: None,
+        waiting: None,
     }
 }
 
