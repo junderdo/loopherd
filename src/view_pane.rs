@@ -896,6 +896,36 @@ mod tests {
     }
 
     #[test]
+    fn stacked_a_swap_herdr_refuses_leaves_no_view_below_and_says_why_in_the_popup() {
+        let state = tempfile::tempdir().unwrap();
+        let (mut herdr, shepherd) = herdr_with_tab();
+        herdr.fail_swap = true;
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::Stacked,
+        )
+        .unwrap();
+
+        let Opened::Popup { why } = opened else {
+            panic!("{opened:?}");
+        };
+        assert!(why.contains("swap"), "{why}");
+        assert_eq!(
+            herdr.plugin_panes(),
+            [(
+                VIEW.to_string(),
+                Placement::Manifest,
+                vec![(NOTE.to_string(), why)]
+            )]
+        );
+    }
+
+    #[test]
     fn stacked_a_shepherd_off_screen_gets_its_view_opened_above_it_with_focus() {
         let state = tempfile::tempdir().unwrap();
         let (herdr, shepherd) = herdr_with_tab();
