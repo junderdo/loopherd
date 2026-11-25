@@ -284,11 +284,14 @@ fn gone_or_alive(body: &Body) -> bool {
         | Body::Done { .. }
         | Body::Question { .. }
         | Body::Handoff { .. }
+        | Body::Gate { .. }
         | Body::Moved {}
         | Body::Gone { .. } => true,
-        Body::Note { .. } | Body::Usage { .. } | Body::SubagentStart(_) | Body::SubagentStop(_) => {
-            false
-        }
+        Body::Note { .. }
+        | Body::Answered {}
+        | Body::Usage { .. }
+        | Body::SubagentStart(_)
+        | Body::SubagentStop(_) => false,
     }
 }
 

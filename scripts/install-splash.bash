@@ -146,7 +146,7 @@ splash_large_herd() {
       size=14 kind=w base=9 room=50
     fi
     height=${splash_sheep_height[size]}
-    ((d + height <= splash_ground_rows)) || break
+    ((d + height <= splash_ground_rows)) || return 0
     n=$((splash_width / room))
     span=$((size + (splash_frames - 1) / base + 1))
     ((n * span <= splash_width)) || n=$((splash_width / span))
@@ -279,18 +279,18 @@ splash_lay() { # <x> <sprite> <kind>
   fi
   for ((i = 0; i < ${#sprite}; i++)); do
     ch=${sprite:i:1}
-    [[ "$ch" == ' ' ]] && continue
-    [[ "$ch" == '~' ]] && ch=' '
-    ((x + i >= 0 && x + i < splash_width)) || continue
-    cell=$kind
-    if [[ "$kind" == c ]]; then
-      case ${splash_kinds:x+i:1} in
-        u | x) cell=x ;;
-        1 | y) cell=y ;;
-      esac
+    if [[ "$ch" != ' ' ]] && ((x + i >= 0 && x + i < splash_width)); then
+      [[ "$ch" == '~' ]] && ch=' '
+      cell=$kind
+      if [[ "$kind" == c ]]; then
+        case ${splash_kinds:x+i:1} in
+          u | x) cell=x ;;
+          1 | y) cell=y ;;
+        esac
+      fi
+      splash_text="${splash_text:0:x+i}${ch}${splash_text:x+i+1}"
+      splash_kinds="${splash_kinds:0:x+i}${cell}${splash_kinds:x+i+1}"
     fi
-    splash_text="${splash_text:0:x+i}${ch}${splash_text:x+i+1}"
-    splash_kinds="${splash_kinds:0:x+i}${cell}${splash_kinds:x+i+1}"
   done
 }
 
@@ -397,8 +397,9 @@ splash_sky() { # <frame> <letter> <rise>
     splash_text=${splash_sun_text[row]} splash_kinds=${splash_sun_kinds[row]}
     for i in "${!splash_cloud_top[@]}"; do
       shape=$((row - splash_cloud_top[i]))
-      ((shape >= 0 && shape < splash_cloud_rows[i])) || continue
-      splash_lay "${at[i]}" "${splash_cloud_shape[i * splash_horizon + shape]}" c
+      if ((shape >= 0 && shape < splash_cloud_rows[i])); then
+        splash_lay "${at[i]}" "${splash_cloud_shape[i * splash_horizon + shape]}" c
+      fi
     done
     if ((row >= splash_wordmark_top && row < splash_wordmark_top + 5)); then
       splash_wordmark_mask $((row - splash_wordmark_top)) "$letter" "$rise"
@@ -491,9 +492,10 @@ splash_pasture() { # <frame>
     splash_overlay "$row" "$x" "$kind"
   done
   for ((d = 0; d < splash_ground_rows; d++)); do
-    [[ "${splash_rows_text[d]}${splash_rows_kinds[d]}" == "${splash_painted[d]:-}" ]] && continue
-    splash_painted[d]=${splash_rows_text[d]}${splash_rows_kinds[d]}
-    splash_paint_row $((splash_ground_top + d)) "${splash_rows_text[d]}" "${splash_rows_kinds[d]}"
+    if [[ "${splash_rows_text[d]}${splash_rows_kinds[d]}" != "${splash_painted[d]:-}" ]]; then
+      splash_painted[d]=${splash_rows_text[d]}${splash_rows_kinds[d]}
+      splash_paint_row $((splash_ground_top + d)) "${splash_rows_text[d]}" "${splash_rows_kinds[d]}"
+    fi
   done
 }
 
@@ -622,6 +624,7 @@ splash_play() {
   splash_open_sleep_fd
   splash_interrupted=0
   callers_traps=$(trap -p INT EXIT)
+  # Bash skips a trap firing while break or continue unwinds, so the splash uses neither.
   trap 'splash_interrupted=1' INT
   trap splash_restore EXIT
   printf '\e[?25l' || :
