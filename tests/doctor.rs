@@ -10,8 +10,9 @@ use std::process::{Command, Output};
 
 const LOOPHERD: &str = env!("CARGO_BIN_EXE_loopherd");
 
-/// A grill template, so `herd upgrade` doesn't offer the herd one.
-const GRILL: &str = "[template.grill]\nparams = []\nattended = true\nprompt = \"grill\"\n";
+/// Grill and wayfinding templates, so `herd upgrade` doesn't offer the herd them.
+const GRILL: &str = "[template.grill]\nparams = []\nattended = true\nprompt = \"grill\"\n\
+                     [template.wayfinding]\nparams = []\nprompt = \"answer\"\n";
 
 struct Sandbox {
     dir: tempfile::TempDir,

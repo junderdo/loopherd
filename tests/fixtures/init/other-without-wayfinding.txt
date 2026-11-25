@@ -1,0 +1,190 @@
+== widgets.toml
+# Herd widgets: one worker per ready task in the tracker docs/agents/issue-tracker.md.
+# Written by `loopherd init`; yours to edit. loopherd changes it only on a yes to `loopherd herd upgrade`.
+repo = "<root>/widgets"
+args = ["--permission-mode", "auto"]
+
+[queue]
+template = "issue"
+# Fill in from docs/agents/issue-tracker.md: a shell command printing
+# "<number> <type> <skill> <slug>" per ready task, oldest first. Then adapt
+# the issue template's done check and prompt to the same tracker. Until this
+# is set, `loopherd herds` reports the herd invalid and feed refuses it.
+source = ""
+# Fill in the same way: a shell command printing "<key> <title>" per open task
+# that isn't ready, leaving out blocked ones and keeping ones waiting on the
+# human; `loopherd status` counts its lines. Or drop it.
+backlog = "(fill in)"
+max = 3
+
+[template.issue]
+params = ["number", "type", "skill", "slug"]
+name = "{herd}-{number}"
+branch = "{type}/{number}-{slug}"
+# Fill in from docs/agents/issue-tracker.md:
+# done, a shell command that exits 0 once task {number} is closed, its braces
+# doubled. Until it's set no member counts as done, so feed never retires one.
+merged = "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt = '''
+You're {name}, working task {number} on branch {branch} in {worktree}.
+
+Fill in from docs/agents/issue-tracker.md: each line marked (fill in), with this
+tracker's own commands.
+
+Run every gh command as acme, prefixed with
+`GH_TOKEN=$(gh auth token --user acme)` as in the commands below.
+
+1. Read task {number} and every comment on it. (fill in)
+2. Claim it: comment `claimed by {name}` on it. (fill in)
+3. Build it with the {skill} skill.
+4. Before calling it done, run each check and fix what fails:
+   - `cargo test`
+   - `cargo fmt --check`
+5. Push the branch as acme:
+   `GH_TOKEN=$(gh auth token --user acme) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Then open a pull request into main with `GH_TOKEN=$(gh auth token --user acme) gh pr create --repo acme/widgets --base main --head {branch} --assignee acme --title "<title>" --body "<summary>"`.
+   Link it on task {number}, so the task closes when the PR merges. (fill in)
+6. Finish with `loopherd report --kind done "<PR link and one-line summary>"`.
+
+If main moves under you, merge origin/main into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess: mark
+task {number} needs-info (fill in), comment the question and the options you
+see on it, then `loopherd report --kind question "<the exact question>"`.
+'''
+
+# A grill the shepherd starts live with the human: `loopherd add --no-focus
+# widgets grill <number> <slug>`, then `loopherd tell` its background, then
+# focus. Attended, so feed never spawns it: keep it out of [queue].
+[template.grill]
+params = ["number", "slug"]
+attended = true
+name = "{herd}-grill-{number}"
+branch = "docs/{number}-{slug}"
+# Fill in from docs/agents/issue-tracker.md:
+# done, a shell command that exits 0 once task {number} is closed, its braces
+# doubled. Until it's set no member counts as done, so feed never retires one.
+merged = "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt_file = "widgets-grill.md"
+
+[lead]
+prompt_file = "widgets-lead.md"
+# From [lead_defaults] when init ran. Off means the lead asks the human.
+merge = false
+install = false
+rebase = false
+new_cards = false
+design_escalation = false
+blocked_dialogs = false
+follow_ups_ready = false
+merge_guard = "hook"
+== widgets-lead.md
+You're {name}, the lead of herd {herd}, in {worktree}, a detached checkout of
+widgets you never commit in. No human is in this pane.
+
+Read `loopherd --skill` in full, its Lead section most closely. Tasks come from the tracker docs/agents/issue-tracker.md describes. Fill in from docs/agents/issue-tracker.md: how a worker's task closes when its PR merges. (fill in)
+Run every gh command as acme, prefixed with
+`GH_TOKEN=$(gh auth token --user acme)`. You run the shepherd's loop for {herd}'s workers: feed, watch, verify
+each worker's PR with a reviewer subagent, send only blocking findings back
+to the member, and the after-merge steps.
+
+Your switches (off means the human does it; ask with a question report):
+{switches}
+
+Your review-round limit: {review_rounds}.
+
+Grilling is always the human's.
+
+Start now:
+1. `loopherd status` and `loopherd reports --all`, to see where the herd is.
+2. `loopherd feed {herd} --dry-run`, then `loopherd feed {herd}` if it reads right.
+3. Arm `loopherd watch {herd} --timeout 3600` as a background task, and
+   re-arm after every exit but `{herd} drained`: on that, report done and
+   stop. On `<member> merged`, run `loopherd feed {herd}`,
+   which retires it once its issue is closed. On `<name> claimable`, feed.
+   Exit 2 is your heartbeat: check each worker's PR for a merge and run
+   `loopherd feed {herd} --dry-run`.
+
+When you need the human, run `loopherd report --kind question "<the exact
+question>"` and end your turn. With merge off, a merge question carries the PR
+link, any PR that must merge first, and the line
+`! GH_TOKEN=$(gh auth token --user acme) gh pr merge <n> --repo acme/widgets --merge --match-head-commit <full sha>`
+for the head your reviewer verified. Single-quote that question ('...', not
+"..."): double quotes run the $(...) and leak the token.
+== AGENTS.md
+# Agent instructions
+
+## loopherd
+
+A loopherd herd works this repo's ready issues, one worker per issue on its
+own branch. A worker reads `docs/agents/loopherd.md` for how to claim, build,
+check, hand in and report an issue, and `docs/agents/issue-tracker.md` for
+the tracker.
+== docs/agents/issue-tracker.md
+# Issue tracker
+
+Issues live in Linear.
+== docs/agents/triage-labels.md
+# Triage Labels
+
+The skills speak in five canonical triage roles. This file maps each role to
+the label string this repo's issue tracker uses.
+
+| Label in mattpocock/skills | Label in our tracker | Meaning |
+| --- | --- | --- |
+| `needs-triage` | `needs-triage` | Maintainer needs to evaluate this issue |
+| `needs-info` | `needs-info` | Waiting on reporter for more information |
+| `ready-for-agent` | `ready-for-agent` | Fully specified, ready for an AFK agent |
+| `ready-for-human` | `ready-for-human` | Requires human implementation |
+| `wontfix` | `wontfix` | Will not be actioned |
+
+When a skill mentions a role, use the corresponding label string from this
+table. Edit the "Label in our tracker" column to match the labels you use.
+== docs/agents/loopherd.md
+# Working a task in a loopherd herd
+
+loopherd starts one worker per ready task, each in its own worktree on its
+own branch. The worker's prompt names the task, the branch and the exact
+commands; this doc says what each step is for. How the tracker works is in
+`docs/agents/issue-tracker.md`.
+
+Fill in from docs/agents/issue-tracker.md: each section marked (fill in).
+
+## Claiming
+
+Read the task and every comment first. Then comment `claimed by <member>`
+on it, with your member name. A task someone else has claimed isn't yours.
+(fill in)
+
+## Branch names
+
+`<type>/<number>-<slug>`: the herd file's queue source gives each task its
+type, number and slug. loopherd creates the branch and its worktree; work
+only there. If main moves under you, merge `origin/main` into your
+branch; never rebase or force-push.
+
+## Checks
+
+Before calling the work done, run each check and fix what fails:
+
+- `cargo test`
+- `cargo fmt --check`
+
+## Handing in
+
+Push the branch and open a PR with `--base main`. Hand the work in on the task, so it closes when the work merges;
+loopherd counts the task done once it is closed. (fill in)
+
+## Stopping on a question
+
+When only the human can answer, stop rather than guess: mark the task
+`needs-info`, comment the question and the options you see on it, then
+report it. (fill in)
+
+## Reporting
+
+Tell the shepherd how the work ended:
+
+- Done: `loopherd report --kind done "<PR link and one-line summary>"`.
+- Stopped on a question: `loopherd report --kind question "<the exact question>"`.

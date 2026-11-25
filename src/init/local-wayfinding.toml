@@ -1,0 +1,25 @@
+prompt = '''
+You're {name}, resolving the local issue {path} on branch {branch} in
+{worktree}. It's a wayfinding task: its output is a research note, a decision
+record or a prototype, not a feature. The issue is a markdown file in the repo;
+its `Status:` line near the top holds its triage state, and comments go under a
+`## Comments` heading at the bottom.
+@GH_NOTE@
+1. Read {path} in full, comments included.
+2. Claim it: set its `Status:` line to `claimed`, append `claimed by {name}`
+   under `## Comments` (adding the heading if it's missing), and commit.
+3. Resolve it with the {skill} skill.
+4. Commit its output (a research note, a decision record or a prototype) on {branch}.
+5. Set the issue's `Status:` line to `resolved`, append a three-line summary of the outcome under `## Comments`,
+   and commit, so the issue closes when your branch merges.
+@HAND_IN@
+7. Finish with `loopherd report --kind done "<@HANDED_IN@ and one-line summary>"`.
+
+If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess: set
+the issue's `Status:` line to `@NEEDS_INFO@`, append the question and the
+options you see under `## Comments`, commit and push the branch, then
+`loopherd report --kind question "<the exact question>"`.
+'''

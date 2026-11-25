@@ -46,6 +46,10 @@ pub const GROOM: &str = "\
 A groomer triages unready tasks when the herd runs low, for you to approve.
 Say no if you keep the backlog ready yourself.";
 
+pub const WAYFINDING: &str = "\
+Routes research, domain and prototype tasks, by their wayfinding: label, to a
+worker with its own prompt. Say no if this tracker holds only build work.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -64,6 +68,7 @@ mod tests {
             GH_ACCOUNT,
             DEFAULT_BRANCH,
             GROOM,
+            WAYFINDING,
         ] {
             let lines: Vec<&str> = text.lines().collect();
             assert!((1..=2).contains(&lines.len()), "{text}");
