@@ -116,8 +116,16 @@ struct State {
     screens: Vec<(String, String)>,
     /// Replaces a pane's screen when its agent is next prompted.
     screen_on_prompt: Option<(String, String)>,
-    /// A prompted agent goes `working`, as Claude does on a new turn.
-    working_on_prompt: bool,
+    /// A prompted agent stays as it was, rather than going `working` as
+    /// Claude does on any prompt but a slash command.
+    idle_on_prompt: bool,
+    /// Submissions (a prompt's own Enter, or a later one) left to swallow,
+    /// leaving the text in the input box and the agent idle.
+    enters_to_swallow: u32,
+    /// Enters pressed with [`Herdr::submit`], by agent.
+    submits: Vec<String>,
+    /// Text left unsubmitted in an agent's input box, by agent.
+    typed: Vec<(String, String)>,
     agent_polls: u32,
     /// `agent` calls left that answer without the session.
     sessionless_gets: u32,
@@ -129,6 +137,12 @@ struct State {
 
 /// An opened plugin pane's entrypoint, placement and env, sorted by key.
 pub type PluginPane = (String, Placement, Vec<(String, String)>);
+
+/// Claude's prompt box holding `typed`.
+fn input_box(typed: &str) -> String {
+    let rule = "─".repeat(40);
+    format!("{rule}\n❯ {typed}\n{rule}\n").replace("❯ \n", "❯\n")
+}
 
 pub const FAKE_SOCKET: &str = "/run/fake/herdr.sock";
 
@@ -224,8 +238,45 @@ impl FakeHerdr {
         }
     }
 
-    pub fn set_working_on_prompt(&self) {
-        self.state.lock().unwrap().working_on_prompt = true;
+    pub fn set_idle_on_prompt(&self) {
+        self.state.lock().unwrap().idle_on_prompt = true;
+    }
+
+    /// The next `count` submissions leave the text unsubmitted in the agent's
+    /// input box, as Claude does with an Enter that arrives too early.
+    pub fn swallow_enters(&self, count: u32) {
+        self.state.lock().unwrap().enters_to_swallow = count;
+    }
+
+    pub fn submits(&self) -> Vec<String> {
+        self.state.lock().unwrap().submits.clone()
+    }
+
+    /// Submits `text` in `name`'s input box, or leaves it there showing
+    /// while Enters are being swallowed.
+    fn enter(&self, name: &str, text: &str) -> Result<()> {
+        let pane = self.find(name)?.pane_id;
+        let mut state = self.state.lock().unwrap();
+        if state.enters_to_swallow > 0 {
+            state.enters_to_swallow -= 1;
+            state.typed.push((name.to_string(), text.to_string()));
+            drop(state);
+            self.set_screen(&pane, &input_box(text));
+            return Ok(());
+        }
+        let working = !state.idle_on_prompt && !text.starts_with('/');
+        let was_typed = state
+            .screens
+            .iter()
+            .any(|(p, s)| p == &pane && s == &input_box(text));
+        drop(state);
+        if was_typed {
+            self.set_screen(&pane, &input_box(""));
+        }
+        if working {
+            self.set_status(name, AgentStatus::Working);
+        }
+        Ok(())
     }
 
     /// Adds a live agent that already exists in the session.
@@ -893,7 +944,9 @@ impl Herdr for FakeHerdr {
         if self.fail_wait {
             bail!("wait refused");
         }
-        if self.startup == Startup::BlockedThenIdle {
+        if self.startup == Startup::BlockedThenIdle
+            && self.find(name)?.status == AgentStatus::Blocked
+        {
             self.set_status(name, AgentStatus::Idle);
         }
         let status = self.find(name)?.status;
@@ -921,14 +974,27 @@ impl Herdr for FakeHerdr {
             .unwrap()
             .prompts
             .push((name.to_string(), text.to_string()));
+        self.enter(name, text)?;
         let next = self.state.lock().unwrap().screen_on_prompt.take();
         if let Some((pane, screen)) = next {
             self.set_screen(&pane, &screen);
         }
-        if self.state.lock().unwrap().working_on_prompt {
-            self.set_status(name, AgentStatus::Working);
-        }
         Ok(())
+    }
+
+    fn submit(&self, name: &str) -> Result<()> {
+        self.called();
+        self.mutating();
+        self.find(name)?;
+        let mut state = self.state.lock().unwrap();
+        state.submits.push(name.to_string());
+        let typed = state.typed.iter().position(|(n, _)| n == name);
+        let text = typed.map(|at| state.typed.remove(at).1);
+        drop(state);
+        match text {
+            Some(text) => self.enter(name, &text),
+            None => Ok(()),
+        }
     }
 
     fn focus(&self, pane_id: &str) -> Result<()> {

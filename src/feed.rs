@@ -212,6 +212,12 @@ pub fn feed(
                         .map(|w| format!("warning: {name}: {w}")),
                 );
                 added += 1;
+                if let Some(why) = &spawned.unsubmitted {
+                    lines.push(format!("error: {name}: {why}; stopping"));
+                    errors += 1;
+                    code = 1;
+                    break;
+                }
                 if spawned.blocked {
                     lines.push(format!(
                         "blocked: answer it in pane {}, then run loopherd prompt {name}; stopping",
@@ -1863,6 +1869,27 @@ mod tests {
         assert_eq!(fed.lines[2], "prs: 0 retired, 1 added, 0 skipped, 0 errors");
         assert_eq!(fed.lines.len(), 3);
         assert_eq!(fed.code, 3);
+        assert_eq!(ledger.0.keys().collect::<Vec<_>>(), ["zpr-1"]);
+    }
+
+    #[test]
+    fn a_member_whose_prompt_stays_unsubmitted_is_added_as_an_error_and_stops_the_run() {
+        let setup = Setup::new("printf '1\\n2\\n'", 5);
+        let herdr = herdr();
+        herdr.swallow_enters(4);
+        let mut ledger = MemLedger::default();
+
+        let fed = setup.feed(&herdr, &mut ledger, false).unwrap();
+
+        assert_eq!(fed.lines[0], "added zpr-1");
+        assert_eq!(
+            fed.lines[1],
+            "error: zpr-1: zpr-1's prompt is still unsubmitted in its input box after 3 more \
+             Enters: press Enter in pane w1:p1; stopping"
+        );
+        assert_eq!(fed.lines[2], "prs: 0 retired, 1 added, 0 skipped, 1 error");
+        assert_eq!(fed.lines.len(), 3);
+        assert_eq!(fed.code, 1);
         assert_eq!(ledger.0.keys().collect::<Vec<_>>(), ["zpr-1"]);
     }
 
