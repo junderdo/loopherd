@@ -1966,7 +1966,8 @@ fn start_with(
             return Ok(false);
         }
         if Instant::now() >= given_up {
-            let (holder, fix) = match serving_pid(paths, lead) {
+            let pid = serving_pid(paths, lead);
+            let (holder, fix) = match pid {
                 Some(pid) => (
                     format!("pid {pid}"),
                     format!("run loopherd broker-restart {lead} to replace it"),
@@ -1980,12 +1981,15 @@ fn start_with(
                     ),
                 ),
             };
-            return Err(LockHeld(format!(
-                "{} is held by {holder}, which records nothing in it, as a broker older than \
-                 this loopherd does, and didn't let it go within {}; {fix}",
-                lock.display(),
-                humantime::format_duration(wait)
-            ))
+            return Err(LockHeld {
+                pid,
+                why: format!(
+                    "{} is held by {holder}, which records nothing in it, as a broker older than \
+                     this loopherd does, and didn't let it go within {}; {fix}",
+                    lock.display(),
+                    humantime::format_duration(wait)
+                ),
+            }
             .into());
         }
         std::thread::sleep(Duration::from_millis(20));
@@ -1994,14 +1998,29 @@ fn start_with(
     Ok(true)
 }
 
-/// `start` found a lead's lock held, by a broker older than its record, past
-/// the wait. That broker still serves, so only stopping it lets a new one start.
+/// `start` found a lead's lock held with nothing recorded in it past the wait,
+/// so no broker starts until its holder lets go.
 #[derive(Debug)]
-pub struct LockHeld(pub String);
+pub struct LockHeld {
+    /// The pid a broker recorded, when one did: an older broker, which
+    /// `broker-restart` can replace. Without one, the holder may not be a broker.
+    pub pid: Option<u32>,
+    pub why: String,
+}
+
+impl LockHeld {
+    /// Who holds the lock, as a warning's reason that no broker started.
+    pub fn holder(&self) -> &'static str {
+        match self.pid {
+            Some(_) => "an older broker still holds its lock",
+            None => "something that recorded no pid still holds its lock",
+        }
+    }
+}
 
 impl std::fmt::Display for LockHeld {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        f.write_str(&self.why)
     }
 }
 

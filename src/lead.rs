@@ -110,12 +110,9 @@ pub fn lead(
         warnings.push(warning);
     }
     if let Err(e) = (req.broker)(paths, &name) {
-        warnings.push(match e.is::<LockHeld>() {
-            true => format!(
-                "{name}'s broker didn't start, as an older broker still holds its lock and \
-                 serves its loopherd commands until it's stopped ({e:#})"
-            ),
-            false => format!(
+        warnings.push(match e.downcast_ref::<LockHeld>() {
+            Some(held) => format!("{name}'s broker didn't start, as {} ({e:#})", held.holder()),
+            None => format!(
                 "{name}'s broker didn't start ({e:#}), so its loopherd commands fail until \
                  loopherd revive --name {name} starts it"
             ),
@@ -2897,10 +2894,16 @@ mod tests {
     }
 
     #[test]
-    fn a_broker_an_older_one_holds_the_lock_of_is_a_warning_naming_broker_restart() {
+    fn a_broker_an_older_one_holds_the_lock_of_is_a_warning_naming_the_holder() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let req = LeadRequest {
-            broker: |_, _| Err(crate::broker::LockHeld("held by pid 7".into()).into()),
+            broker: |_, _| {
+                Err(LockHeld {
+                    pid: Some(7),
+                    why: "held by pid 7".into(),
+                }
+                .into())
+            },
             ..request(&[])
         };
 
@@ -2918,7 +2921,40 @@ mod tests {
         assert!(
             out.starts_with(
                 "warning: lead-h's broker didn't start, as an older broker still holds its lock \
-                 and serves its loopherd commands until it's stopped (held by pid 7)\n"
+                 (held by pid 7)\n"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn a_broker_whose_lock_a_pidless_holder_keeps_is_a_warning_claiming_no_broker() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let req = LeadRequest {
+            broker: |_, _| {
+                Err(LockHeld {
+                    pid: None,
+                    why: "held by a process that recorded no pid".into(),
+                }
+                .into())
+            },
+            ..request(&[])
+        };
+
+        let (out, _) = run(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert!(
+            out.starts_with(
+                "warning: lead-h's broker didn't start, as something that recorded no pid still \
+                 holds its lock (held by a process that recorded no pid)\n"
             ),
             "{out}"
         );
