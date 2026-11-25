@@ -2,7 +2,7 @@
 params = ["number", "type", "skill", "slug"]
 name = "{herd}-{number}"
 branch = "{type}/{number}-{slug}"
-@CONTEXT_LIMIT@done = "@GH_TOKEN@ gh issue view {number} --repo @OWNER_REPO@ --json state --jq .state | grep -qx CLOSED"
+@CONTEXT_LIMIT@@DONE@
 @MERGED@
 prompt = '''
 You're {name}, working GitHub issue #{number} of @OWNER_REPO@ on branch

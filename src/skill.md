@@ -61,7 +61,7 @@ Init never launches an agent.
 4. Adjust the worker prompt and the checks it lists to how the repo builds,
    tests and reviews; for a herd with a lead, its prompt file too.
 5. Edit only what init wrote: the herd file (with `loopherd herd set`), the
-   lead's prompt file beside it, and the repo files init listed. Leave the
+   lead's and grill's prompt files beside it, and the repo files init listed. Leave the
    rest of the repo and other herds alone.
 6. You're done when `loopherd herds` calls the herd valid and
    `loopherd feed <herd> --dry-run` lists the tasks you expect from the

@@ -9,4 +9,4 @@ template = "issue"
 max = @MAX@
 
 @TEMPLATE@
-@LEAD_TABLE@@GROOM@
+@GRILL@@LEAD_TABLE@@GROOM@
