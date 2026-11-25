@@ -1030,7 +1030,7 @@ fn led(merged: &str) -> String {
     format!(
         "[queue]\ntemplate = \"issue\"\nsource = \"list\"\nmax = 2\n\
          [template.issue]\nparams = [\"number\"]\nprompt = \"work {{number}}\"\ndone = \"exit 0\"\n{merged}\
-         [lead]\nprompt = \"lead {{herd}}\"\n"
+         [lead]\nprompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n"
     )
 }
 
