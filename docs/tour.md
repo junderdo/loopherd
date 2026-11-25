@@ -14,7 +14,7 @@ walks a repo's setup.
 | `herd get\|set\|unset <herd> <key>` | Read or edit one value in a herd file, keeping its comments (`queue.max`, `lead.merge`). |
 | `herd remove <herd>` | Delete a finished herd's file, the prompt files it alone names in the herds dir, and every run of it in the ledger; a name holding another herd's run keeps that run and its files. |
 | `lead-defaults` | Show `config.toml`'s lead switches, on or off, for herds whose `[lead]` doesn't set them; `--set` writes them. |
-| `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `shepherd.self_restart`, `herdr_plugin.revive_on_startup`, `lead_defaults.review_rounds`, `view.theme` or `view.layout`. Token counts take `250k` or `1.5M`; the two limits also a percentage of the window (`65%`). |
+| `config get\|set\|unset <key>` | Read or edit `context_window`, `context_windows.<model>`, `default_context_limit`, `shepherd.context_limit`, `shepherd.self_restart`, `herdr_plugin.revive_on_startup`, `lead_defaults.review_rounds`, `view.theme` or `view.layout`. Token counts take `250k` or `1.5M`; the two limits also a percentage of the window (`65%`). |
 | `merge-guard <herd>` | Set up the split credentials of a herd whose lead has `merge_guard = "credentials"`: its deploy key and the rulesets, then how to make its token. |
 | `install-hook` | Add loopherd's Claude hooks and skill, with these docs as its `references/` (`--remove` takes them out). |
 | `docs [<topic>]` | Print one of these docs (`tour`, `setup`, `install`, `glossary`, `herd-file`, `runbook`); with no topic, list them. |
@@ -65,10 +65,10 @@ after a paused stop for its herd's `stalled_after` (30 minutes by default).
 
 A member past its context limit (`context_limit` in its template or
 `[lead]`, else `config.toml`'s `default_context_limit`; tokens, or a
-percentage of `context_window` like `"65%"`) is asked once to write a
+percentage of the window like `"65%"`) is asked once to write a
 handoff (`loopherd handoff`) and report `--kind handoff`; `restart` then
 resumes it from that file. The context window comes from the session's
-model unless `context_window` overrides it.
+model unless `context_windows.<model>` or `context_window` overrides it.
 
 ## Hooks
 

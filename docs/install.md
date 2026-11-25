@@ -87,7 +87,8 @@ without asking (naming an extra skips the other offers and setup), and
 they're unset: what a lead may do by default, the handoff limits, then
 whether herdr's startup hook also resumes members (alive leads' brokers
 start either way). The context window comes from each session's model; set
-`context_window` only to override it. Token counts take `250k` or `1.5M`,
+`context_windows.<model>` (one model) or `context_window` (every model) only
+to override it. Token counts take `250k` or `1.5M`,
 and a handoff limit may be a percentage of the window (`65%`). Run it again
 with `--again`.
 
