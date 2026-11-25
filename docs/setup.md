@@ -112,11 +112,12 @@ default branch, and checks from `Cargo.toml` and `package.json`, and on a
 terminal asks for each with the inferred value as the default. For a local
 tracker on a GitHub origin, the GitHub repo question defaults to none (no gh
 calls, no PR `merged` check); `--no-github` makes that choice off a
-terminal. It writes `<herd>.toml` and `<herd>-lead.md` in
+terminal. It writes `<herd>.toml`, `<herd>-lead.md` and `<herd>-grill.md` in
 `$XDG_CONFIG_HOME/loopherd/herds/` (default `~/.config/loopherd/herds/`;
 `LOOPHERD_CONFIG_DIR` replaces the `loopherd` dir), creates the labels the
 queue reads for a GitHub tracker, and, uncommitted, adds
-`docs/agents/loopherd.md`, a tracker doc if the repo has none, and a
+`docs/agents/loopherd.md`, a `docs/agents/shepherd.md` runbook stub to fill
+in per [runbook.md](runbook.md), a tracker doc if the repo has none, and a
 `## loopherd` section in `AGENTS.md`. The tracker can be GitHub issues,
 local markdown issue files, or another one you describe. `init --diff`
 shows what it would write now, against what it wrote.
@@ -153,8 +154,8 @@ placeholders and `{herd}`; `prompt`, `done` and `merged` also take
 `{name}`, `{branch}`, `{worktree}` and `{pane}`. A param used in `name`,
 `branch` or `worktree`, or any param of a template with no `name`, must be a
 plain word (`[A-Za-z0-9][A-Za-z0-9._-]*`, no `..`). A `[queue]`, a `[lead]`
-table and the rest are what `init` writes; start from its output or from
-[examples/](examples/).
+table and the rest are what `init` writes; start from its output, from
+[herd-file.md](herd-file.md), or from [examples/](examples/).
 
 An optional top-level `stalled_after = <minutes>` (default 30, at least 1)
 sets how long a member may sit idle after a paused stop before a watch

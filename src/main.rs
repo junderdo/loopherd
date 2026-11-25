@@ -29,6 +29,7 @@ mod pr_link;
 mod process;
 mod prompt;
 mod read;
+mod references;
 mod release;
 mod report;
 mod restart;
@@ -117,8 +118,8 @@ enum Command {
     Add(AddArgs),
     /// Write a herd for the repo around the current directory: its herd file
     /// and lead prompt, plus any missing GitHub issue labels, and, uncommitted,
-    /// any missing tracker doc, docs/agents/loopherd.md and AGENTS.md loopherd
-    /// section. Infers the repo, its default branch, the gh account matching
+    /// any missing tracker doc, docs/agents/loopherd.md, docs/agents/shepherd.md
+    /// stub and AGENTS.md loopherd section. Infers the repo, its default branch, the gh account matching
     /// origin's owner when the herd has a GitHub repo (only a GitHub tracker
     /// needs one) and checks from Cargo.toml and package.json. On a terminal (stdin and stderr, a herdr
     /// pane included) it asks for each with that as the default, asking again
@@ -519,6 +520,12 @@ enum Command {
         /// Check only this herd's file, repo, state and trackers; the install,
         /// herdr and config checks still run.
         herd: Option<String>,
+    },
+    /// Print one of loopherd's user docs, the references `install-hook` writes
+    /// beside the skill. Without a topic, list the topics.
+    Docs {
+        /// tour, setup, install, glossary, herd-file or runbook.
+        topic: Option<String>,
     },
     /// Bring loopherd up to date the way install.toml in the config dir says
     /// it was installed. A release install runs the target release's own
@@ -955,6 +962,7 @@ fn main() -> ExitCode {
             "install-hook",
             run_install_hook(remove, settings, skills_dir),
         ),
+        Command::Docs { topic } => ("docs", run_docs(topic)),
         Command::Update { check, version } => ("update", run_update(check, version)),
         Command::InstallHerdrKeys { remove } => {
             ("install-herdr-keys", run_install_herdr_keys(remove))
@@ -2652,6 +2660,34 @@ fn install_or_remove_skill(
         }
     }
     Ok(())
+}
+
+fn run_docs(topic: Option<String>) -> Result<i32> {
+    let Some(topic) = topic else {
+        let width = references::ALL
+            .iter()
+            .map(|r| r.topic.len())
+            .max()
+            .unwrap_or(0);
+        for reference in &references::ALL {
+            println!("{:width$}  {}", reference.topic, reference.summary);
+        }
+        return Ok(0);
+    };
+    match references::find(&topic) {
+        Some(reference) => {
+            print!("{}", reference.text());
+            Ok(0)
+        }
+        None => {
+            let topics: Vec<&str> = references::ALL.iter().map(|r| r.topic).collect();
+            eprintln!(
+                "loopherd docs: no topic `{topic}`; try one of: {}",
+                topics.join(", ")
+            );
+            Ok(2)
+        }
+    }
 }
 
 fn run_install_hook(

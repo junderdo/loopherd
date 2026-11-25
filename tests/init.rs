@@ -1359,7 +1359,7 @@ fn without_a_tracker_doc_init_writes_githubs_and_the_default_labels_uncommitted(
     assert_eq!(
         text(&status.stdout),
         "?? AGENTS.md\n?? docs/agents/issue-tracker.md\n?? docs/agents/loopherd.md\n\
-         ?? docs/agents/triage-labels.md\n"
+         ?? docs/agents/shepherd.md\n?? docs/agents/triage-labels.md\n"
     );
     assert!(
         text(&out.stdout).contains(
@@ -1825,14 +1825,14 @@ fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
         "{next}"
     );
     assert!(
-        next.contains("  6. Tailor the herd to the repo per \"Setting up a project\""),
+        next.contains("  7. Tailor the herd to the repo per \"Setting up a project\""),
         "{next}"
     );
     assert!(
-        next.contains("  7. Review and commit what init wrote in the repo"),
+        next.contains("  8. Review and commit what init wrote in the repo"),
         "{next}"
     );
-    assert!(next.contains("  10. loopherd lead widgets"), "{next}");
+    assert!(next.contains("  11. loopherd lead widgets"), "{next}");
 }
 
 #[test]
@@ -2658,7 +2658,8 @@ fn on_a_terminal_the_summary_names_the_labels_and_docs_writing_creates() {
             "Writing it also creates the labels ready-for-agent, needs-info, ready-for-human \
              and blocked in acme/widgets where missing, and writes \
              docs/agents/issue-tracker.md, docs/agents/triage-labels.md, \
-             docs/agents/loopherd.md and AGENTS.md in the repo, uncommitted.\r\n"
+             docs/agents/loopherd.md, docs/agents/shepherd.md and AGENTS.md in the repo, \
+             uncommitted.\r\n"
         ),
         "{}",
         text(&out.stdout)
@@ -2877,14 +2878,16 @@ fn in_a_fresh_repo_init_writes_agents_md_pointing_at_the_herd_docs() {
     let stdout = text(&out.stdout);
     assert!(
         stdout.contains(
-            "wrote docs/agents/loopherd.md (uncommitted)\nwrote AGENTS.md (uncommitted)\n"
+            "wrote docs/agents/loopherd.md (uncommitted)\nwrote docs/agents/shepherd.md \
+             (uncommitted)\nwrote AGENTS.md (uncommitted)\n"
         ),
         "{stdout}"
     );
     assert!(
         stdout.contains(
             "Review and commit what init wrote in the repo: docs/agents/issue-tracker.md, \
-             docs/agents/triage-labels.md, docs/agents/loopherd.md and AGENTS.md."
+             docs/agents/triage-labels.md, docs/agents/loopherd.md, docs/agents/shepherd.md \
+             and AGENTS.md."
         ),
         "{stdout}"
     );
@@ -2953,6 +2956,77 @@ fn an_agents_md_with_a_loopherd_section_is_left_as_it_was() {
 }
 
 #[test]
+fn init_writes_a_shepherd_runbook_stub_pointing_at_loopherd_docs_runbook() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    let stub = repo_file(&fixture, "docs/agents/shepherd.md");
+    assert!(stub.contains("`loopherd docs runbook`"), "{stub}");
+    assert!(stub.contains("`loopherd --skill`"), "{stub}");
+    let stdout = text(&out.stdout);
+    assert!(
+        stdout.contains("wrote docs/agents/shepherd.md (uncommitted)"),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains(
+            "Fill in docs/agents/shepherd.md, the shepherd's runbook for this repo; \
+             `loopherd docs runbook` says what each section holds."
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
+fn an_existing_shepherd_runbook_is_left_as_it_was() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
+    fs::write(fixture.repo().join("docs/agents/shepherd.md"), "ours\n").unwrap();
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert_eq!(repo_file(&fixture, "docs/agents/shepherd.md"), "ours\n");
+    let stdout = text(&out.stdout);
+    assert!(!stdout.contains("docs/agents/shepherd.md"), "{stdout}");
+}
+
+#[test]
+fn diff_leaves_a_filled_in_shepherd_runbook_alone() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let path = fixture.repo().join("docs/agents/shepherd.md");
+    fs::write(
+        &path,
+        "# Shepherd runbook\n\nFeed with `loopherd feed widgets`.\n",
+    )
+    .unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
+fn diff_shows_a_missing_shepherd_runbook_as_new() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let path = fixture.repo().join("docs/agents/shepherd.md");
+    fs::remove_file(&path).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let stdout = text(&out.stdout);
+    let header = format!("--- /dev/null\n+++ {} (init now)\n", path.display());
+    assert!(stdout.contains(&header), "{stdout}");
+    assert!(stdout.contains("+# Shepherd runbook\n"), "{stdout}");
+}
+
+#[test]
 fn an_existing_loopherd_doc_is_left_as_it_was() {
     let fixture = Fixture::new(&["acme"]);
     fs::create_dir_all(fixture.repo().join("docs/agents")).unwrap();
@@ -3000,7 +3074,8 @@ fn on_a_terminal_the_summary_names_a_section_added_to_an_existing_agents_md() {
     assert_ok(&out);
     assert!(
         text(&out.stdout).contains(
-            "docs/agents/loopherd.md and a loopherd section in AGENTS.md in the repo, uncommitted."
+            "docs/agents/loopherd.md, docs/agents/shepherd.md and a loopherd section in AGENTS.md \
+             in the repo, uncommitted."
         ),
         "{}",
         text(&out.stdout)
