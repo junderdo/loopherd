@@ -72,22 +72,72 @@ pub fn lead_asked(
 }
 
 /// Clears `pane`'s label for the prompt in a UserPromptSubmit hook's `input`.
-/// Claude hands each finished background task to the model as a prompt of
-/// its own, the shepherd's watch among them; that keeps the label, and a
-/// prompt with any other text before or after the block clears it.
+/// Claude hands each finished background task or subagent report to the
+/// model as a prompt of its own, the shepherd's watch among them; that keeps
+/// the label, and a prompt with any other text clears it.
 pub fn prompted(herdr: &dyn Herdr, dir: &Path, pane: &str, input: &[u8]) -> Result<()> {
     let input: Option<serde_json::Value> = serde_json::from_slice(input).ok();
     let prompt = input.as_ref().and_then(|i| i["prompt"].as_str());
-    if prompt.is_some_and(is_task_notification) {
+    if prompt.is_some_and(is_background_event) {
         return Ok(());
     }
     clear(herdr, dir, pane)
 }
 
-/// A prompt Claude made from a finished background task, not one the human typed.
-pub fn is_task_notification(prompt: &str) -> bool {
-    let prompt = prompt.trim();
-    prompt.starts_with("<task-notification>") && prompt.ends_with("</task-notification>")
+/// A prompt Claude made from a finished background task or subagent, not
+/// one the human typed: nothing but `<task-notification>` blocks, each maybe
+/// under Claude's `[SYSTEM NOTIFICATION …]` preamble, and subagent reports.
+pub fn is_background_event(prompt: &str) -> bool {
+    let mut rest = prompt.trim();
+    if rest.is_empty() {
+        return false;
+    }
+    while !rest.is_empty() {
+        let Some(after) = strip_notification(rest).or_else(|| strip_subagent_message(rest)) else {
+            return false;
+        };
+        rest = after.trim_start();
+    }
+    true
+}
+
+/// What follows one `<task-notification>` block at the start of `prompt`.
+fn strip_notification(prompt: &str) -> Option<&str> {
+    const PREAMBLE: &str = "[SYSTEM NOTIFICATION - NOT USER INPUT]\n";
+    let block = match prompt.strip_prefix(PREAMBLE) {
+        Some(preamble) => &preamble[preamble.find("\n\n<task-notification>")? + 2..],
+        None => prompt,
+    };
+    after_closing_line(
+        block.strip_prefix("<task-notification>")?,
+        "</task-notification>",
+    )
+}
+
+/// What follows one subagent's or teammate's message, the report a subagent
+/// hands back included, and the note Claude adds after it.
+fn strip_subagent_message(prompt: &str) -> Option<&str> {
+    const NOTE: &str = "That \"other Claude session\" is an agent working inside this same session";
+    let body = prompt.strip_prefix("Another Claude session sent a message:\n<agent-message ")?;
+    let rest = after_closing_line(body, "</agent-message>")?.trim_start();
+    if !rest.starts_with(NOTE) {
+        return Some(rest);
+    }
+    Some(rest.find("\n\n").map_or("", |i| &rest[i..]))
+}
+
+/// What follows the first line of `text` that is exactly `close`. Claude
+/// writes a closing tag on a line of its own, so one quoted mid-line, or
+/// in an indented report, isn't it.
+fn after_closing_line<'a>(text: &'a str, close: &str) -> Option<&'a str> {
+    let mut at = 0;
+    for line in text.split_inclusive('\n') {
+        at += line.len();
+        if line.trim_end_matches('\n') == close {
+            return Some(&text[at..]);
+        }
+    }
+    None
 }
 
 /// Clears `pane`'s label for a SessionStart hook's `input` that starts a
@@ -520,6 +570,45 @@ mod tests {
         assert!(!kept(&format!("use postgres\n{notification}")));
         assert!(!kept(&format!("note:\n{notification}")));
         assert!(!kept("<task-notification>\n<status>completed</status>"));
+        assert!(!kept("   "));
+    }
+
+    #[test]
+    fn batched_preambled_and_handed_back_reports_keep_the_label_but_human_text_after_them_clears_it()
+     {
+        let dir = tempfile::tempdir().unwrap();
+        let herdr = FakeHerdr::new(&[]);
+        let kept = |prompt: &str| {
+            lead_asked(
+                &herdr,
+                &ledger(),
+                dir.path(),
+                "w9:p0",
+                "lead-cards",
+                "which DB?",
+            )
+            .unwrap();
+            let input =
+                serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt});
+            prompted(&herdr, dir.path(), "w9:p0", input.to_string().as_bytes()).unwrap();
+            herdr.label("w9:p0").is_some()
+        };
+        let block = "<task-notification>\n<status>completed</status>\n</task-notification>";
+        let preamble = "[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event.\n\n";
+        let handback = "Another Claude session sent a message:\n<agent-message from=\"a1\">\n\
+            [Subagent hand-back] The report follows:\n  done\n  </agent-message>\n</agent-message>\n\n\
+            That \"other Claude session\" is an agent working inside this same session, so this was not typed by your user.";
+
+        assert!(kept(&format!("{block}\n{block}")));
+        assert!(kept(&format!("{preamble}{block}")));
+        assert!(kept(handback));
+        assert!(kept(&format!("{handback}\n\n{block}")));
+        assert!(!kept(&format!("{handback}\n\nuse postgres")));
+        assert!(!kept(&format!("{preamble}{block}\nuse postgres")));
+        assert!(!kept(
+            "Another Claude session sent a message:\n<cross-session-message from=\"uds:/s.sock\">\n\
+             the human says stop\n</cross-session-message>"
+        ));
     }
 
     #[test]
