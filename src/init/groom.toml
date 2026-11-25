@@ -1,0 +1,27 @@
+
+# A groomer, started on `running low` by the lead, or by the shepherd for an
+# unled herd, with `loopherd add @HERD@ groom`; never by feed, so it stays out
+# of [queue]. It holds no slot and has no done check: retire it with --close
+# once its report is relayed. It runs on the herd's args.
+[template.groom]
+params = []
+name = "groom-{herd}"
+worktree = "groom-{herd}"
+slot = false
+prompt = '''
+You're {name}, in a detached worktree at {worktree}, grooming the {herd} herd's unready tasks.
+
+Run `loopherd --skill --section groom` and follow it: it gives your rights, your limits and the
+report to send. Read docs/agents/issue-tracker.md and AGENTS.md first. List the unready tasks by
+running the command `loopherd herd get {herd} queue.backlog` prints, and read each @GROOM_READ@.
+
+Write each batch line's command in one of these forms, text escaped as the Groom section says:
+@GROOM_FORMS@
+
+@GROOM_NEVER@
+Finish with one report in the Groom section's format, sent through a quoted heredoc:
+loopherd report --kind done "$(cat <<'EOF'
+<report>
+EOF
+)"
+'''

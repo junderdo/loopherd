@@ -29,6 +29,31 @@ const OTHER_ISSUE: &str = include_str!("init/other-issue.toml");
 const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
 const MERGED_GITHUB: &str = include_str!("init/merged-github.toml");
 const LEAD: &str = include_str!("init/lead.md");
+const GROOM: &str = include_str!("init/groom.toml");
+
+const GITHUB_GROOM_READ: &str =
+    "with `@GH_TOKEN@ gh issue view <n> --repo @OWNER_REPO@ --comments`";
+const GITHUB_GROOM_FORMS: &str = "\
+- mark ready: `@GH_TOKEN@ gh issue edit <n> --repo @OWNER_REPO@ --add-label @READY_FOR_AGENT@`
+- needs spec: `@GH_TOKEN@ gh issue comment <n> --repo @OWNER_REPO@ --body \"<what's missing>\"`
+- close: `@GH_TOKEN@ gh issue close <n> --repo @OWNER_REPO@ --reason \"not planned\"  # <reason>`";
+const GITHUB_GROOM_NEVER: &str = "Never add @READY_FOR_AGENT@, close or move an issue, or add or remove @NEEDS_INFO@ or blocked.";
+const LOCAL_GROOM_READ: &str = "issue file at the path it prints";
+const LOCAL_GROOM_FORMS: &str = "\
+Start each command with `cd @CHECKOUT@ && [ \"$(git branch --show-current)\" = @BRANCH@ ] && git pull -q --ff-only origin @BRANCH@ && `
+and end it, before any `# <reason>`, with ` && git push -q origin HEAD:@BRANCH@`, so it lands
+on an up-to-date @BRANCH@:
+- mark ready: `sed -i 's/^Status:.*/& @READY_FOR_AGENT@/' <path> && git commit -qm \"Mark <path> ready\" -- <path>`
+- needs spec: `(grep -q '^## Comments' <path> || printf '\\n## Comments\\n' >> <path>) && printf '\\n%s\\n' \"<what's missing>\" >> <path> && git commit -qm \"Comment on <path>\" -- <path>`
+- close: `sed -i 's/^Status:.*/Status: closed/' <path> && git commit -qm \"Close <path>\" -- <path>  # <reason>`";
+const LOCAL_GROOM_NEVER: &str = "Never change a Status: line, which marks a task ready, closes it and holds @NEEDS_INFO@ and\nblocked, and commit nothing.";
+const OTHER_GROOM_READ: &str = "with the tracker's own command (fill in)";
+const OTHER_GROOM_FORMS: &str = "\
+- mark ready: (fill in)
+- needs spec, a comment saying what's missing: (fill in)
+- close: (fill in)";
+const OTHER_GROOM_NEVER: &str =
+    "Never mark a task ready, close or move one, or add or remove @NEEDS_INFO@ or blocked.";
 
 const LOCAL_GH_NOTE: &str = "\nRun every gh command as @ACCOUNT@, prefixed with
 `@GH_TOKEN@` as in the commands below.
@@ -92,6 +117,14 @@ pub struct Request<'a> {
     pub merge_guard: Option<MergeGuard>,
     /// Tokens or a percentage of the window, as the human gave it.
     pub context_limit: Option<String>,
+    /// Templates to add without asking.
+    pub with: &'a [Template],
+}
+
+/// A template init offers beyond the herd's own, asked on a terminal.
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+pub enum Template {
+    Groom,
 }
 
 struct GitHub {
@@ -122,6 +155,7 @@ struct Herd {
     docs: Vec<agents::Doc>,
     /// What the human writes in the repo that init wouldn't.
     agents_steps: Vec<String>,
+    groom: bool,
 }
 
 /// Writes the herd file and its lead prompt and creates missing labels,
@@ -530,6 +564,11 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             Ok(branch.to_string())
         },
     )?;
+    let groom = ask.yes(
+        "Add a groom template, to triage unready tasks when the herd runs low?",
+        req.with.contains(&Template::Groom).then_some(true),
+        ask.terminal || recorded.as_ref().is_some_and(|r| r.groom),
+    )?;
     let tracker_docs = tracker
         .writes
         .drain(..)
@@ -577,6 +616,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         config_limit,
         docs,
         agents_steps: plan.steps,
+        groom,
     })
 }
 
@@ -759,8 +799,8 @@ fn summary(herd: &Herd) -> String {
     };
     format!(
         "\nHerd {name}:\n  repo    {repo}\n  {branch}\n  \
-         max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n\
-         {also}{no_merged}",
+         max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n  \
+         groom   {groom}\n{also}{no_merged}",
         name = herd.name,
         repo = herd.repo.display(),
         max = herd.max,
@@ -770,6 +810,7 @@ fn summary(herd: &Herd) -> String {
             (true, Some(guard)) => format!("yes, merge_guard {}", guard.name()),
         },
         checks = herd.checks.join("; "),
+        groom = if herd.groom { "yes" } else { "no" },
     )
 }
 
@@ -963,11 +1004,39 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     values.push(("TEMPLATE", template.trim_end()));
     values.push(("LEAD_TABLE", &lead_table));
     values.push(("LEAD_TASKS", &lead_tasks));
+    let groom = match herd.groom {
+        true => groom(herd, &values)?,
+        false => String::new(),
+    };
+    values.push(("GROOM", &groom));
     let lead = herd.lead.then(|| (lead_file, fill(LEAD, &values)));
     Ok(lead
         .into_iter()
         .chain([(herd_file, fill(HERD, &values))])
         .collect())
+}
+
+/// The `[template.groom]` for the herd's tracker.
+fn groom(herd: &Herd, values: &[(&str, &str)]) -> Result<String> {
+    let (read, forms, never) = match herd.tracker.kind {
+        tracker::Kind::GitHub => (GITHUB_GROOM_READ, GITHUB_GROOM_FORMS, GITHUB_GROOM_NEVER),
+        tracker::Kind::Local => (LOCAL_GROOM_READ, LOCAL_GROOM_FORMS, LOCAL_GROOM_NEVER),
+        tracker::Kind::Other => (OTHER_GROOM_READ, OTHER_GROOM_FORMS, OTHER_GROOM_NEVER),
+    };
+    let repo = herd.repo.to_string_lossy();
+    let checkout = prompt_text(&format!("'{}'", repo.replace('\'', r"'\''")))?;
+    let values = [values, &[("CHECKOUT", checkout.as_str())]].concat();
+    let snippets = [read, forms, never].map(|text| fill(text, &values));
+    let values = [
+        values.as_slice(),
+        &[
+            ("GROOM_READ", snippets[0].as_str()),
+            ("GROOM_FORMS", &snippets[1]),
+            ("GROOM_NEVER", &snippets[2]),
+        ],
+    ]
+    .concat();
+    Ok(fill(GROOM, &values))
 }
 
 fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
@@ -1216,6 +1285,7 @@ struct Recorded {
     /// The `owner/name` that `merged` checks PRs on.
     github: Option<String>,
     has_merged: bool,
+    groom: bool,
 }
 
 impl Recorded {
@@ -1270,6 +1340,9 @@ impl Recorded {
                 })
                 .map(String::from),
             has_merged: issue.is_some_and(|t| t.contains_key("merged")),
+            groom: herd
+                .get("template")
+                .is_some_and(|t| t.get("groom").is_some()),
         })
     }
 }

@@ -744,6 +744,9 @@ struct InitArgs {
     /// now, inferring again; write nothing. Exits 1 when they differ, 2 on error.
     #[arg(long)]
     diff: bool,
+    /// A template to add, asked on a terminal and left out otherwise; repeatable.
+    #[arg(long = "with", value_enum, value_name = "TEMPLATE")]
+    with: Vec<init::Template>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -2891,6 +2894,7 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
         lead: args.no_lead.then_some(false),
         merge_guard: args.merge_guard,
         context_limit: args.context_limit,
+        with: &args.with,
     };
     if args.diff {
         return Ok(match init::diff(&paths, req)? {

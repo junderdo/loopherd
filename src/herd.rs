@@ -1489,6 +1489,8 @@ fn describe(
         .template
         .iter()
         .filter(|(_, t)| !parsed.after_merge.is_empty() && t.merged.is_none())
+        // A slotless member with no done is retired by hand, never after a merge.
+        .filter(|(_, t)| t.slot || t.done.is_some())
         .map(|(name, _)| {
             format!("  warning: template {name} has no merged check, so after_merge never runs for its members")
         });
@@ -2975,6 +2977,26 @@ args = ["--model", "opus"]
                 "  after_merge: git pull --ff-only; scripts/install",
                 "  warning: template chat has no merged check, so after_merge never runs for its members",
             ]
+        );
+        assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_doesnt_warn_of_a_slotless_template_with_no_done_lacking_a_merged_check() {
+        let herd = "repo = \"/r\"\nafter_merge = [\"scripts/install\"]\n\
+                    [template.groom]\nparams = []\nslot = false\nprompt = \"go\"\n\
+                    [template.side]\nparams = []\nslot = false\ndone = \"true\"\nprompt = \"go\"\n";
+        let config = Config::with(&[("prs", herd)]);
+
+        let (report, code) = herds(&config.paths(), &config.settings()).unwrap();
+
+        assert!(
+            !report.contains("template groom has no merged check"),
+            "{report}"
+        );
+        assert!(
+            report.contains("template side has no merged check"),
+            "{report}"
         );
         assert_eq!(code, 0);
     }
