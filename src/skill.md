@@ -1265,7 +1265,8 @@ backlog`) so the human can approve them in one go.
 
 - **Rights.** You may edit a card's text, comment on it, mark a duplicate
   by a comment naming the card it duplicates, and check whether a card is
-  stale against the code.
+  stale against the code. Edit text only with the command your prompt
+  names for it; with none, comment the edit instead.
 - **Limits.** Never add `ready-for-agent`, archive a card, move a card
   between lists, or add or remove `need-human` or `blocked`. Those are the
   shepherd's, on the human's word. Commit nothing.

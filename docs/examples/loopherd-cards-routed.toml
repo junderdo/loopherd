@@ -109,6 +109,8 @@ report to send. Read docs/agents/issue-tracker.md and AGENTS.md first. List the 
 running the shell command held in the TOML string `loopherd herd get {herd} queue.backlog` prints
 (the text inside its quotes, not the output as is), and read each with
 `scripts/trello show LH-<n>`.
+Edit a card's description with `scripts/trello desc LH-<n> -`, its whole new text on stdin
+through a quoted heredoc.
 
 Write each batch line's command in one of these forms, text escaped as the Groom section says:
 - mark ready: `scripts/trello label LH-<n> +ready-for-agent`
