@@ -2959,7 +2959,8 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
         merge_guard: args.merge_guard,
         context_limit: args.context_limit,
         with: &args.with,
-        running_leads: &running_leads()?,
+        // Only a re-run's migration offers read it, to note a running lead.
+        running_leads: &running_leads().unwrap_or_default(),
     };
     if args.diff {
         return Ok(match init::diff(&paths, req)? {

@@ -201,6 +201,8 @@ struct Herd {
     /// What the human writes in the repo that init wouldn't.
     agents_steps: Vec<String>,
     groom: bool,
+    /// Whether it has the attended grill template; only a herd from before it lacks one.
+    grill: bool,
 }
 
 /// Writes the herd file, its lead and grill prompts and creates missing labels,
@@ -631,6 +633,7 @@ fn settle(
         docs,
         agents_steps: plan.steps,
         groom,
+        grill: true,
     })
 }
 
@@ -677,7 +680,12 @@ fn ask_context_limit(
             if limit.is_empty() {
                 return Ok(None);
             }
+            let unchanged = limit == default;
             let limit = crate::context::limit("context_limit", limit)?;
+            // A re-run keeps a herd's value that a later config.toml put over the cap.
+            if unchanged {
+                return Ok(Some(limit));
+            }
             if limit.of(cap.window) > cap.limit {
                 bail!(
                     "context_limit {limit} is over {}, 80% of the {}-token context window",
@@ -1125,7 +1133,10 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     let issue_done = fill(done, &values);
     values.push(("DONE", issue_done.trim_end()));
     let template = fill(template, &values);
-    let (grill, grill_prompt) = grill(herd, &values, done);
+    let (grill, grill_prompt) = match herd.grill {
+        true => grill(herd, &values, done),
+        false => (String::new(), String::new()),
+    };
     let lead_table = match herd.lead {
         true => format!("\n{}", fill(LEAD_TABLE, &values)),
         false => String::new(),
@@ -1141,12 +1152,11 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     values.push(("GROOM", &groom));
     values.push(("GRILL", &grill));
     let lead = herd.lead.then(|| (lead_file, fill(LEAD, &values)));
+    let grill = herd.grill.then(|| (grill_file(paths, name), grill_prompt));
     Ok(lead
         .into_iter()
-        .chain([
-            (grill_file(paths, name), grill_prompt),
-            (herd_file, fill(HERD, &values)),
-        ])
+        .chain(grill)
+        .chain([(herd_file, fill(HERD, &values))])
         .collect())
 }
 
@@ -1513,6 +1523,7 @@ struct Recorded {
     account: Option<String>,
     has_merged: bool,
     groom: bool,
+    grill: bool,
 }
 
 impl Recorded {
@@ -1577,6 +1588,9 @@ impl Recorded {
                 })
                 .map(String::from),
             has_merged: issue.is_some_and(|t| t.contains_key("merged")),
+            grill: herd
+                .get("template")
+                .is_some_and(|t| t.get("grill").is_some()),
             groom: herd
                 .get("template")
                 .is_some_and(|t| t.get("groom").is_some()),

@@ -629,6 +629,73 @@ fn a_rerun_without_a_terminal_changes_what_flags_set_and_lists_pending_migration
 }
 
 #[test]
+fn a_rerun_changes_max_in_a_crlf_herd_file_or_one_without_a_final_newline() {
+    for (name, shape) in [
+        (
+            "crlf",
+            (|text: &str| text.replace('\n', "\r\n")) as fn(&str) -> String,
+        ),
+        ("no final newline", |text: &str| text.trim_end().to_string()),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        assert_ok(&fixture.init(&[]));
+        let file = fixture.herds().join("widgets.toml");
+        let was = shape(&fs::read_to_string(&file).unwrap());
+        fs::write(&file, &was).unwrap();
+
+        let out = fixture.loopherd(&["init", "--max", "5"]);
+
+        assert_ok(&out);
+        let ending = if name == "crlf" { "\r\n" } else { "\n" };
+        let now = fs::read_to_string(&file).unwrap();
+        // toml_edit ends the file with a newline.
+        assert_eq!(
+            now.replace(&format!("max = 5{ending}"), &format!("max = 3{ending}"))
+                .trim_end(),
+            was.trim_end(),
+            "{name}"
+        );
+    }
+}
+
+#[test]
+fn a_rerun_switches_a_leads_merge_guard_to_credentials_as_a_fresh_init_writes_it() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--merge-guard", "credentials"]));
+    let guarded = fixture.config_listing();
+    fs::remove_dir_all(fixture.herds()).unwrap();
+    assert_ok(&fixture.init(&[]));
+
+    let out = fixture.loopherd(&["init", "--merge-guard", "credentials"]);
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("loopherd merge-guard widgets"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(without_locks(fixture.config_listing()), guarded);
+}
+
+#[test]
+fn a_rerun_keeps_a_context_limit_a_later_config_put_over_the_cap() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let file = fixture.herds().join("widgets.toml");
+    let over = fs::read_to_string(&file).unwrap().replace(
+        "[template.issue]\n",
+        "[template.issue]\ncontext_limit = 5000000\n",
+    );
+    fs::write(&file, &over).unwrap();
+
+    let out = fixture.loopherd(&["init"]);
+
+    assert_ok(&out);
+    assert_eq!(text(&out.stdout), "herd widgets is up to date\n");
+    assert_eq!(fs::read_to_string(&file).unwrap(), over);
+}
+
+#[test]
 fn a_rerun_naming_a_herd_that_runs_another_repo_is_refused() {
     let fixture = Fixture::new(&["acme"]);
     assert_ok(&fixture.init(&[]));
@@ -2490,7 +2557,7 @@ fn on_a_terminal_a_rerun_entered_through_asks_each_setting_and_changes_nothing()
         "max, how many workers run at once (3): ".into(),
         "merge_guard (hook): ".into(),
         "Enter leaves it unset, so the default 250000 applies: ".into(),
-        "gh account (logged in: acme) (acme): ".into(),
+        "gh account (acme): ".into(),
         "Default branch (main): ".into(),
         "herd widgets is up to date".into(),
     ] {
@@ -2505,6 +2572,11 @@ fn on_a_terminal_a_rerun_entered_through_asks_each_setting_and_changes_nothing()
         assert!(!shown.contains(unasked), "{unasked} in\n{shown}");
     }
     assert_eq!(fixture.config_listing(), before);
+}
+
+fn without_locks(mut listing: Vec<(PathBuf, String)>) -> Vec<(PathBuf, String)> {
+    listing.retain(|(path, _)| !path.to_string_lossy().ends_with(".lock"));
+    listing
 }
 
 /// Fills an other tracker's empty queue source, as its human would.
@@ -2570,6 +2642,74 @@ fn on_a_terminal_a_rerun_changes_max_for_each_tracker() {
         let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
         assert!(herd.contains("\nmax = 7\n"), "{tracker:?}: {herd}");
     }
+}
+
+#[test]
+fn on_a_terminal_a_rerun_adds_a_lead_guarded_by_credentials_as_init_writes_one() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--merge-guard", "credentials"]));
+    let guarded = fixture.config_listing();
+    fs::remove_dir_all(fixture.herds()).unwrap();
+    assert_ok(&fixture.init(&["--no-lead"]));
+    let typed = [
+        "",            // repo
+        "",            // checks
+        "",            // max
+        "y",           // lead
+        "credentials", // merge_guard
+        "y",           // apply the lead
+        "y",           // apply credentials
+        "",
+        "",
+        "",
+        "",
+    ];
+
+    let out = fixture.on_terminal(&[], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    assert_eq!(without_locks(fixture.config_listing()), guarded);
+}
+
+#[test]
+fn on_a_terminal_enter_keeps_a_gh_account_gh_has_since_logged_out_of() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    fixture.gh_json(
+        "auth.json",
+        r#"{"hosts": {"github.com": [{"login": "other", "state": "success"}]}}"#,
+    );
+    let before = fixture.config_listing();
+
+    let out = fixture.on_terminal(&[], &"\n".repeat(12));
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("gh account (acme): "),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(fixture.config_listing(), before);
+}
+
+#[test]
+fn on_a_terminal_a_rerun_of_a_herd_from_before_the_grill_still_carries_a_branch() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let file = fixture.herds().join("widgets.toml");
+    let herd = fs::read_to_string(&file).unwrap();
+    let start = herd.find("\n[template.grill]").unwrap();
+    let end = start + 1 + herd[start + 1..].find("\n[").unwrap();
+    fs::write(&file, format!("{}{}", &herd[..start], &herd[end..])).unwrap();
+    fs::remove_file(fixture.herds().join("widgets-grill.md")).unwrap();
+    let typed = ["", "", "", "", "", "", "trunk", "y", "n", "", ""];
+
+    let out = fixture.on_terminal(&[], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    let herd = fs::read_to_string(&file).unwrap();
+    assert!(herd.contains("--base trunk"), "{}", text(&out.stdout));
+    assert!(!fixture.herds().join("widgets-grill.md").exists());
 }
 
 #[test]
@@ -2724,9 +2864,7 @@ fn on_a_terminal_a_rerun_adds_a_lead_as_init_writes_one() {
         "{}",
         text(&out.stdout)
     );
-    let mut listing = fixture.config_listing();
-    listing.retain(|(path, _)| !path.to_string_lossy().ends_with(".lock"));
-    assert_eq!(listing, led);
+    assert_eq!(without_locks(fixture.config_listing()), led);
 }
 
 #[test]

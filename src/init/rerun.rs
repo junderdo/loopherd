@@ -3,7 +3,7 @@
 //! the herd's pending migrations as `loopherd herd upgrade` does.
 
 use std::fs;
-use std::io::BufRead;
+use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
@@ -15,6 +15,7 @@ use super::{
     ask_max, checks, explain, herd, lead_defaults, merge_guard, parse_branch, rendered,
     switch_lines, tracker, write_new,
 };
+use crate::line_ending::LineEnding;
 
 /// Re-runs init on `name`, the herd that runs `repo`.
 pub(super) fn rerun(
@@ -65,7 +66,11 @@ pub(super) fn rerun(
         now: SystemTime::now(),
         terminal: ask.terminal.then_some(&mut input as &mut dyn BufRead),
     };
-    herd::upgrade(paths, Some(&name), how, &mut std::io::stdout())?;
+    let mut out: Box<dyn Write> = match ask.terminal {
+        true => Box::new(std::io::stderr()),
+        false => Box::new(std::io::stdout()),
+    };
+    herd::upgrade(paths, Some(&name), how, &mut out)?;
     let mut lines = vec![];
     if !run.steps.is_empty() {
         lines.push("Next:".into());
@@ -93,7 +98,7 @@ fn refuse_fixed_flags(req: &Request) -> Result<()> {
     Ok(())
 }
 
-/// The herd as an earlier init would have settled it, from its herd file.
+/// The herd as today's init would settle it from what its herd file records.
 fn base(paths: &Paths, repo: &Path, name: &str, recorded: &Recorded) -> Option<Herd> {
     let doc = tracker::read(&repo.join(tracker::TRACKER_DOC)).ok()?;
     let tracker = tracker::resolve(repo, doc.is_none().then_some(super::Tracker::GitHub)).ok()?;
@@ -119,6 +124,7 @@ fn base(paths: &Paths, repo: &Path, name: &str, recorded: &Recorded) -> Option<H
         docs: vec![],
         agents_steps: vec![],
         groom: recorded.groom,
+        grill: recorded.grill,
     })
 }
 
@@ -188,8 +194,44 @@ impl Rerun<'_> {
         if guard == current {
             return Ok(());
         }
-        if self.set_key(&["lead", "merge_guard"], Some(value(guard.name())))? {
-            self.guarded(guard);
+        self.switch_guard(current, guard)
+    }
+
+    /// Credentials also change every gh command's token and require sandboxed
+    /// workers, so the switch is carried as init's text; back to hook, the key
+    /// alone does.
+    fn switch_guard(&mut self, from: MergeGuard, to: MergeGuard) -> Result<()> {
+        let carried = match &self.base {
+            Some(base) => {
+                let from = Herd {
+                    merge_guard: Some(from),
+                    ..base.clone()
+                };
+                let to = Herd {
+                    merge_guard: Some(to),
+                    ..base.clone()
+                };
+                self.carried(&from, &to)?
+            }
+            None => None,
+        };
+        let applied = match carried {
+            Some(edits) if !edits.is_empty() => self.offer(edits)?,
+            _ if to == MergeGuard::Hook => {
+                self.set_key(&["lead", "merge_guard"], Some(value(to.name())))?
+            }
+            _ => {
+                eprintln!(
+                    "merge_guard: not changed, as the herd's text isn't init's own; in {} set \
+                     [lead] merge_guard = \"credentials\", [worker] sandbox = \"require\" and \
+                     each gh command's GH_TOKEN=${{GH_TOKEN:-$(gh auth token --user <login>)}}",
+                    self.herd_file.display()
+                );
+                false
+            }
+        };
+        if applied {
+            self.guarded(to);
         }
         Ok(())
     }
@@ -200,14 +242,19 @@ impl Rerun<'_> {
         given: Option<bool>,
         guard: Option<MergeGuard>,
     ) -> Result<()> {
+        let Some(base) = self.base.clone() else {
+            return self.skip(guard.is_some(), "lead", "a [lead] table");
+        };
         let question =
             "Give the herd a lead, a member that feeds, watches and verifies its workers?";
         if !self.ask.yes(question, explain::LEAD, given, false)? {
+            if guard.is_some() {
+                bail!(
+                    "--merge-guard is for a lead, and init adds one to a herd only on a terminal"
+                );
+            }
             return Ok(());
         }
-        let Some(base) = self.base.clone() else {
-            return self.skip(true, "lead", "a [lead] table");
-        };
         if fs::symlink_metadata(lead_file).is_ok() {
             eprintln!(
                 "lead: not added, as {} already exists and init never replaces a lead prompt",
@@ -229,9 +276,11 @@ impl Rerun<'_> {
                  and its merged check names none"
             );
         }
+        // Added with hook, whose [lead] table is the only text it adds;
+        // credentials is then its own change.
         let led = Herd {
             lead: true,
-            merge_guard: guard,
+            merge_guard: guard.map(|_| MergeGuard::Hook),
             ..base.clone()
         };
         let (with_lead, without_lead) = (rendered(self.paths, &led)?, rendered(self.paths, &base)?);
@@ -248,14 +297,20 @@ impl Rerun<'_> {
         ) else {
             bail!("init rendered no lead prompt or herd file");
         };
-        let was = fs::read_to_string(self.herd_file)?;
-        let table: String = similar::TextDiff::from_lines(&without_lead, &with_lead)
+        let diff = similar::TextDiff::from_lines(&without_lead, &with_lead);
+        if diff
+            .iter_all_changes()
+            .any(|change| change.tag() == similar::ChangeTag::Delete)
+        {
+            bail!("init's [lead] table changes more of the herd file than the table");
+        }
+        let table: String = diff
             .iter_all_changes()
             .filter(|change| change.tag() == similar::ChangeTag::Insert)
             .map(|change| change.value())
             .collect();
+        let was = fs::read_to_string(self.herd_file)?;
         let now = format!("{}\n{}", was.trim_end(), table.trim_end_matches('\n')) + "\n";
-        // The prompt first, as the herd file names it.
         let edits = vec![
             Edit {
                 path: lead_file.to_path_buf(),
@@ -268,12 +323,13 @@ impl Rerun<'_> {
                 now,
             },
         ];
-        if self.offer(edits)? {
-            self.base = Some(led);
-            if let Some(guard) = guard {
-                self.guarded(guard);
-            }
-            self.steps.push(format!("loopherd lead {}", self.name));
+        if !self.offer(edits)? {
+            return Ok(());
+        }
+        self.base = Some(led);
+        self.steps.push(format!("loopherd lead {}", self.name));
+        if guard == Some(MergeGuard::Credentials) {
+            self.switch_guard(MergeGuard::Hook, MergeGuard::Credentials)?;
         }
         Ok(())
     }
@@ -336,7 +392,24 @@ impl Rerun<'_> {
             return Ok(());
         }
         let current = base.github.map(|g| g.account).unwrap_or_default();
-        let account = account(&current, given, self.ask)?;
+        // Checked against gh's logins only when it changes, so Enter keeps an
+        // account gh has since logged out of.
+        let logged_in =
+            |wanted: &str| account(&current, Some(wanted), &ask::Asker { terminal: false });
+        let account = match given {
+            Some(given) => logged_in(given)?,
+            None => self.ask.value(
+                "gh account",
+                explain::GH_ACCOUNT,
+                None,
+                Some(&current),
+                "",
+                |answer| match answer == current {
+                    true => Ok(current.clone()),
+                    false => logged_in(answer),
+                },
+            )?,
+        };
         self.carry(|herd| {
             if let Some(github) = &mut herd.github {
                 github.account = account.clone();
@@ -446,32 +519,66 @@ impl Rerun<'_> {
         }
         let edit = Edit {
             path: self.herd_file.to_path_buf(),
+            now: LineEnding::of(&was).apply(&doc.to_string()),
             was,
-            now: doc.to_string(),
         };
         self.offer(vec![edit])
     }
 
-    /// Shows each edit's diff and, on a yes on a terminal or off one, makes them.
+    /// Shows each edit's diff and, on a yes on a terminal or off one, makes
+    /// them: new files, then the checked herd file, undoing the new files if
+    /// it is refused, then the files it changes.
     fn offer(&mut self, edits: Vec<Edit>) -> Result<bool> {
+        let mut shown = String::new();
         for edit in &edits {
-            let shown = edit.path.display().to_string();
+            let path = edit.path.display().to_string();
             let old_name = match edit.was.is_empty() {
                 true => "/dev/null",
-                false => &shown,
+                false => &path,
             };
             let diff = similar::TextDiff::from_lines(&edit.was, &edit.now);
-            print!("{}", diff.unified_diff().header(old_name, &shown));
+            shown.push_str(&diff.unified_diff().header(old_name, &path).to_string());
+        }
+        match self.ask.terminal {
+            true => eprint!("{shown}"),
+            false => print!("{shown}"),
         }
         if self.ask.terminal && !self.ask.yes("Apply?", "", None, true)? {
             return Ok(false);
         }
-        for edit in edits {
-            match edit.path == self.herd_file {
-                true => herd::rewrite(self.paths, self.name, &edit.was, &edit.now)?,
-                false if edit.was.is_empty() => write_new(&edit.path, &edit.now)?,
-                false => herd::replace(&edit.path, &edit.now)?,
+        let (new, changed): (Vec<_>, Vec<_>) = edits
+            .into_iter()
+            .partition(|edit| edit.was.is_empty() && edit.path != self.herd_file);
+        let mut written: Vec<&Path> = vec![];
+        let undo = |written: &[&Path]| {
+            for path in written {
+                let _ = fs::remove_file(path);
             }
+        };
+        for edit in &new {
+            if let Err(e) = write_new(&edit.path, &edit.now) {
+                undo(&written);
+                return Err(e);
+            }
+            written.push(&edit.path);
+        }
+        let (herd_edits, prompts): (Vec<_>, Vec<_>) = changed
+            .into_iter()
+            .partition(|edit| edit.path == self.herd_file);
+        for edit in herd_edits {
+            if let Err(e) = herd::rewrite(self.paths, self.name, &edit.was, &edit.now) {
+                undo(&written);
+                return Err(e);
+            }
+        }
+        for edit in prompts {
+            if fs::read_to_string(&edit.path)? != edit.was {
+                bail!(
+                    "{} changed while init asked; run it again",
+                    edit.path.display()
+                );
+            }
+            herd::replace(&edit.path, &edit.now)?;
         }
         Ok(true)
     }

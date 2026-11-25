@@ -82,18 +82,18 @@ pub fn unset(paths: &Paths, herd: &str, key: &str) -> Result<bool> {
     })
 }
 
-/// Replaces `herd`'s file, which reads `was`, with `now`, once that passes
-/// the checks `loopherd herds` makes; refuses a file changed since it read `was`.
+/// Replaces `herd`'s file, which reads `was`, with `now` in its own line
+/// ending, once that passes the checks `loopherd herds` makes; refuses a file
+/// changed since it read `was`.
 pub fn rewrite(paths: &Paths, herd: &str, was: &str, now: &str) -> Result<()> {
-    edit(paths, herd, |doc| {
-        let file = file_of(&paths.herds, herd)?;
-        if doc.to_string() != was {
-            bail!("{} changed while init asked; run it again", file.display());
-        }
-        *doc = parse(now, &file)?;
-        Ok(true)
-    })?;
-    Ok(())
+    let file = file_of(&paths.herds, herd)?;
+    let file = fs::canonicalize(&file).with_context(|| format!("read {}", file.display()))?;
+    let _lock = lock(&file)?;
+    let original = read_text(&file)?;
+    if original != was {
+        bail!("{} changed while init asked; run it again", file.display());
+    }
+    write_checked(paths, herd, &file, &original, now)
 }
 
 /// Applies `change` to `herd`'s file under the file's lock and, when it
@@ -113,16 +113,22 @@ pub(super) fn edit(
     if !change(&mut doc)? {
         return Ok(false);
     }
-    let text = LineEnding::of(&original).apply(&doc.to_string());
+    write_checked(paths, herd, &file, &original, &doc.to_string())?;
+    Ok(true)
+}
+
+/// Replaces `file`, which read `original`, with `text` in its line ending,
+/// once that passes the checks `loopherd herds` makes.
+fn write_checked(paths: &Paths, herd: &str, file: &Path, original: &str, text: &str) -> Result<()> {
+    let text = LineEnding::of(original).apply(text);
     // A file that was already invalid needs its own fix, whatever the edit.
-    let fix = match check(herd, &original, paths, Fix::Commands) {
+    let fix = match check(herd, original, paths, Fix::Commands) {
         Ok(_) => Fix::Edit,
         Err(_) => Fix::Commands,
     };
     check(herd, &text, paths, fix)
         .with_context(|| format!("refused, {} is unchanged", file.display()))?;
-    replace(&file, &text)?;
-    Ok(true)
+    replace(file, &text)
 }
 
 /// Replaces `file`, or a symlink's target, with `text` through a temp file
