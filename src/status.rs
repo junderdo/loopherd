@@ -9,7 +9,7 @@ use anyhow::Result;
 
 use crate::feed::{claimable_count, run_in_repo, run_source};
 use crate::herd::{self, Paths};
-use crate::herd_view::{Herd, Member, Options, QueueTasks, Tasks, View, view};
+use crate::herd_view::{Herd, Member, Options, QueueTasks, Tasks, View, Waiting, view};
 use crate::herdr::{Herdr, MalformedReply};
 use crate::ledger::{AgentRecord, Ledger};
 use crate::pause;
@@ -53,7 +53,11 @@ pub fn read(
     options: Options,
     subagents: Option<&Subagents>,
 ) -> Result<Read> {
-    read_with(herdr, ledger, Some(pauses), options, None, true, subagents)
+    let mut read = read_with(herdr, ledger, Some(pauses), options, None, true, subagents)?;
+    if let Some(mailboxes) = subagents {
+        mark_waits(&mut read.view, mailboxes);
+    }
+    Ok(read)
 }
 
 /// [`read`] without each member's branch, which costs a git call per member,
@@ -268,6 +272,7 @@ fn status_of(
     } = read_with(herdr, ledger, Some(pauses), options, only, true, listed)?;
     if let Some(mailboxes) = subagents {
         mark_stalls(&mut view, mailboxes, queues.map(|q| q.paths));
+        mark_waits(&mut view, mailboxes);
     }
     if let Some(queues) = queues {
         add_tasks(&mut view.herds, queues, ledger, only);
@@ -320,6 +325,20 @@ fn mark_stalls(view: &mut View, mailboxes: &Subagents, paths: Option<&Paths>) {
                 member.stalled = Some(parked.minutes());
             }
         }
+    }
+}
+
+/// Marks each open lead waiting on a question or gate request with its age.
+fn mark_waits(view: &mut View, mailboxes: &Subagents) {
+    let leads = view.herds.iter_mut().flat_map(|h| h.members.iter_mut());
+    for lead in leads.filter(|m| m.lead && !m.gone && m.retired.is_none()) {
+        lead.waiting = crate::awaiting::wait(mailboxes.mailboxes, &lead.name).map(|wait| {
+            let age = mailboxes.now.duration_since(wait.since).unwrap_or_default();
+            Waiting {
+                kind: wait.kind,
+                minutes: age.as_secs() / 60,
+            }
+        });
     }
 }
 
@@ -464,10 +483,18 @@ pub fn label(member: &Member) -> String {
         (Some("unknown"), _) => "retired".into(),
         (Some(at), _) => format!("retired {at}"),
         (None, true) => "gone".into(),
-        (None, false) => match member.stalled {
-            Some(minutes) => format!("stalled {minutes}m"),
-            None => member.status.as_str().into(),
-        },
+        (None, false) => {
+            let status = match member.stalled {
+                Some(minutes) => format!("stalled {minutes}m"),
+                None => member.status.as_str().into(),
+            };
+            match member.waiting {
+                Some(Waiting { kind, minutes }) => {
+                    format!("{status}, {} waiting {minutes}m", kind.as_str())
+                }
+                None => status,
+            }
+        }
     }
 }
 
@@ -1529,6 +1556,80 @@ gone: no live agent matches it; `loopherd revive` can bring it back
         assert_eq!(named("lh-42")["subagents"], serde_json::json!([]));
         assert_eq!(named("old")["gone"], true);
         assert_eq!(named("old")["subagents"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn a_lead_s_row_shows_how_long_its_oldest_question_or_gate_request_has_waited() {
+        use crate::report::{Body, Kind};
+        let mailboxes = tempfile::tempdir().unwrap();
+        let m = mailboxes.path();
+        let herdr =
+            herdr().with_raw_agent(agent(Some("lead-prs"), "w1:plead-prs", AgentStatus::Idle));
+        let mut ledger = ledger();
+        let mut lead = entry("lead-prs", Some("prs"), "lead-prs");
+        lead.role = Some(crate::ledger::Role::Lead);
+        ledger.0.insert(lead.name.clone(), lead);
+        let at = |now: &str| Subagents {
+            mailboxes: m,
+            now: humantime::parse_rfc3339(now).unwrap(),
+        };
+        let lead_row = |now: &str| {
+            let out = status(
+                &herdr,
+                &ledger,
+                &not_paused(),
+                None,
+                Options::default(),
+                PLAIN,
+                Some(&at(now)),
+            )
+            .unwrap();
+            let line = out.stdout.lines().find(|l| l.contains("lead-prs (lead)"));
+            line.unwrap().to_string()
+        };
+        let in_the_view = |now: &str| {
+            let read = read(
+                &herdr,
+                &ledger,
+                &not_paused(),
+                Options::default(),
+                Some(&at(now)),
+            );
+            let read = read.unwrap();
+            let lead = read.view.herds[0].members.iter().find(|m| m.lead);
+            label(lead.unwrap())
+        };
+
+        assert!(lead_row("2026-11-24T23:00:00Z").contains("  idle  "));
+        post(
+            m,
+            "lead-prs",
+            "2026-11-24T23:22:00Z",
+            Body::report(Kind::Gate, "Gate request: #424"),
+        );
+        post(
+            m,
+            "lead-prs",
+            "2026-11-24T23:30:00Z",
+            Body::report(Kind::Question, "which DB?"),
+        );
+
+        let row = lead_row("2026-11-24T23:40:00Z");
+        assert!(row.contains("  idle, gate waiting 18m  "), "{row}");
+        assert_eq!(
+            in_the_view("2026-11-24T23:40:00Z"),
+            "idle, gate waiting 18m"
+        );
+        post(m, "lead-prs", "2026-11-24T23:45:00Z", Body::Answered {});
+        post(
+            m,
+            "lead-prs",
+            "2026-11-24T23:50:00Z",
+            Body::report(Kind::Question, "which DB?"),
+        );
+        assert!(lead_row("2026-11-25T00:02:00Z").contains("  idle, question waiting 12m  "));
+        post(m, "lead-prs", "2026-11-25T00:03:00Z", Body::Answered {});
+        assert!(lead_row("2026-11-25T00:10:00Z").contains("  idle  "));
     }
 
     #[test]

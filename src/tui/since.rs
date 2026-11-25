@@ -94,6 +94,7 @@ mod tests {
             retired: None,
             subagents: vec![],
             stalled: None,
+            waiting: None,
         }
     }
 

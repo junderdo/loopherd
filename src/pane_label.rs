@@ -150,7 +150,8 @@ fn lock(dir: &Path, pane: &str) -> Result<Lock> {
 /// Opens or creates `path` for writing, refusing a symlink, a FIFO, a hard
 /// link or anything else but a plain file: a lead can plant one in the
 /// mailboxes directory for its unsandboxed broker to write through.
-fn open_regular(path: &Path) -> Result<File> {
+/// Opens `path` to write, refusing a symlink or hard link the lead planted.
+pub fn open_regular(path: &Path) -> Result<File> {
     let file = fs::OpenOptions::new()
         .write(true)
         .create(true)
