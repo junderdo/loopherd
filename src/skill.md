@@ -1272,7 +1272,8 @@ backlog`) so the human can approve them in one go.
   shepherd's, on the human's word. Commit nothing.
 - **`need-human` cards.** For a `need-human` card, change nothing: restate
   its open question in your report.
-- **Grilling cards.** On each `wayfinding:grilling` card, post a draft
+- **Grilling cards.** On each `wayfinding:grilling` card without
+  `need-human`, post a draft
   grill prompt as a comment: the decision to settle, the questions to put
   to the human in order, and what the grill should file once it settles.
 - **Report.** Three parts, in this order:

@@ -718,7 +718,7 @@ fn the_groom_section_gives_the_groomers_rights_limits_and_report() {
         "You may edit a card's text, comment on it, mark a duplicate by a comment naming the card it duplicates, and check whether a card is stale against the code",
         "Never add `ready-for-agent`, archive a card, move a card between lists, or add or remove `need-human` or `blocked`",
         "For a `need-human` card, change nothing: restate its open question in your report",
-        "On each `wayfinding:grilling` card, post a draft grill prompt as a comment",
+        "On each `wayfinding:grilling` card without `need-human`, post a draft grill prompt as a comment",
         "Edit text only with the command your prompt names for it; with none, comment the edit instead",
         "ready, needs a decision (naming it), needs spec (saying what's missing), or stale (saying why)",
         "The edits you made",
