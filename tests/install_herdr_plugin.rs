@@ -150,6 +150,7 @@ echo "timeout $*" >> '{stub_dir}/timeouts'
 case "$*" in
   *"plugin install"* | *"plugin update"*) [ ! -e '{stub_dir}/expires' ] || exit 124 ;;
 esac
+while [ "${{1#-}}" != "$1" ]; do [ "$1" != -k ] || shift; shift; done
 shift
 exec "$@"
 "#
