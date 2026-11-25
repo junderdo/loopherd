@@ -16,7 +16,8 @@ walks a repo's setup.
 | `lead-defaults` | Show `config.toml`'s lead switches, on or off, for herds whose `[lead]` doesn't set them; `--set` writes them. |
 | `config get\|set\|unset <key>` | Read or edit `context_window`, `default_context_limit`, `shepherd.context_limit`, `shepherd.self_restart`, `herdr_plugin.revive_on_startup`, `lead_defaults.review_rounds`, `view.theme` or `view.layout`. Token counts take `250k` or `1.5M`; the two limits also a percentage of the window (`65%`). |
 | `merge-guard <herd>` | Set up the split credentials of a herd whose lead has `merge_guard = "credentials"`: its deploy key and the rulesets, then how to make its token. |
-| `install-hook` | Add loopherd's Claude hooks and skill (`--remove` takes them out). |
+| `install-hook` | Add loopherd's Claude hooks and skill, with these docs as its `references/` (`--remove` takes them out). |
+| `docs [<topic>]` | Print one of these docs (`tour`, `setup`, `install`, `glossary`, `herd-file`, `runbook`); with no topic, list them. |
 | `install-herdr-keys` | Bind `prefix+m` and `prefix+shift+m` to the herdr plugin's views (`--remove` takes them out). |
 | `doctor [<herd>]` | Check this machine's loopherd setup and print the problems (`--verbose`, `--json`, `--trackers`). |
 | `update` | Update loopherd the way it was installed (`--check` to only look, `--version vX.Y.Z` for a release install). |

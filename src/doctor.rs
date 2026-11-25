@@ -904,18 +904,54 @@ fn state_checks(
     // A lead known to be on another herdr has its broker under that herdr's
     // config dir; one whose herdr can't be told apart is checked, as revive starts it.
     let here = reached.as_ref().and_then(|(_, socket)| socket.as_deref());
+    let leads_here: Vec<&str> = members
+        .iter()
+        .filter(|r| !r.retired && r.is_lead())
+        .filter(|lead| here.is_none_or(|here| !elsewhere(Some(here), lead)))
+        .map(|lead| lead.name.as_str())
+        .collect();
+    checks.extend(lead_notify_check(&setup.paths, &leads_here));
     checks.extend(
-        members
+        leads_here
             .iter()
-            .filter(|r| !r.retired && r.is_lead())
-            .filter(|lead| here.is_none_or(|here| !elsewhere(Some(here), lead)))
-            .filter_map(|lead| broker_check(&setup.paths, &lead.name, binary)),
+            .filter_map(|lead| broker_check(&setup.paths, lead, binary)),
     );
     if let Some((herdr, socket)) = reached {
         let unretired: Vec<_> = members.iter().filter(|r| !r.retired).collect();
         checks.extend(pane_checks(herdr, socket.as_deref(), &unretired));
     }
     checks
+}
+
+/// Running `leads` whose questions `[notify]` wouldn't send; a broken table
+/// is the notify check's failure.
+fn lead_notify_check(paths: &Paths, leads: &[&str]) -> Option<Check> {
+    if leads.is_empty() {
+        return None;
+    }
+    let config = crate::herd::config_file(paths);
+    let reason = match crate::notify::load(&config) {
+        Ok(None) => "[notify] is off",
+        Ok(Some(n)) if !n.sends(crate::notify::Kind::Question) => {
+            "[notify] kinds leaves out question"
+        }
+        _ => return None,
+    };
+    let (who, whose) = match leads {
+        [lead] => (format!("lead {lead} is"), "its"),
+        _ => (format!("leads {} are", leads.join(", ")), "their"),
+    };
+    Some(warning(
+        "notify",
+        format!(
+            "{who} running, but {reason}, so {whose} questions reach no one outside the \
+             shepherd's pane"
+        ),
+        format!(
+            "set [notify] enabled = true with question in its kinds, in {}",
+            config.display()
+        ),
+    ))
 }
 
 /// The loopherd a broker should run: the one on PATH, which `broker-restart`
@@ -1300,7 +1336,17 @@ fn skill_check(install: &Install) -> Option<Check> {
             format!("move {} aside, then {fix}", skill_dir.display()),
         ));
     }
+    let stale = crate::skill::stale_references(skill_dir);
     Some(match crate::skill::link_state(real, link) {
+        Link::Ours if at.join("SKILL.md").is_file() && !stale.is_empty() => warning(
+            "skill",
+            format!(
+                "{} doesn't match this binary's: {}",
+                skill_dir.join("references").display(),
+                stale.join(", ")
+            ),
+            fix,
+        ),
         Link::Ours if at.join("SKILL.md").is_file() => ok(
             "skill",
             format!("{} links to {}", at.display(), skill.display()),
@@ -1842,6 +1888,37 @@ mod tests {
         let warning = skill_warning(&m);
         assert!(warning.contains("isn't a symlink"), "{warning}");
         assert!(warning.contains("loopherd install-hook"), "{warning}");
+    }
+
+    #[test]
+    fn references_that_dont_match_this_binarys_warn_naming_install_hook() {
+        let m = machine(&ALL);
+        let references = m.dir.path().join(".agents/skills/loopherd/references");
+        std::fs::write(references.join("tour.md"), "an older tour").unwrap();
+        std::fs::remove_file(references.join("glossary.md")).unwrap();
+
+        let warning = skill_warning(&m);
+
+        assert!(
+            warning.contains(&format!(
+                "{} doesn't match this binary's: tour.md, glossary.md",
+                references.display()
+            )),
+            "{warning}"
+        );
+        assert!(warning.contains("loopherd install-hook"), "{warning}");
+    }
+
+    #[test]
+    fn the_humans_own_files_beside_the_references_dont_warn() {
+        let m = machine(&ALL);
+        let references = m.dir.path().join(".agents/skills/loopherd/references");
+        std::fs::write(references.join("my-notes.md"), "mine").unwrap();
+
+        let (out, code) = run(&m, &herdr());
+
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("references"), "{out}");
     }
 
     #[test]
@@ -4425,6 +4502,82 @@ mod tests {
             !found.iter().any(|p| p.contains("self_restart")),
             "{found:?}"
         );
+    }
+
+    #[test]
+    fn a_running_lead_warns_when_notify_would_not_send_its_questions() {
+        let lead = |name: &str, socket: Option<&str>| {
+            let mut lead = member(name, "h", "w1:p1", socket);
+            lead.role = Some(crate::ledger::Role::Lead);
+            lead
+        };
+        let notify_warnings = |m: &Machine, herdr: &FakeHerdr| -> Vec<String> {
+            problems(m, herdr)
+                .into_iter()
+                .filter(|p| p.starts_with("warning notify"))
+                .collect()
+        };
+        let fix = |m: &Machine| {
+            format!(
+                "fix: set [notify] enabled = true with question in its kinds, in {}",
+                m.config().display()
+            )
+        };
+
+        let m = machine(&ALL);
+        let mut retired = lead("lead-old", None);
+        retired.retired = true;
+        m.ledger(&[retired, member("w", "h", "w1:p2", None)]);
+        assert_eq!(notify_warnings(&m, &herdr()), Vec::<String>::new());
+
+        m.ledger(&[lead("lead-a", None)]);
+        assert_eq!(
+            notify_warnings(&m, &herdr()),
+            [format!(
+                "warning notify: lead lead-a is running, but [notify] is off, so its \
+                 questions reach no one outside the shepherd's pane; {}",
+                fix(&m)
+            )]
+        );
+
+        let m = machine(&ALL);
+        let config = m.config();
+        m.ledger(&[
+            lead("lead-a", None),
+            lead("lead-b", None),
+            lead("lead-dev", Some("/run/dev.sock")),
+        ]);
+        let mut here = herdr();
+        here.socket = Some("/run/live.sock".into());
+        let warned = |reason: &str| {
+            [format!(
+                "warning notify: leads lead-a, lead-b are running, but {reason}, so their \
+                 questions reach no one outside the shepherd's pane; {}",
+                fix(&m)
+            )]
+        };
+
+        assert_eq!(notify_warnings(&m, &here), warned("[notify] is off"));
+
+        std::fs::write(&config, format!("{CONFIG}[notify]\nenabled = false\n")).unwrap();
+        assert_eq!(notify_warnings(&m, &here), warned("[notify] is off"));
+
+        std::fs::write(
+            &config,
+            format!("{CONFIG}[notify]\nenabled = true\nkinds = ['blocked']\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            notify_warnings(&m, &here),
+            warned("[notify] kinds leaves out question")
+        );
+
+        std::fs::write(
+            &config,
+            format!("{CONFIG}[notify]\nenabled = true\nkinds = ['question']\n"),
+        )
+        .unwrap();
+        assert_eq!(notify_warnings(&m, &here), Vec::<String>::new());
     }
 
     #[test]

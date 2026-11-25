@@ -29,6 +29,7 @@ mod pr_link;
 mod process;
 mod prompt;
 mod read;
+mod references;
 mod release;
 mod report;
 mod restart;
@@ -66,7 +67,7 @@ mod watch;
 mod worker_sandbox;
 mod worktree;
 
-use std::io::{Read, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -84,7 +85,7 @@ use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::{FileLedger, Ledger, Process};
+use crate::ledger::{FileLedger, Ledger, Process, Role};
 use crate::process::Procs;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::revive::{ReviveRequest, revive};
@@ -117,8 +118,8 @@ enum Command {
     Add(AddArgs),
     /// Write a herd for the repo around the current directory: its herd file
     /// and lead prompt, plus any missing GitHub issue labels, and, uncommitted,
-    /// any missing tracker doc, docs/agents/loopherd.md and AGENTS.md loopherd
-    /// section. Infers the repo, its default branch, the gh account matching
+    /// any missing tracker doc, docs/agents/loopherd.md, docs/agents/shepherd.md
+    /// stub and AGENTS.md loopherd section. Infers the repo, its default branch, the gh account matching
     /// origin's owner when the herd has a GitHub repo (only a GitHub tracker
     /// needs one) and checks from Cargo.toml and package.json. On a terminal (stdin and stderr, a herdr
     /// pane included) it asks for each with that as the default, asking again
@@ -520,6 +521,12 @@ enum Command {
         /// herdr and config checks still run.
         herd: Option<String>,
     },
+    /// Print one of loopherd's user docs, the references `install-hook` writes
+    /// beside the skill. Without a topic, list the topics.
+    Docs {
+        /// tour, setup, install, glossary, herd-file or runbook.
+        topic: Option<String>,
+    },
     /// Bring loopherd up to date the way install.toml in the config dir says
     /// it was installed. A release install runs the target release's own
     /// install.sh, never moving to an older release unless --version names
@@ -603,6 +610,13 @@ enum HerdAction {
     /// Remove the key; succeeds if it isn't set. Refuses, changing nothing, a
     /// file `loopherd herds` would call invalid.
     Unset { herd: String, key: String },
+    /// Offer the herd, or every herd, each change newer `loopherd init` writes
+    /// that it lacks: its id, why, and a diff, then `Apply? [Y/n]`. A no, or a
+    /// yes to `Stop offering this?` for a change its own value blocks, adds the
+    /// id to the herd file's `declined`. Backs a file up to `<file>.bak-<time>`
+    /// before its first write. Without a terminal it changes nothing and lists
+    /// each herd's pending ids.
+    Upgrade { herd: Option<String> },
     /// Delete a finished herd: its herd file, its pause, its `[lead]`
     /// `prompt_file` when that lies in the herds dir and no other herd file
     /// names it, and every run of the herd in the ledger, archived ones
@@ -948,6 +962,7 @@ fn main() -> ExitCode {
             "install-hook",
             run_install_hook(remove, settings, skills_dir),
         ),
+        Command::Docs { topic } => ("docs", run_docs(topic)),
         Command::Update { check, version } => ("update", run_update(check, version)),
         Command::InstallHerdrKeys { remove } => {
             ("install-herdr-keys", run_install_herdr_keys(remove))
@@ -1084,6 +1099,24 @@ fn run_herd(action: HerdAction) -> Result<i32> {
             true => println!("unset {key} in {herd}"),
             false => println!("{key} was not set in {herd}"),
         },
+        HerdAction::Upgrade { herd } => {
+            let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+            let running_leads = ledger
+                .entries()?
+                .into_values()
+                .filter(|r| r.role == Some(Role::Lead) && !r.retired)
+                .filter_map(|r| r.herd)
+                .collect();
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            let how = herd::Upgrade {
+                running_leads: &running_leads,
+                now: SystemTime::now(),
+                terminal: terminal.then_some(&mut input as &mut dyn BufRead),
+            };
+            herd::upgrade(&paths, herd.as_deref(), how, &mut std::io::stdout())?;
+        }
         HerdAction::Remove {
             herd,
             dry_run,
@@ -2627,6 +2660,34 @@ fn install_or_remove_skill(
         }
     }
     Ok(())
+}
+
+fn run_docs(topic: Option<String>) -> Result<i32> {
+    let Some(topic) = topic else {
+        let width = references::ALL
+            .iter()
+            .map(|r| r.topic.len())
+            .max()
+            .unwrap_or(0);
+        for reference in &references::ALL {
+            println!("{:width$}  {}", reference.topic, reference.summary);
+        }
+        return Ok(0);
+    };
+    match references::find(&topic) {
+        Some(reference) => {
+            print!("{}", reference.text());
+            Ok(0)
+        }
+        None => {
+            let topics: Vec<&str> = references::ALL.iter().map(|r| r.topic).collect();
+            eprintln!(
+                "loopherd docs: no topic `{topic}`; try one of: {}",
+                topics.join(", ")
+            );
+            Ok(2)
+        }
+    }
 }
 
 fn run_install_hook(
