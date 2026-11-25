@@ -628,6 +628,26 @@ mod tests {
     }
 
     #[test]
+    fn a_prs_review_shells_stop_before_its_scratch_dir_is_removed() {
+        let shepherd = section("5. **After merge** (confirm", "6. **Triage**");
+        let lead = section("5. **After merge** (`gh pr view", "6. **Handoff:**");
+        let handoffs = section("\n### Handoffs\n", "The handoff file has a fixed outline");
+        for (name, text) in [
+            ("Shepherd After merge", shepherd),
+            ("Lead After merge", lead),
+            ("Handoffs", handoffs),
+        ] {
+            assert!(
+                text.contains(
+                    "stop (TaskStop) every background shell or Monitor still running for \
+                     that PR's review"
+                ),
+                "{name} removes the PR's directory without stopping its shells: {text}"
+            );
+        }
+    }
+
+    #[test]
     fn a_leads_wait_on_a_process_runs_in_the_call_that_started_it() {
         let skill = SKILL.split_whitespace().collect::<Vec<_>>().join(" ");
         for rule in [

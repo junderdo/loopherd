@@ -276,9 +276,11 @@ Init never launches an agent.
    verifier at the merge commit in a detached worktree under the PR's
    directory, since reaping removes the member's. Last, on every merge,
    once the tracker, dependents, feed and any post-merge verification are
-   done: `git worktree remove --force` each verify worktree under
-   `<scratch>/pr<n>/`, then delete that directory. Same for a PR closed
-   unmerged.
+   done: stop (TaskStop) every background shell or Monitor still running for
+   that PR's review, then `git worktree remove --force` each verify worktree
+   under `<scratch>/pr<n>/`, then delete that directory. A shell left waiting
+   on a file there never finishes and holds your stops open. Same for a PR
+   closed unmerged.
 6. **Triage** a herd running low on ready work (D60, D116). A lead's
    triage arrives as its `question`: relay it to the human. In an unled
    herd, act when `status` shows claimable at or below `low_at` with
@@ -330,7 +332,9 @@ file falls back to 160000, and the hook leaves a `note` from the member once
 per session naming the file; fix it (`loopherd herds` validates both).
 
 Before handing off, a member that verifies PRs removes the `<scratch>/pr<n>/`
-directories of PRs that already merged or closed (see After merge) and lists
+directories of PRs that already merged or closed (see After merge): first
+stop (TaskStop) every background shell or Monitor still running for that PR's
+review, then remove its worktrees and the directory. It also lists
 each one still in use by absolute path under State, naming each PR's
 current review file and whether its minors and nits are gathered. A
 restart gets a new
@@ -961,9 +965,10 @@ Shepherd section has the detail):
    reaches your pane, and `status` shows `gate waiting <age>` on your row.
 5. **After merge** (`gh pr view <n> --json state`): close out the task in
    the tracker, unblock dependents, run `loopherd feed <herd>` (it runs
-   `after_merge`; do by hand what its note says didn't run), then `git
-   worktree remove --force` each verify worktree under `<scratch>/pr<n>/`
-   and delete that directory.
+   `after_merge`; do by hand what its note says didn't run), then stop
+   (TaskStop) every background shell or Monitor still running for that PR's
+   review, `git worktree remove --force` each verify worktree under
+   `<scratch>/pr<n>/`, and delete that directory.
 6. **Handoff:** write your handoff with `loopherd handoff <<'EOF'`, which
    puts it at `$XDG_STATE_HOME/loopherd/handoffs/<your name>/handoff.md`;
    your sandbox refuses your file tools, and a `cat >` or `tee`, there. Use
