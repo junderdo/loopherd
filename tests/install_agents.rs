@@ -308,19 +308,25 @@ fn without_a_terminal_installed_agent_types_are_said_to_be_installed() {
 }
 
 #[test]
-fn agent_types_found_installed_are_recorded_so_a_later_change_updates_them() {
+fn agent_types_found_installed_without_asking_are_not_recorded_as_loopherds() {
     let sandbox = Sandbox::new();
-    for name in ["builder", "reviewer", "researcher", "scout"] {
+    for name in AGENTS {
         sandbox.put(&format!("{name}.md"), &sandbox.ours(name));
     }
     sandbox.install(&[]);
+    assert!(
+        !sandbox.state.join("loopherd/agents.sha256").exists(),
+        "an unasked run wrote the ledger"
+    );
+    let copied = sandbox.ours("reviewer");
     sandbox.set_ours("reviewer", "---\nname: reviewer\n---\nnew text\n");
 
     let out = sandbox.install(&["--with-agents"]);
 
+    assert_eq!(sandbox.read("reviewer.md"), copied);
     assert!(
         stdout(&out).contains(&format!(
-            "updated {}",
+            "kept {} (yours, not loopherd's)",
             sandbox.installed("reviewer.md").display()
         )),
         "{}",
@@ -798,5 +804,15 @@ fn a_file_edited_since_install_answered_loopherd_name_keeps_the_edit() {
         sandbox
             .read("loopherd-builder.md")
             .contains("\nname: loopherd-builder\n")
+    );
+}
+
+#[test]
+fn the_reviewer_bounds_its_waits_and_stops_its_shells() {
+    let text = fs::read_to_string(format!("{REPO}/agents/reviewer.md")).unwrap();
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("Every wait you run has a timeout, and you stop every background shell you started before you return"),
+        "{flat}"
     );
 }

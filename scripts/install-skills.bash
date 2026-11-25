@@ -52,7 +52,10 @@ skills_list_overlaps() {
 }
 
 skills_installed() {
-  command -v claude >/dev/null && claude plugin list --json 2>/dev/null | jq -e --arg id "$skills_id" \
+  local wait=()
+  # Runs on every terminal-less install, which a claude stalled at startup mustn't hang.
+  ! command -v timeout >/dev/null || wait=(timeout 10)
+  command -v claude >/dev/null && ${wait[@]+"${wait[@]}"} claude plugin list --json 2>/dev/null | jq -e --arg id "$skills_id" \
     'any(.[]; .id == $id and (.scope == "user" or .scope == "managed"))' >/dev/null 2>&1
 }
 

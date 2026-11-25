@@ -22,7 +22,7 @@ mod upgrade;
 
 pub use edit::{get, set, unset};
 pub use remove::{Removal, remove};
-pub use upgrade::{NewTemplate, Upgrade, new_features, pending, upgrade};
+pub use upgrade::{NewTemplate, RoutedQueue, Upgrade, new_features, pending, upgrade};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]

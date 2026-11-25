@@ -31,6 +31,61 @@ const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
 const MERGED_GITHUB: &str = include_str!("init/merged-github.toml");
 const LEAD: &str = include_str!("init/lead.md");
 const GROOM: &str = include_str!("init/groom.toml");
+const GITHUB_WAYFINDING: &str = include_str!("init/github-wayfinding.toml");
+const LOCAL_WAYFINDING: &str = include_str!("init/local-wayfinding.toml");
+const OTHER_WAYFINDING: &str = include_str!("init/other-wayfinding.toml");
+
+/// Each wayfinding label, the skill its task is resolved with, and the label's description.
+const WAYFINDING_SKILLS: [(&str, &str, &str); 3] = [
+    (
+        "wayfinding:research",
+        "research",
+        "Resolved with the research skill",
+    ),
+    (
+        "wayfinding:domain",
+        "domain-modeling",
+        "Resolved with the domain-modeling skill",
+    ),
+    (
+        "wayfinding:prototype",
+        "prototype",
+        "Resolved with the prototype skill",
+    ),
+];
+const GITHUB_ROUTING_NOTE: &str = "
+# A wayfinding:research, wayfinding:domain or wayfinding:prototype label
+# routes the issue to the wayfinding template, as type docs with the research,
+# domain-modeling or prototype skill; any other issue goes to issue.";
+const GITHUB_ROUTE: &str = r#"  | ([$labels[] | {"wayfinding:research": "research", "wayfinding:domain": "domain-modeling", "wayfinding:prototype": "prototype"}[.] | values][0]) as $wayfinding
+"#;
+const GITHUB_TASK_HEAD: &str = r"\(.number) \($type) \($skill)";
+const GITHUB_ROUTED_TASK_HEAD: &str = r#"\(if $wayfinding then "wayfinding \(.number) docs \($wayfinding)" else "issue \(.number) \($type) \($skill)" end)"#;
+const LOCAL_ROUTING_NOTE: &str = "
+# A wayfinding:research, wayfinding:domain or wayfinding:prototype word routes
+# the issue to the wayfinding template, as type docs with the research,
+# domain-modeling or prototype skill; any other issue goes to issue.";
+const LOCAL_PRINT: &str = "      print id, type, skill, slug, f";
+const LOCAL_ROUTED_PRINT: &str = r#"      template = "issue"
+      if (has(f, "wayfinding:research")) { template = "wayfinding"; type = "docs"; skill = "research" }
+      else if (has(f, "wayfinding:domain")) { template = "wayfinding"; type = "docs"; skill = "domain-modeling" }
+      else if (has(f, "wayfinding:prototype")) { template = "wayfinding"; type = "docs"; skill = "prototype" }
+      # A wayfinding member name is "-research" longer, so its id is cut to fit 9 less.
+      if (template == "wayfinding") {
+        room -= 9
+        id = id_of(f)
+        room += 9
+        if (length(id) + 1 + length(num[f]) > room - 9) {
+          print "skipped " f ": the herd name leaves no room for its research name" > "/dev/stderr"
+          continue
+        }
+        id = id "-" num[f]
+      }
+      print template, id, type, skill, slug, f"#;
+const OTHER_ROUTING_NOTE: &str = ": <template> is
+# wayfinding for a task marked wayfinding:research, wayfinding:domain or
+# wayfinding:prototype, whose <skill> is research, domain-modeling or prototype,
+# and issue for any other";
 const GITHUB_DONE: &str = include_str!("init/github-done.toml");
 const LOCAL_DONE: &str = include_str!("init/local-done.toml");
 const OTHER_DONE: &str = include_str!("init/other-done.toml");
@@ -164,6 +219,7 @@ pub struct Request<'a> {
 #[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
 pub enum Template {
     Groom,
+    Wayfinding,
 }
 
 struct GitHub {
@@ -195,6 +251,8 @@ struct Herd {
     /// What the human writes in the repo that init wouldn't.
     agents_steps: Vec<String>,
     groom: bool,
+    /// Routes the queue's wayfinding tasks to their own template.
+    wayfinding: bool,
 }
 
 /// Writes the herd file, its lead and grill prompts and creates missing labels,
@@ -625,10 +683,38 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         req.with.contains(&Template::Groom).then_some(true),
         ask.terminal || recorded.as_ref().is_some_and(|r| r.groom),
     )?;
+    // A local source cuts each id to fit; elsewhere the name must hold a 6-digit number.
+    let research_name_fits =
+        tracker.kind == tracker::Kind::Local || name.len() + "-research-".len() + 6 <= 32;
+    let no_room = format!(
+        "the herd name {name} leaves no room for wayfinding members' names, \
+         {name}-research-<number>, in 32 characters; a herd with wayfinding takes a name \
+         of at most 16"
+    );
+    let with_wayfinding = req.with.contains(&Template::Wayfinding);
+    if with_wayfinding && !research_name_fits {
+        bail!("{no_room}");
+    }
+    if ask.terminal && !research_name_fits {
+        eprintln!("No wayfinding template: {no_room}.");
+    }
+    let wayfinding = research_name_fits
+        && ask.yes(
+            "Add a wayfinding template, for research, domain and prototype tasks?",
+            explain::WAYFINDING,
+            with_wayfinding.then_some(true),
+            ask.terminal || recorded.as_ref().is_some_and(|r| r.wayfinding),
+        )?;
+    let tracker_kind = tracker.kind;
     let tracker_docs = tracker
         .writes
         .drain(..)
-        .map(|(path, text)| agents::Doc::new(path, text))
+        .map(|(path, mut text)| {
+            if wayfinding && path == tracker::TRACKER_DOC {
+                text.push_str(wayfinding_section(tracker_kind));
+            }
+            agents::Doc::new(path, text)
+        })
         .collect();
     let agents_herd = agents::Herd {
         account: github.as_ref().map(|g| g.account.as_str()),
@@ -636,6 +722,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         checks: &checks,
         needs_info: &tracker.labels.needs_info,
         tracker: tracker.kind,
+        wayfinding,
     };
     let plan = agents::missing(&repo, &agents_herd, tracker_docs)?;
     let mut docs = plan.docs;
@@ -653,7 +740,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             )?;
         }
         Mode::Diff => {
-            docs.extend(tracker::built_in(&repo)?);
+            docs.extend(tracker::built_in(&repo, wayfinding)?);
             docs.extend(agents::present(&repo, &agents_herd)?);
         }
     }
@@ -673,6 +760,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         docs,
         agents_steps: plan.steps,
         groom,
+        wayfinding,
     })
 }
 
@@ -821,8 +909,11 @@ fn summary(herd: &Herd) -> String {
     if let Some(github) = &herd.github
         && herd.tracker.kind == tracker::Kind::GitHub
     {
-        let names = wanted_labels(&herd.tracker.labels).map(|(name, ..)| name);
-        let (last, rest) = names.split_last().expect("four labels");
+        let names: Vec<&str> = wanted_labels(&herd.tracker.labels, herd.wayfinding)
+            .into_iter()
+            .map(|(name, ..)| name)
+            .collect();
+        let (last, rest) = names.split_last().expect("at least four labels");
         also.push(format!(
             "creates the labels {} and {last} in {} where missing",
             rest.join(", "),
@@ -858,7 +949,7 @@ fn summary(herd: &Herd) -> String {
     format!(
         "\nHerd {name}:\n  repo    {repo}\n  {branch}\n  \
          max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n  \
-         groom   {groom}\n  also    grill (attended)\n{also}{no_merged}",
+         groom   {groom}\n  wayfinding {wayfinding}\n  also    grill (attended)\n{also}{no_merged}",
         name = herd.name,
         repo = herd.repo.display(),
         max = herd.max,
@@ -869,6 +960,7 @@ fn summary(herd: &Herd) -> String {
         },
         checks = herd.checks.join("; "),
         groom = if herd.groom { "yes" } else { "no" },
+        wayfinding = if herd.wayfinding { "yes" } else { "no" },
     )
 }
 
@@ -1030,13 +1122,50 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     ]
     .map(|(key, text)| (key, fill(text, &values)));
     values.extend(snippets.iter().map(|(key, text)| (*key, text.as_str())));
-    let local = |list| {
+    let task_fields = match tracker.kind {
+        tracker::Kind::Local => "<id> <type> <skill> <slug> <path>",
+        tracker::Kind::GitHub | tracker::Kind::Other => "<number> <type> <skill> <slug>",
+    };
+    let source_prints = match herd.wayfinding {
+        true => format!("<template> {task_fields}"),
+        false => task_fields.to_string(),
+    };
+    let routing_note = match (herd.wayfinding, tracker.kind) {
+        (false, _) => "",
+        (true, tracker::Kind::GitHub) => GITHUB_ROUTING_NOTE,
+        (true, tracker::Kind::Local) => LOCAL_ROUTING_NOTE,
+        (true, tracker::Kind::Other) => OTHER_ROUTING_NOTE,
+    };
+    let routed = |routed: &'static str, plain: &'static str| match herd.wayfinding {
+        true => routed,
+        false => plain,
+    };
+    values.extend([
+        ("SOURCE_PRINTS", source_prints.as_str()),
+        ("ROUTING_NOTE", routing_note),
+        ("ROUTE", routed(GITHUB_ROUTE, "")),
+        (
+            "TASK_HEAD",
+            routed(GITHUB_ROUTED_TASK_HEAD, GITHUB_TASK_HEAD),
+        ),
+        (
+            "QUEUE_TEMPLATE",
+            routed(
+                "templates = [\"issue\", \"wayfinding\"]",
+                "template = \"issue\"",
+            ),
+        ),
+    ]);
+    let local = |list, print| {
         fill(
             LOCAL_ISSUES,
-            &[values.as_slice(), &[("LIST", list)]].concat(),
+            &[values.as_slice(), &[("LIST", list), ("LOCAL_PRINT", print)]].concat(),
         )
     };
-    let (local_ready, local_backlog) = (local("ready"), local("backlog"));
+    let (local_ready, local_backlog) = (
+        local("ready", routed(LOCAL_ROUTED_PRINT, LOCAL_PRINT)),
+        local("backlog", LOCAL_PRINT),
+    );
     values.push(("LOCAL_READY", &local_ready));
     values.push(("LOCAL_BACKLOG", &local_backlog));
     // Filled before they join the herd file, whose fill leaves inserted text literal.
@@ -1061,6 +1190,10 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     let issue_done = fill(done, &values);
     values.push(("DONE", issue_done.trim_end()));
     let template = fill(template, &values);
+    let wayfinding = match herd.wayfinding {
+        true => format!("\n\n{}", wayfinding(&template, tracker.kind, &values)),
+        false => String::new(),
+    };
     let (grill, grill_prompt) = grill(herd, &values, done);
     let lead_table = match herd.lead {
         true => format!("\n{}", fill(LEAD_TABLE, &values)),
@@ -1068,6 +1201,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     };
     values.push(("SOURCE", source));
     values.push(("TEMPLATE", template.trim_end()));
+    values.push(("WAYFINDING", wayfinding.trim_end()));
     values.push(("LEAD_TABLE", &lead_table));
     values.push(("LEAD_TASKS", &lead_tasks));
     let groom = match herd.groom {
@@ -1087,6 +1221,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     Ok(Rendered {
         files,
         grill: grill.trim_start().to_string(),
+        wayfinding: wayfinding.trim_start().to_string(),
     })
 }
 
@@ -1110,20 +1245,24 @@ struct Rendered {
     files: Vec<(PathBuf, String)>,
     /// The `[template.grill]` within the herd file.
     grill: String,
+    /// The `[template.wayfinding]` within the herd file, empty without one.
+    wayfinding: String,
 }
 
 /// `template` as init would write it now for the existing `herd`, rendered as
 /// `init --diff` renders over the herd's files.
 pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTemplate> {
-    if template != "grill" {
-        bail!("init writes no template {template}");
-    }
+    let with = match template {
+        "grill" => vec![],
+        "wayfinding" => vec![Template::Wayfinding],
+        _ => bail!("init writes no template {template}"),
+    };
     let repo = herd::repo(paths, herd)?;
     let account = recorded_account(&paths.herds.join(format!("{herd}.toml")));
     let req = Request {
         dir: &repo,
         herd: Some(herd),
-        // A grill's prompt names no checks, so a herd without readable ones still renders.
+        // Neither template's prompt names checks, so a herd without readable ones still renders.
         checks: &["true".to_string()],
         gh_account: account.as_deref(),
         github: None,
@@ -1133,9 +1272,12 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
         lead: None,
         merge_guard: None,
         context_limit: None,
-        with: &[],
+        with: &with,
     };
-    let herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
+    let mut herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
+    if template == "wayfinding" {
+        return routed_wayfinding(paths, &mut herd);
+    }
     let mut rendered = rendered(paths, &herd)?;
     let prompt_file = grill_file(paths, &herd.name);
     let prompt = rendered
@@ -1147,6 +1289,34 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
     Ok(herd::NewTemplate {
         table: rendered.grill,
         prompt: Some((format!("{}-grill.md", herd.name), prompt)),
+        queue: None,
+    })
+}
+
+/// The `[template.wayfinding]` with the `[queue]` init writes without and with it.
+fn routed_wayfinding(paths: &Paths, herd: &mut Herd) -> Result<herd::NewTemplate> {
+    let herd_file = paths.herds.join(format!("{}.toml", herd.name));
+    let mut queue = |wayfinding| -> Result<(toml_edit::Table, String)> {
+        herd.wayfinding = wayfinding;
+        let rendered = rendered(paths, herd)?;
+        let (_, text) = rendered
+            .files
+            .iter()
+            .find(|(path, _)| *path == herd_file)
+            .context("init renders no herd file")?;
+        let doc: toml_edit::DocumentMut = text.parse().context("rendered herd file")?;
+        let queue = doc
+            .get("queue")
+            .and_then(toml_edit::Item::as_table)
+            .context("rendered herd file has no [queue]")?;
+        Ok((queue.clone(), rendered.wayfinding))
+    };
+    let (before, _) = queue(false)?;
+    let (after, table) = queue(true)?;
+    Ok(herd::NewTemplate {
+        table,
+        prompt: None,
+        queue: Some(herd::RoutedQueue { before, after }),
     })
 }
 
@@ -1230,6 +1400,64 @@ fn grill(herd: &Herd, values: &[(&str, &str)], done: &str) -> (String, String) {
     )
 }
 
+/// The `[template.wayfinding]`: the rendered `issue` template's settings on a
+/// `docs/` branch and a `-research-` name, with the tracker's wayfinding prompt.
+fn wayfinding(issue: &str, kind: tracker::Kind, values: &[(&str, &str)]) -> String {
+    let prompt = match kind {
+        tracker::Kind::GitHub => GITHUB_WAYFINDING,
+        tracker::Kind::Local => LOCAL_WAYFINDING,
+        tracker::Kind::Other => OTHER_WAYFINDING,
+    };
+    let (settings, _) = issue
+        .split_once("prompt = '''")
+        .expect("the issue template has a prompt");
+    let settings = settings
+        .replacen("[template.issue]", "[template.wayfinding]", 1)
+        .replacen("name = \"{herd}-", "name = \"{herd}-research-", 1)
+        .replacen("branch = \"{type}/", "branch = \"docs/", 1);
+    format!("{settings}{}", fill(prompt, values))
+}
+
+/// The tracker doc's and `docs/agents/loopherd.md`'s word on wayfinding tasks.
+fn wayfinding_section(kind: tracker::Kind) -> &'static str {
+    match kind {
+        tracker::Kind::GitHub => GITHUB_WAYFINDING_SECTION,
+        tracker::Kind::Local => LOCAL_WAYFINDING_SECTION,
+        tracker::Kind::Other => OTHER_WAYFINDING_SECTION,
+    }
+}
+
+const GITHUB_WAYFINDING_SECTION: &str = "
+## Wayfinding tasks
+
+A ready issue labelled `wayfinding:research`, `wayfinding:domain` or
+`wayfinding:prototype` is answered rather than built. loopherd's queue routes
+it to the herd's wayfinding template, whose worker resolves it with the
+`research`, `domain-modeling` or `prototype` skill and opens a PR with the
+output (a research note, a decision record or a prototype) on a `docs/` branch.
+These are not `/wayfinder`'s `wayfinder:` labels, which loopherd doesn't route.
+";
+const LOCAL_WAYFINDING_SECTION: &str = "
+## Wayfinding tasks
+
+A ready issue whose `Status:` line has `wayfinding:research`,
+`wayfinding:domain` or `wayfinding:prototype` is answered rather than built.
+loopherd's queue routes it to the herd's wayfinding template, whose worker
+resolves it with the `research`, `domain-modeling` or `prototype` skill and
+hands in the output (a research note, a decision record or a prototype) on a
+`docs/` branch. These are not `/wayfinder`'s `Type:` lines, which loopherd
+doesn't route.
+";
+const OTHER_WAYFINDING_SECTION: &str = "
+## Wayfinding tasks
+
+A ready task marked `wayfinding:research`, `wayfinding:domain` or
+`wayfinding:prototype` is answered rather than built. loopherd's queue routes
+it to the herd's wayfinding template, whose worker resolves it with the
+`research`, `domain-modeling` or `prototype` skill and hands in the output (a
+research note, a decision record or a prototype) on a `docs/` branch.
+";
+
 /// The `[template.groom]` for the herd's tracker.
 fn groom(herd: &Herd, values: &[(&str, &str)]) -> Result<String> {
     let (read, forms, never) = match herd.tracker.kind {
@@ -1265,9 +1493,12 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     let lead_file = paths.herds.join(format!("{name}-lead.md"));
     let herd_files = rendered(paths, &herd)?.files;
     let mut lines = match github {
-        Some(github) if tracker.kind == tracker::Kind::GitHub => {
-            create_labels(&github.token, &github.slug, &tracker.labels)?
-        }
+        Some(github) if tracker.kind == tracker::Kind::GitHub => create_labels(
+            &github.token,
+            &github.slug,
+            &tracker.labels,
+            herd.wayfinding,
+        )?,
         _ => vec![],
     };
     let mut written = Written::default();
@@ -1305,9 +1536,13 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
                 .into(),
         );
         steps.push(format!(
-            "{FILL_IN}, in {}: [queue] source, [queue] backlog, [template.issue] done, \
+            "{FILL_IN}, in {}: [queue] source, [queue] backlog, [template.issue] done, {}\
              and each prompt step marked (fill in).",
-            herd_file.display()
+            herd_file.display(),
+            match herd.wayfinding {
+                true => "[template.wayfinding] done, ",
+                false => "",
+            }
         ));
         if herd.lead {
             steps.push(format!(
@@ -1520,6 +1755,7 @@ struct Recorded {
     github: Option<String>,
     has_merged: bool,
     groom: bool,
+    wayfinding: bool,
 }
 
 impl Recorded {
@@ -1577,6 +1813,9 @@ impl Recorded {
             groom: herd
                 .get("template")
                 .is_some_and(|t| t.get("groom").is_some()),
+            wayfinding: herd
+                .get("template")
+                .is_some_and(|t| t.get("wayfinding").is_some()),
         })
     }
 }
@@ -1689,8 +1928,8 @@ fn account(owner: &str, wanted: Option<&str>, ask: &ask::Asker) -> Result<String
 }
 
 /// The labels the herd's queue and workers use: name, description and color.
-fn wanted_labels(labels: &tracker::Labels) -> [(&str, &str, &str); 4] {
-    [
+fn wanted_labels(labels: &tracker::Labels, wayfinding: bool) -> Vec<(&str, &str, &str)> {
+    let mut wanted = vec![
         (
             labels.ready_for_agent.as_str(),
             "Fully specified; an agent may claim it",
@@ -1707,13 +1946,24 @@ fn wanted_labels(labels: &tracker::Labels) -> [(&str, &str, &str); 4] {
             "FBCA04",
         ),
         ("blocked", "Waiting on other issues", "B60205"),
-    ]
+    ];
+    if wayfinding {
+        wanted.extend(
+            WAYFINDING_SKILLS.map(|(label, _, description)| (label, description, "1D76DB")),
+        );
+    }
+    wanted
 }
 
 /// Creates each label the herd's queue and workers use that the repo lacks,
 /// one line per label created.
-fn create_labels(token: &str, slug: &str, labels: &tracker::Labels) -> Result<Vec<String>> {
-    let wanted = wanted_labels(labels);
+fn create_labels(
+    token: &str,
+    slug: &str,
+    labels: &tracker::Labels,
+    wayfinding: bool,
+) -> Result<Vec<String>> {
+    let wanted = wanted_labels(labels, wayfinding);
     let existing = gh(
         Some(token),
         &[
