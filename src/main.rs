@@ -554,8 +554,8 @@ enum Command {
         #[arg(long, value_name = "vX.Y.Z")]
         version: Option<String>,
     },
-    /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks to Claude's
-    /// user settings, calling this binary, and write the `--skill` guide as the loopherd
+    /// Add loopherd's Stop, StopFailure, SessionStart, PreToolUse, UserPromptSubmit, SubagentStart
+    /// and SubagentStop hooks to Claude's user settings, calling this binary, and write the `--skill` guide as the loopherd
     /// skill; safe to re-run. Backs the settings file up before changing it.
     InstallHook {
         /// Take loopherd's hooks and skill out instead.
@@ -2732,13 +2732,10 @@ fn run_install_hook(
             install_hook::install(&settings, &exe, SystemTime::now())?
         }
     };
+    let events = install_hook::events();
     let done = match remove {
-        true => {
-            "removed loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks from"
-        }
-        false => {
-            "installed loopherd's Stop, StopFailure, SessionStart, PreToolUse and UserPromptSubmit hooks in"
-        }
+        true => format!("removed loopherd's {events} hooks from"),
+        false => format!("installed loopherd's {events} hooks in"),
     };
     match outcome {
         install_hook::Outcome::Unchanged => println!("{} already up to date", settings.display()),
