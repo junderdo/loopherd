@@ -6,6 +6,7 @@ mod continuation;
 mod credentials;
 mod doctor;
 mod feed;
+mod file_hook;
 mod github;
 mod handoff;
 mod herd;
@@ -481,6 +482,11 @@ enum Command {
     /// deny decision. Elsewhere it prints nothing.
     /// Always exits 0. Set up by install-hook.
     ToolHook,
+    /// A credentials member's PreToolUse hook on Read and Grep: denies a path
+    /// that resolves into `/proc`, read from the hook input on stdin. Always
+    /// exits 0 once it has read the input. Set up in the member's settings.
+    #[command(hide = true)]
+    FileHook,
     /// Send one notification for `watch`, detached from it: runs the command
     /// within 30s and notes a failure in the member's mailbox.
     #[command(hide = true)]
@@ -939,6 +945,7 @@ fn main() -> ExitCode {
         Command::PromptHook => ("prompt-hook", run_prompt_hook()),
         Command::SubagentHook => ("subagent-hook", run_subagent_hook()),
         Command::ToolHook => ("tool-hook", run_tool_hook()),
+        Command::FileHook => ("file-hook", run_file_hook()),
         Command::NotifyRun {
             member,
             sender,
@@ -2491,6 +2498,18 @@ fn run_tool_hook() -> Result<i32> {
     };
     let switches = |herd: &str| herd::lead_switches(&Paths::from_env()?, herd);
     if let Some(reason) = tool_hook::tool_hook(&ledger, &pane, &input, &switches)? {
+        println!("{}", tool_hook::deny(&reason));
+    }
+    Ok(0)
+}
+
+fn run_file_hook() -> Result<i32> {
+    let mut input = vec![];
+    std::io::stdin()
+        .read_to_end(&mut input)
+        .context("read hook input")?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    if let Some(reason) = file_hook::refusal(&input, home.as_deref()) {
         println!("{}", tool_hook::deny(&reason));
     }
     Ok(0)
