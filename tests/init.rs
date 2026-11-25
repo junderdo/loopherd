@@ -282,7 +282,7 @@ fn init_writes_a_herd_whose_feed_lists_the_repos_ready_issues() {
     let herds = fixture.loopherd(&["herds"]);
     assert_ok(&herds);
     assert!(
-        text(&herds.stdout).contains("loopherd feed widgets  (template issue, max 3)"),
+        text(&herds.stdout).contains("loopherd feed widgets  (template issue, max 3, low_at 6)"),
         "{}",
         text(&herds.stdout)
     );
@@ -7782,7 +7782,7 @@ fn herds_shows_the_grill_attended_outside_the_queue_and_the_herd_valid() {
         "{shown}"
     );
     assert!(
-        shown.contains("  loopherd feed widgets  (template issue, max 3)\n"),
+        shown.contains("  loopherd feed widgets  (template issue, max 3, low_at 6)\n"),
         "{shown}"
     );
     assert!(!shown.contains("warning"), "{shown}");

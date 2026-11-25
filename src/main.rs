@@ -158,7 +158,8 @@ enum Command {
         set: Option<String>,
     },
     /// Read or edit one of config.toml's settings, keeping its comments and
-    /// layout: `context_window`, `default_context_limit` or
+    /// layout: `context_window` (every model's window), `context_windows.<model>`
+    /// (one model id's, over it), `default_context_limit` or
     /// `shepherd.context_limit`, each a number of tokens (`250000`, `250k`,
     /// `1.5M`), the two limits also a percentage of the window (`65%`),
     /// `lead_defaults.review_rounds`, each lead's review-round limit,
@@ -171,7 +172,7 @@ enum Command {
         action: ConfigAction,
     },
     /// Set config.toml's machine-wide settings: the lead defaults, the
-    /// context window and the handoff limits, then whether herdr's startup
+    /// handoff limits (the window comes from each session's model), then whether herdr's startup
     /// hook resumes members. On a terminal (/dev/tty, so it
     /// works under `curl … | sh`) it asks each group while config.toml leaves
     /// it unset, current values as defaults, Enter keeping a value. Without
@@ -657,9 +658,9 @@ struct SetupArgs {
     /// `merge,install`, or `none`. Alone, ask about them again.
     #[arg(long, value_name = "SWITCHES", num_args = 0..=1)]
     lead_defaults: Option<Option<String>>,
-    /// Set any of the context window, the default handoff limit and the
-    /// shepherd's, in tokens or, for a limit, a percentage of the window:
-    /// `window=1M,limit=65%,shepherd=400k`.
+    /// Set any of the default handoff limit, the shepherd's and a context
+    /// window for every model, in tokens or, for a limit, a percentage of the
+    /// window: `limit=65%,shepherd=400k,window=1M`.
     /// A limit over 80% of the window is refused. Alone, ask about them again.
     #[arg(long, value_name = "window=N,limit=N,shepherd=N", num_args = 0..=1)]
     context: Option<Option<String>>,

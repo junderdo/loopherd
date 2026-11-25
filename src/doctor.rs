@@ -4285,8 +4285,13 @@ mod tests {
             tokens: 200_000,
             from: WindowFrom::UnknownModel("claude-mystery-9".into()),
         };
+        let own = Window {
+            tokens: 500_000,
+            from: WindowFrom::ModelConfig("claude-mystery-9".into()),
+        };
         crate::report::append(&reports, "a", &stop(Some(unknown))).unwrap();
         crate::report::append(&reports, "a", &stop(Some(opus.clone()))).unwrap();
+        crate::report::append(&reports, "b", &stop(Some(own))).unwrap();
         crate::report::append(&reports, "old", &stop(Some(opus))).unwrap();
         let checks = checks(&m.install, &m.setup, None, &herdr).unwrap();
         let shown: Vec<_> = text(&checks, true)
@@ -4296,7 +4301,10 @@ mod tests {
             .collect();
         assert_eq!(
             shown,
-            ["ok context window a: 1000000 from its model claude-opus-5-5"]
+            [
+                "ok context window a: 1000000 from its model claude-opus-5-5",
+                "ok context window b: 500000 from config.toml's context_windows.claude-mystery-9",
+            ]
         );
     }
 

@@ -1971,7 +1971,8 @@ fn start_with(
             return Ok(false);
         }
         if Instant::now() >= given_up {
-            let (holder, fix) = match serving_pid(paths, lead) {
+            let pid = serving_pid(paths, lead);
+            let (holder, fix) = match pid {
                 Some(pid) => (
                     format!("pid {pid}"),
                     format!("run loopherd broker-restart {lead} to replace it"),
@@ -1985,18 +1986,50 @@ fn start_with(
                     ),
                 ),
             };
-            bail!(
-                "{} is held by {holder}, which records nothing in it, as a broker older than \
-                 this loopherd does, and didn't let it go within {}; {fix}",
-                lock.display(),
-                humantime::format_duration(wait)
-            );
+            return Err(LockHeld {
+                pid,
+                why: format!(
+                    "{} is held by {holder}, which records nothing in it, as a broker older than \
+                     this loopherd does, and didn't let it go within {}; {fix}",
+                    lock.display(),
+                    humantime::format_duration(wait)
+                ),
+            }
+            .into());
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     spawn()?;
     Ok(true)
 }
+
+/// `start` found a lead's lock held with nothing recorded in it past the wait,
+/// so no broker starts until its holder lets go.
+#[derive(Debug)]
+pub struct LockHeld {
+    /// The pid a broker recorded, when one did: an older broker, which
+    /// `broker-restart` can replace. Without one, the holder may not be a broker.
+    pub pid: Option<u32>,
+    pub why: String,
+}
+
+impl LockHeld {
+    /// Who holds the lock, as a warning's reason that no broker started.
+    pub fn holder(&self) -> &'static str {
+        match self.pid {
+            Some(_) => "an older broker still holds its lock",
+            None => "something that recorded no pid still holds its lock",
+        }
+    }
+}
+
+impl std::fmt::Display for LockHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.why)
+    }
+}
+
+impl std::error::Error for LockHeld {}
 
 /// The broker serving once a start returns.
 #[derive(Debug, Clone, Copy)]
@@ -4795,7 +4828,9 @@ mod tests {
             },
         );
 
-        let why = format!("{:#}", started.unwrap_err());
+        let error = started.unwrap_err();
+        assert!(error.is::<LockHeld>(), "{error:#}");
+        let why = format!("{error:#}");
         assert!(
             why.contains(&format!("pid {}", std::process::id())),
             "{why}"
@@ -4816,7 +4851,9 @@ mod tests {
             &mut || Ok(()),
         );
 
-        let why = format!("{:#}", started.unwrap_err());
+        let error = started.unwrap_err();
+        assert!(error.is::<LockHeld>(), "{error:#}");
+        let why = format!("{error:#}");
         assert!(why.contains("recorded no pid"), "{why}");
         assert!(why.contains("pgrep -f 'loopherd broker lead-h'"), "{why}");
     }

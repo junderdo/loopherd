@@ -53,6 +53,7 @@ pub struct Window {
 #[serde(rename_all = "snake_case")]
 pub enum WindowFrom {
     Config,
+    ModelConfig(String),
     Model(String),
     UnknownModel(String),
     Default,
@@ -63,6 +64,9 @@ impl std::fmt::Display for Window {
         let tokens = self.tokens;
         match &self.from {
             WindowFrom::Config => write!(f, "{tokens} from config.toml's context_window"),
+            WindowFrom::ModelConfig(model) => {
+                write!(f, "{tokens} from config.toml's context_windows.{model}")
+            }
             WindowFrom::Model(model) => write!(f, "{tokens} from its model {model}"),
             WindowFrom::UnknownModel(model) => {
                 write!(f, "{tokens} by default, since its model {model} is unknown")
@@ -72,30 +76,34 @@ impl std::fmt::Display for Window {
     }
 }
 
-/// The context window of a Claude model id, `claude-<family>-<major>-<minor>`
+/// The context window of a known Claude model id, `claude-<family>-<major>-<minor>`
 /// with an optional date; before minor versions the date follows the major.
+/// A model not listed here is unknown, so a new one never gets a guessed window.
 fn model_window(model: &str) -> Option<u64> {
     let mut parts = model.strip_prefix("claude-")?.split('-');
     let family = parts.next()?;
-    if !matches!(family, "opus" | "sonnet" | "haiku" | "fable") {
-        return None;
-    }
     let major: u32 = parts.next()?.parse().ok()?;
     let minor: u32 = match parts.next() {
         Some(minor) if minor.len() <= 2 => minor.parse().ok()?,
         _ => 0,
     };
-    // A 4.6 has 1M only when picked as `[1m]`, which the transcript doesn't record.
-    Some(if (major, minor) >= (4, 7) {
-        LARGEST_WINDOW
-    } else {
-        DEFAULT_WINDOW
-    })
+    match (family, (major, minor)) {
+        ("opus", (4, 7) | (4, 8) | (5, 0) | (5, 5))
+        | ("sonnet", (5, 0) | (5, 5))
+        | ("haiku", (5, 5))
+        | ("fable" | "mythos", (5, 0) | (5, 1) | (5, 2)) => Some(LARGEST_WINDOW),
+        // Claude Code gives a 4.6 1M only when picked as `[1m]`, which the transcript doesn't record.
+        ("opus", (4, 0) | (4, 1) | (4, 5) | (4, 6))
+        | ("sonnet", (4, 0) | (4, 5) | (4, 6))
+        | ("haiku", (4, 5)) => Some(DEFAULT_WINDOW),
+        _ => None,
+    }
 }
 
 /// `own` (a template's or `[lead]`'s `context_limit`), else `config`'s
 /// `default_context_limit`, else [`DEFAULT_LIMIT`]; never over 80% of the
-/// window: `config`'s `context_window`, else `model`'s, else [`DEFAULT_WINDOW`].
+/// window: `config`'s `context_windows.<model>`, else its `context_window`,
+/// else `model`'s, else [`DEFAULT_WINDOW`].
 pub fn effective_limit(
     own: Option<Limit>,
     config: &Path,
@@ -142,7 +150,9 @@ impl ConfigFile {
     }
 
     fn window(&self, model: Option<&str>) -> Window {
+        let own = model.and_then(|m| Some((m, *self.context_windows.get(m)?)));
         let (tokens, from) = match (self.context_window, model) {
+            _ if let Some((model, tokens)) = own => (tokens, WindowFrom::ModelConfig(model.into())),
             (Some(tokens), _) => (tokens, WindowFrom::Config),
             (None, Some(model)) => match model_window(model) {
                 Some(tokens) => (tokens, WindowFrom::Model(model.into())),
@@ -542,7 +552,7 @@ fn note_unknown_model(
     };
     let text = format!(
         "my model {model} has no known context window, so my limit assumes {tokens}; \
-         set the right one with `loopherd config set context_window <tokens>`"
+         set its own with `loopherd config set context_windows.{model} <tokens>`"
     );
     note_once(&state.join("window-noted"), session, text, note)
 }
@@ -1674,6 +1684,8 @@ mod tests {
     #[test]
     fn the_window_comes_from_the_last_turns_model_unless_config_sets_one() {
         let model = |m: &str| WindowFrom::Model(m.into());
+        let unknown = |m: &str| WindowFrom::UnknownModel(m.into());
+        let own = |m: &str| WindowFrom::ModelConfig(m.into());
         for (config_text, model_id, window, from) in [
             (None, "claude-opus-5-5", 1_000_000, model("claude-opus-5-5")),
             (
@@ -1695,7 +1707,66 @@ mod tests {
                 model("claude-fable-5-2"),
             ),
             (None, "claude-opus-4-7", 1_000_000, model("claude-opus-4-7")),
+            (None, "claude-opus-4-8", 1_000_000, model("claude-opus-4-8")),
+            (None, "claude-opus-5", 1_000_000, model("claude-opus-5")),
+            (None, "claude-sonnet-5", 1_000_000, model("claude-sonnet-5")),
+            (
+                None,
+                "claude-fable-5-1",
+                1_000_000,
+                model("claude-fable-5-1"),
+            ),
+            (
+                None,
+                "claude-mythos-5-2",
+                1_000_000,
+                model("claude-mythos-5-2"),
+            ),
+            (None, "claude-mythos-5", 1_000_000, model("claude-mythos-5")),
             (None, "claude-opus-4-6", 200_000, model("claude-opus-4-6")),
+            (
+                None,
+                "claude-sonnet-4-6",
+                200_000,
+                model("claude-sonnet-4-6"),
+            ),
+            (
+                None,
+                "claude-sonnet-4-5-20250929",
+                200_000,
+                model("claude-sonnet-4-5-20250929"),
+            ),
+            (
+                None,
+                "claude-haiku-6-0",
+                200_000,
+                unknown("claude-haiku-6-0"),
+            ),
+            (None, "claude-opus-5-9", 200_000, unknown("claude-opus-5-9")),
+            (
+                None,
+                "claude-mythos-preview",
+                200_000,
+                unknown("claude-mythos-preview"),
+            ),
+            (
+                Some("[context_windows]\n\"claude-opus-4-6\" = 1000000\n"),
+                "claude-opus-4-6",
+                1_000_000,
+                own("claude-opus-4-6"),
+            ),
+            (
+                Some("[context_windows]\n\"claude-opus-4-6\" = 1000000\n"),
+                "claude-haiku-4-5",
+                200_000,
+                model("claude-haiku-4-5"),
+            ),
+            (
+                Some("context_window = 300000\n[context_windows]\n\"claude-opus-5-5\" = 500000\n"),
+                "claude-opus-5-5",
+                500_000,
+                own("claude-opus-5-5"),
+            ),
             (
                 None,
                 "claude-haiku-4-5-20251001",
@@ -1771,7 +1842,7 @@ mod tests {
             *noted.borrow(),
             [
                 "my model claude-mystery-9 has no known context window, so my limit assumes \
-              200000; set the right one with `loopherd config set context_window <tokens>`"
+              200000; set its own with `loopherd config set context_windows.claude-mystery-9 <tokens>`"
             ]
         );
         stop("s2");
@@ -1780,22 +1851,32 @@ mod tests {
 
     #[test]
     fn a_configured_window_leaves_an_unknown_model_unnoted() {
-        let w = World::new();
-        let (_dir, path) = config(Some("context_window = 500000\n"));
-        let t = w.transcript(&[turn("claude-mystery-9", 100)]);
-        let limit = |m: Option<&str>| effective_limit(None, &path, m);
-        let noted = std::cell::RefCell::new(vec![]);
-        handoff_block(
-            &member("lh-1", None),
-            &w.stop("s1", &t, ""),
-            &limit,
-            &w.state(),
-            &|text| {
-                noted.borrow_mut().push(text);
-                Ok(())
-            },
-        );
-        assert!(noted.borrow().is_empty());
+        for config_text in [
+            "context_window = 500000\n",
+            "[context_windows]\n\"claude-mystery-9\" = 500000\n",
+        ] {
+            let w = World::new();
+            let (_dir, path) = config(Some(config_text));
+            let t = w.transcript(&[turn("claude-mystery-9", 100)]);
+            let limit = |m: Option<&str>| effective_limit(None, &path, m);
+            let noted = std::cell::RefCell::new(vec![]);
+            let check = handoff_block(
+                &member("lh-1", None),
+                &w.stop("s1", &t, ""),
+                &limit,
+                &w.state(),
+                &|text| {
+                    noted.borrow_mut().push(text);
+                    Ok(())
+                },
+            );
+            assert_eq!(
+                check.measured.map(|m| m.limit),
+                Some(250_000),
+                "{config_text}"
+            );
+            assert!(noted.borrow().is_empty(), "{config_text}");
+        }
     }
 
     #[test]
