@@ -171,7 +171,7 @@ focused pane (the popup when that fails too), and the view says why. Bind
 it the same way, with its own key (install uses `prefix+shift+m`).
 
 `view.layout` in `config.toml` sets the side, for this action and the
-view's `S` alike: `side-by-side`, the default, puts the shepherd left and
+view's `s` alike: `side-by-side`, the default, puts the shepherd left and
 the view right; `stacked` puts the view on top and the shepherd below.
 The view takes 40% of the split. `v` in the view switches a shepherd in
 the view's tab to the other layout, moving its pane without restarting
@@ -233,19 +233,19 @@ as its main checkout. Then, in order:
    `loopherd feed <herd> --dry-run` lists the tasks you expect.
 4. **Open the herd view.** In a new herdr tab, run `loopherd view`. It
    lists every member, sorted by what needs you; Enter focuses the
-   selected member's pane, `S` focuses the shepherd (or, with none, starts
+   selected member's pane, `s` focuses the shepherd (or, with none, starts
    one in a pane split left of the view, or below it with `view.layout`
    set to `stacked`), `v` switches the view and the shepherd between side
    by side and stacked, saving it as `view.layout`, and `t` switches
    between its
    purple-orange, phosphor and catppuccin themes, remembering the choice as
    `view.theme` in `config.toml`.
-5. **Start the shepherd.** Press `S` in the view, run in a pane rather
+5. **Start the shepherd.** Press `s` in the view, run in a pane rather
    than the plugin's popup, to start it beside the view, in the view's
    directory (a plugin pane's workspace directory, not the plugin's). Or in
    another herdr tab, `cd` to the main checkout, run `claude`, and give it
    this first prompt; the skill has it name its herdr agent `shepherd`, so
-   `S` then finds it:
+   `s` then finds it:
 
    ```text
    You're the shepherd for the <herd> herd in this repo. Read `loopherd --skill`
@@ -362,7 +362,7 @@ as a grill tied to a card (D112). Only `add` starts one: it focuses the new
 pane (`--no-focus` skips that), records the caller's pane and fills a
 `{shepherd_pane}` placeholder with it (`herdr agent focus` takes only an
 agent's pane, so run `add` from one). If the human is still in the member's
-pane, `retire --close` focuses the live shepherd's pane, as the view's `S`
+pane, `retire --close` focuses the live shepherd's pane, as the view's `s`
 finds it, else that recorded pane, else warns and leaves focus to herdr. It holds no `max` slot, is never
 asked to hand off, and is left out of `stats`. A watch wakes on its `gone`
 alone, and a lead's watch also on its `merged`.
@@ -410,7 +410,7 @@ it; `attended = true` implies it (D116).
 | `reports` | Print unread reports, questions first, and mark them read (`--herd`, `--all`). |
 | `status` | Members by herd with herdr's live status (`--all`, `--strays`, `--json`). |
 | `read <member>` | A member's last lines of output, unwrapped (`--lines`, 40 by default, up to 1000). |
-| `view` | The same as a live TUI; Enter focuses the member's pane, `S` focuses the shepherd or starts one beside the view (left of it, or below with `view.layout = "stacked"`), `v` switches the two between side by side and stacked, saving it as `view.layout`, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
+| `view` | The same as a live TUI; Enter focuses the member's pane, `s` focuses the shepherd or starts one beside the view (left of it, or below with `view.layout = "stacked"`), `v` switches the two between side by side and stacked, saving it as `view.layout`, and `t` switches the theme, saving it as `view.theme` in `config.toml`. |
 | `pr [url]` | The herdr plugin's PR link handler: the member that owns the PR in a popup, else the browser. |
 | `stats` | How each herd's work flowed: time to done, review rounds, time waiting on merge, and each run's outcome (`merged`, `closed`, `released`, `retired`), with medians over merged runs per herd and per template (`--herd`, `--since`, `--until`, `--json`). |
 

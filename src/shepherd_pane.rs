@@ -60,7 +60,7 @@ pub fn summon(
     Ok(Summoned::Focused(pane))
 }
 
-/// Where the live shepherd runs, as the herd view's `S` finds it.
+/// Where the live shepherd runs, as the herd view's `s` finds it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Live {
     /// In this pane of this herdr.

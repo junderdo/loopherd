@@ -30,15 +30,15 @@ At the start of each session, run `loopherd doctor` (with `--settings
 failure to the human with the fix it names (D63).
 
 The human's shepherd only, never a lead or member: also at the start of
-each session, name your herdr agent so the herd view's `S` focuses you
+each session, name your herdr agent so the herd view's `s` focuses you
 instead of starting a second shepherd: `herdr agent rename
 "$HERDR_PANE_ID" shepherd`. If herdr answers `agent_name_taken`, another
 shepherd already runs in the pane it names; stop and tell the human. If
 it answers `agent_launch_pending`, find your entry in `herdr agent list`
 (its `pane_id` is `$HERDR_PANE_ID`): if its name is already `shepherd`,
-carry on without a warning, since `S` started you under that name;
+carry on without a warning, since `s` started you under that name;
 otherwise retry the rename once its `launch_pending` clears. On any other
-error, carry on and tell the human that `S` can't find you (D88, D146).
+error, carry on and tell the human that `s` can't find you (D88, D146).
 
 ### Setting up a project
 
@@ -795,7 +795,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   shepherd's pane recorded at its last handoff, leaving focus where it
   was, else beside the focused pane with a note saying why (D87, D94).
   `view.layout` in config.toml sets the side for it and for the view's
-  `S`: `side-by-side`, the default, puts the shepherd left and the view
+  `s`: `side-by-side`, the default, puts the shepherd left and the view
   right; `stacked` puts the view above the shepherd (D138). `v` in the
   view moves the shepherd's pane, when it shares the view's tab, to the
   other layout without restarting either, and saves it as `view.layout`
