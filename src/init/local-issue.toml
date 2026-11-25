@@ -2,21 +2,7 @@
 params = ["id", "type", "skill", "slug", "path"]
 name = "{herd}-{id}"
 branch = "{type}/{id}-{slug}"
-# Done once @REF@ has the issue's Status: line resolved, closed or done, and
-# not done while the file is missing there. Braces are doubled, as loopherd
-# fills {placeholders} in checks.
-@CONTEXT_LIMIT@done = '''
-@FETCH@git cat-file -e @REF@:{path} 2>/dev/null || exit 1
-text=$(git show @REF@:{path}) && printf '%s\n' "$text" | awk '
-  {{ sub(/\r$/, "") }}
-  tolower($0) ~ /^#+[ \t]*comments[ \t]*$/ {{ exit }}
-  tolower($0) ~ /^[ \t*_]*status[ \t*_]*:/ {{
-    s = tolower($0); sub(/^[^:]*:/, "", s); gsub(/[*`,]/, " ", s)
-    closed = " " s " " ~ /[ \t](resolved|closed|done)[ \t]/
-    exit
-  }}
-  END {{ exit !closed }}'
-'''
+@DONE@
 @MERGED@
 prompt = '''
 You're {name}, working the local issue {path} on branch {branch} in
