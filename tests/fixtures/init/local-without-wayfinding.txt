@@ -1,6 +1,6 @@
 == widgets.toml
 # Herd widgets: one worker per ready issue under .scratch/ in this repo.
-# Written by `loopherd init`; yours to edit, loopherd never rewrites it.
+# Written by `loopherd init`; yours to edit. loopherd changes it only on a yes to `loopherd herd upgrade`.
 repo = "<root>/widgets"
 args = ["--permission-mode", "auto"]
 
