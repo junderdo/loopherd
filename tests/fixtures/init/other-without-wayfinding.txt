@@ -54,6 +54,20 @@ task {number} needs-info (fill in), comment the question and the options you
 see on it, then `loopherd report --kind question "<the exact question>"`.
 '''
 
+# A grill the shepherd starts live with the human: `loopherd add --no-focus
+# widgets grill <number> <slug>`, then `loopherd tell` its background, then
+# focus. Attended, so feed never spawns it: keep it out of [queue].
+[template.grill]
+params = ["number", "slug"]
+attended = true
+name = "{herd}-grill-{number}"
+branch = "docs/{number}-{slug}"
+# Fill in from docs/agents/issue-tracker.md:
+# done, a shell command that exits 0 once task {number} is closed, its braces
+# doubled. Until it's set no member counts as done, so feed never retires one.
+merged = "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt_file = "widgets-grill.md"
+
 [lead]
 prompt_file = "widgets-lead.md"
 # From [lead_defaults] when init ran. Off means the lead asks the human.

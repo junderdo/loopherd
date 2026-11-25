@@ -9,4 +9,4 @@ args = ["--permission-mode", "auto"]
 max = @MAX@
 
 @TEMPLATE@@WAYFINDING@
-@LEAD_TABLE@@GROOM@
+@GRILL@@LEAD_TABLE@@GROOM@

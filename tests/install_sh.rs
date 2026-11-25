@@ -791,3 +791,59 @@ fn on_a_terminal_a_current_newer_or_linked_herdr_plugin_is_left_as_is() {
         assert_eq!(release.herdr_changes(), Vec::<String>::new(), "{said}");
     }
 }
+
+const UPDATING: (&str, &str) = ("LOOPHERD_UPDATE", "1");
+
+#[test]
+fn on_a_terminal_an_update_offers_nothing_and_plays_no_splash() {
+    let release = Release::new("Linux", "x86_64");
+    release.herdr_lists_plugin("0.1.1", "github");
+
+    let Some(said) = release.install_on_terminal(&[UPDATING], "y\ny\ny\ny\n") else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    assert!(!said.contains(ALT_SCREEN), "{said}");
+    assert!(!said.contains("[y/N]"), "{said}");
+    assert!(!said.contains("skipped"), "{said}");
+    assert!(!release.agents_dir().exists(), "{said}");
+    assert_eq!(release.herdr_changes(), Vec::<String>::new(), "{said}");
+    assert_eq!(
+        release.log(),
+        "v0.2.0 install-hook\nv0.2.0 setup\nv0.2.0 doctor\n"
+    );
+}
+
+#[test]
+fn an_update_refreshes_the_agent_types_loopherd_installed_and_names_the_skills_update() {
+    let release = Release::new("Linux", "x86_64");
+    release.agents_and_skills_installed();
+    let builder = release.agents_dir().join("builder.md");
+    fs::write(&builder, "an older builder\n").unwrap();
+    let sha = run_ok(Command::new("sha256sum").arg(&builder));
+    let sha = String::from_utf8(sha).unwrap();
+    let ledger = release.home.join(".local/state/loopherd/agents.sha256");
+    fs::create_dir_all(ledger.parent().unwrap()).unwrap();
+    fs::write(
+        &ledger,
+        format!("{} {}\n", sha.split(' ').next().unwrap(), builder.display()),
+    )
+    .unwrap();
+
+    let Some(said) = release.install_on_terminal(&[UPDATING], "y\ny\ny\ny\n") else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    assert_eq!(
+        fs::read_to_string(&builder).unwrap(),
+        fs::read_to_string(format!("{REPO}/agents/builder.md")).unwrap(),
+        "{said}"
+    );
+    assert!(
+        said.contains("claude plugin update mattpocock-skills@claude-plugins-official"),
+        "{said}"
+    );
+    assert!(!said.contains("[y/N]"), "{said}");
+}

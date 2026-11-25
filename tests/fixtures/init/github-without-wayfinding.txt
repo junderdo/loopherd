@@ -72,6 +72,18 @@ question and the options you see on the issue, then
 `loopherd report --kind question "<the exact question>"`.
 '''
 
+# A grill the shepherd starts live with the human: `loopherd add --no-focus
+# widgets grill <number> <slug>`, then `loopherd tell` its background, then
+# focus. Attended, so feed never spawns it: keep it out of [queue].
+[template.grill]
+params = ["number", "slug"]
+attended = true
+name = "{herd}-grill-{number}"
+branch = "docs/{number}-{slug}"
+done = "GH_TOKEN=$(gh auth token --user acme) gh issue view {number} --repo acme/widgets --json state --jq .state | grep -qx CLOSED"
+merged = "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt_file = "widgets-grill.md"
+
 [lead]
 prompt_file = "widgets-lead.md"
 # From [lead_defaults] when init ran. Off means the lead asks the human.

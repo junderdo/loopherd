@@ -1783,6 +1783,29 @@ mod tests {
     }
 
     #[test]
+    fn a_preferred_worker_started_without_its_sandbox_is_warned_of_its_kept_args() {
+        let w = World::new();
+        w.handed_off();
+        let worker = as_worker(&w, "sandbox = \"prefer\"", false);
+        fs::write(
+            w.paths().config_dir().join("sandbox/lh-1.member.json"),
+            r#"{"herd": "h", "template": "t", "args": ["--add-dir", "/x"]}"#,
+        )
+        .unwrap();
+
+        let (result, _) = w.restart_as(false, true, None, &worker);
+
+        let out = result.unwrap();
+        assert!(
+            out.contains(
+                "warning: lh-1 starts with an arg that may loosen its sandbox or permissions: \
+                 --add-dir /x, from the args it was started with"
+            ),
+            "{out}"
+        );
+    }
+
+    #[test]
     fn a_credentials_herds_worker_started_without_its_sandbox_is_refused_even_under_prefer() {
         let w = World::new();
         w.handed_off();

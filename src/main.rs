@@ -1114,6 +1114,7 @@ fn run_herd(action: HerdAction) -> Result<i32> {
                 running_leads: &running_leads,
                 now: SystemTime::now(),
                 terminal: terminal.then_some(&mut input as &mut dyn BufRead),
+                render: &|herd, template| init::template(&paths, herd, template),
             };
             herd::upgrade(&paths, herd.as_deref(), how, &mut std::io::stdout())?;
         }
@@ -2544,7 +2545,7 @@ fn run_update(check: bool, version: Option<String>) -> Result<i32> {
     let places = (|| -> Result<update::Places> {
         let home = PathBuf::from(std::env::var_os("HOME").context("HOME is not set")?);
         Ok(update::Places {
-            config_dir: Paths::from_env()?.config_dir().to_path_buf(),
+            paths: Paths::from_env()?,
             installed: home.join(".local/bin/loopherd"),
             running: std::env::current_exe().context("find this binary")?,
             base: std::env::var("LOOPHERD_RELEASE_BASE")

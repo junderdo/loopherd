@@ -79,7 +79,7 @@ Init never launches an agent.
    `references/herd-file.md` explains each key of the herd file and the
    lead prompt.
 5. Edit only what init wrote: the herd file (with `loopherd herd set`), the
-   lead's prompt file beside it, and the repo files init listed. Leave the
+   lead's and grill's prompt files beside it, and the repo files init listed. Leave the
    rest of the repo and other herds alone.
 6. You're done when `loopherd herds` calls the herd valid and
    `loopherd feed <herd> --dry-run` lists the tasks you expect from the
@@ -577,8 +577,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   each herd's `source` and `backlog` from its repo (paused herds too, 30s
   each), failing on a nonzero exit or timeout; `--verbose` or `--json`
   shows each command's exit status and task count, never the tasks.
+  A herd with migrations `loopherd herd upgrade` would offer, declined
+  ones left out, gets one `info` line naming them, never a failure.
   `<herd>` limits the herd, repo, state and tracker checks to that herd.
-  It prints only problems, each with its fix, then `doctor: <n> ok, <n>
+  It prints only problems and info lines, each with its fix, then `doctor: <n> ok, <n>
   warnings, <n> failures`; `--verbose` lists every check, `--json` gives
   them as data, `--settings <file>` checks another settings file. Exits 0
   clean or warnings only, 1 on any failure, 2 when it couldn't run or

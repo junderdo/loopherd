@@ -30,6 +30,19 @@ impl Releases {
         fs::create_dir_all(releases.home()).unwrap();
         fs::create_dir_all(releases.fake_bin()).unwrap();
         executable(
+            &releases.fake_loopherd(),
+            format!(
+                "#!/bin/sh\ncase \"$1 $2\" in\n\
+                 'doctor --json') /bin/cat '{dir}/doctor.json' ;;\n\
+                 'herd upgrade') echo \"herd upgrade$3\" >> '{dir}/upgrades'; \
+                 /bin/cat '{dir}/upgrade-says' 2>/dev/null; exit $(/bin/cat '{dir}/upgrade-exit' 2>/dev/null || echo 0) ;;\n\
+                 esac\n",
+                dir = releases.dir.path().display(),
+            ),
+        );
+        fs::create_dir_all(releases.installed().parent().unwrap()).unwrap();
+        fakes::copied(releases.fake_loopherd(), releases.installed());
+        executable(
             &releases.fake_bin().join("curl"),
             format!(
                 "#!/bin/sh\ncase \"$*\" in\n*redirect_url*) [ -f '{latest}' ] || exit 6; printf '{GITHUB}/tag/%s' \"$(cat '{latest}')\" ;;\n*) exec /usr/bin/curl \"$@\" ;;\nesac\n",
@@ -61,6 +74,37 @@ impl Releases {
 
     fn latest_file(&self) -> PathBuf {
         self.dir.path().join("latest")
+    }
+
+    /// A `loopherd` whose `doctor --json` prints `doctor.json` and whose
+    /// `herd upgrade` logs to `upgrades`, prints `upgrade-says` and exits
+    /// `upgrade-exit`.
+    fn fake_loopherd(&self) -> PathBuf {
+        self.dir.path().join("fake-loopherd")
+    }
+
+    fn upgrades(&self) -> String {
+        fs::read_to_string(self.dir.path().join("upgrades")).unwrap_or_default()
+    }
+
+    fn upgrade_says(&self, text: &str) {
+        fs::write(self.dir.path().join("upgrade-says"), text).unwrap();
+    }
+
+    fn upgrade_exits(&self, code: i32) {
+        fs::write(self.dir.path().join("upgrade-exit"), code.to_string()).unwrap();
+    }
+
+    /// A herd file `name` whose repo exists, with `extra` appended.
+    fn herd(&self, name: &str, extra: &str) {
+        let repo = self.dir.path().join("repo");
+        fs::create_dir_all(&repo).unwrap();
+        fs::create_dir_all(self.config().join("herds")).unwrap();
+        fs::write(
+            self.config().join(format!("herds/{name}.toml")),
+            format!("repo = {:?}\n{extra}", repo),
+        )
+        .unwrap();
     }
 
     fn installed(&self) -> PathBuf {
@@ -100,17 +144,14 @@ impl Releases {
         fs::write(
             dir.join("install.sh"),
             format!(
-                "echo \"install.sh {tag} LOOPHERD_VERSION=$LOOPHERD_VERSION LOOPHERD_NO_SPLASH=$LOOPHERD_NO_SPLASH $*\" >> '{log}'\n\
+                "echo \"install.sh {tag} LOOPHERD_VERSION=$LOOPHERD_VERSION LOOPHERD_NO_SPLASH=$LOOPHERD_NO_SPLASH LOOPHERD_UPDATE=${{LOOPHERD_UPDATE:-}} $*\" >> '{log}'\n\
                  echo 'install: installed {bin}'\n\
-                 /bin/mkdir -p '{bin_dir}'\n\
-                 printf '#!/bin/sh\\n[ \"$1 $2\" != \"doctor --json\" ] || /bin/cat \"%s\"\\n' '{doctor}' > '{bin}.tmp'\n\
-                 /bin/chmod 755 '{bin}.tmp'\n\
+                 /bin/cp '{fake}' '{bin}.tmp'\n\
                  /bin/mv -f '{bin}.tmp' '{bin}'\n\
                  exit {code}\n",
                 log = self.log_file().display(),
                 bin = bin.display(),
-                bin_dir = bin.parent().unwrap().display(),
-                doctor = self.dir.path().join("doctor.json").display(),
+                fake = self.fake_loopherd().display(),
             ),
         )
         .unwrap();
@@ -187,7 +228,7 @@ fn behind_it_names_both_tags_then_runs_the_latest_release_s_installer_pinned_to_
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(
         releases.log(),
-        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 \n"
+        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 LOOPHERD_UPDATE=1 \n"
     );
     let said = stdout(&out);
     assert!(said.starts_with("v0.1.0 → v0.2.0\n"), "{said}");
@@ -254,7 +295,6 @@ fn up_to_date_it_says_so_and_runs_no_installer() {
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(stdout(&out), "loopherd is up to date (v0.2.0)\n");
     assert_eq!(releases.log(), "");
-    assert!(!releases.installed().exists());
 }
 
 #[test]
@@ -287,7 +327,7 @@ fn version_installs_an_older_release_without_asking_for_the_latest() {
     );
     assert_eq!(
         releases.log(),
-        "install.sh v0.1.0 LOOPHERD_VERSION=v0.1.0 LOOPHERD_NO_SPLASH=1 \n"
+        "install.sh v0.1.0 LOOPHERD_VERSION=v0.1.0 LOOPHERD_NO_SPLASH=1 LOOPHERD_UPDATE=1 \n"
     );
 }
 
@@ -307,7 +347,7 @@ fn version_naming_the_current_tag_reinstalls_it() {
     );
     assert_eq!(
         releases.log(),
-        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 \n"
+        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 LOOPHERD_UPDATE=1 \n"
     );
 }
 
@@ -379,7 +419,7 @@ fn with_only_wget_it_reads_the_redirect_and_downloads_with_wget() {
     assert!(lines[1].contains("download/v0.2.0/install.sh"), "{log}");
     assert_eq!(
         lines[2],
-        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 "
+        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 LOOPHERD_UPDATE=1 "
     );
 }
 
@@ -982,4 +1022,140 @@ fn a_pull_that_fails_is_a_failure_saying_the_tree_may_be_changed_not_a_refusal()
     assert!(stderr.contains("may be"), "{stderr}");
     assert!(stderr.contains("git status"), "{stderr}");
     assert_eq!(source.log(), "");
+}
+
+/// A led herd, with a grill, lacking `follow_ups_ready`, and with `merged`, a
+/// merged check not naming its repo: one pending migration, or two.
+fn led(merged: &str) -> String {
+    format!(
+        "[queue]\ntemplate = \"issue\"\nsource = \"list\"\nmax = 2\n\
+         [template.issue]\nparams = [\"number\"]\nprompt = \"work {{number}}\"\ndone = \"exit 0\"\n{merged}\
+         [template.grill]\nparams = []\nattended = true\nprompt = \"grill\"\n\
+         [lead]\nprompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n"
+    )
+}
+
+const MERGED_BY_HAND: &str = "merged = \"gh pr list --head {branch} --state merged --json number --jq length | grep -qx 1\"\n";
+
+#[test]
+fn after_installing_it_runs_the_installed_binary_s_herd_upgrade() {
+    let releases = Releases::new();
+    releases.installed_at("v0.1.0");
+    releases.latest("v0.2.0");
+    releases.publish("v0.2.0");
+    releases.upgrade_says("h: 1 new feature: merged-repo\n");
+
+    let out = releases.run(&[]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(releases.upgrades(), "herd upgrade\n");
+    let said = stdout(&out);
+    assert!(said.ends_with("h: 1 new feature: merged-repo\n"), "{said}");
+}
+
+#[test]
+fn up_to_date_it_still_runs_herd_upgrade() {
+    let releases = Releases::new();
+    releases.installed_at("v0.2.0");
+    releases.latest("v0.2.0");
+
+    let out = releases.run(&[]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(releases.upgrades(), "herd upgrade\n");
+}
+
+#[test]
+fn a_source_install_runs_herd_upgrade_after_installing() {
+    let source = Source::new();
+    source.upstream_moves(1);
+
+    let out = source.run(&[]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(source.releases.upgrades(), "herd upgrade\n");
+}
+
+#[test]
+fn a_failed_herd_upgrade_leaves_the_update_succeeded_naming_the_command() {
+    let releases = Releases::new();
+    releases.installed_at("v0.1.0");
+    releases.latest("v0.2.0");
+    releases.publish("v0.2.0");
+    releases.upgrade_exits(1);
+
+    let out = releases.run(&[]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    let said = stdout(&out);
+    assert!(
+        said.ends_with(
+            "herd upgrade failed (exit status: 1); run loopherd herd upgrade to try again\n"
+        ),
+        "{said}"
+    );
+}
+
+#[test]
+fn check_runs_no_herd_upgrade() {
+    let releases = Releases::new();
+    releases.installed_at("v0.1.0");
+    releases.latest("v0.2.0");
+
+    releases.run(&["--check"]);
+
+    assert_eq!(releases.upgrades(), "");
+}
+
+#[test]
+fn check_adds_the_herds_pending_count() {
+    let releases = Releases::new();
+    releases.installed_at("v0.2.0");
+    releases.latest("v0.2.0");
+    releases.herd("a", &led(MERGED_BY_HAND));
+    releases.herd("b", &led(""));
+
+    let out = releases.run(&["--check"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "loopherd is up to date (v0.2.0)\n\
+         2 herds have 3 new features; run loopherd herd upgrade\n"
+    );
+}
+
+#[test]
+fn check_behind_adds_one_herd_s_one_feature() {
+    let releases = Releases::new();
+    releases.installed_at("v0.1.0");
+    releases.latest("v0.2.0");
+    releases.herd("a", &led(""));
+
+    let out = releases.run(&["--check"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", stderr(&out));
+    assert_eq!(
+        stdout(&out),
+        "v0.1.0 → v0.2.0 available; run loopherd update\n\
+         1 herd has 1 new feature; run loopherd herd upgrade\n"
+    );
+}
+
+#[test]
+fn check_adds_nothing_when_every_pending_feature_is_declined() {
+    let releases = Releases::new();
+    releases.installed_at("v0.2.0");
+    releases.latest("v0.2.0");
+    releases.herd(
+        "a",
+        &format!(
+            "declined = [\"lead-follow-ups-ready\", \"merged-repo\"]\n{}",
+            led(MERGED_BY_HAND)
+        ),
+    );
+
+    let out = releases.run(&["--check"]);
+
+    assert_eq!(stdout(&out), "loopherd is up to date (v0.2.0)\n");
 }

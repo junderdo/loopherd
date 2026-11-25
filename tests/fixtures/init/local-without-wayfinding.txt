@@ -410,6 +410,33 @@ options you see under `## Comments`, commit and push the branch, then
 `loopherd report --kind question "<the exact question>"`.
 '''
 
+# A grill the shepherd starts live with the human: `loopherd add --no-focus
+# widgets grill <id> <slug> <path>`, then `loopherd tell` its background, then
+# focus. Attended, so feed never spawns it: keep it out of [queue].
+[template.grill]
+params = ["id", "slug", "path"]
+attended = true
+name = "{herd}-grill-{id}"
+branch = "docs/{id}-{slug}"
+# Done once origin/main has the issue's Status: line resolved, closed or done, and
+# not done while the file is missing there. Braces are doubled, as loopherd
+# fills {placeholders} in checks.
+done = '''
+git fetch -q origin main 2>/dev/null || git fetch -q origin main || exit
+git cat-file -e origin/main:{path} 2>/dev/null || exit 1
+text=$(git show origin/main:{path}) && printf '%s\n' "$text" | awk '
+  {{ sub(/\r$/, "") }}
+  tolower($0) ~ /^#+[ \t]*comments[ \t]*$/ {{ exit }}
+  tolower($0) ~ /^[ \t*_]*status[ \t*_]*:/ {{
+    s = tolower($0); sub(/^[^:]*:/, "", s); gsub(/[*`,]/, " ", s)
+    closed = " " s " " ~ /[ \t](resolved|closed|done)[ \t]/
+    exit
+  }}
+  END {{ exit !closed }}'
+'''
+merged = "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt_file = "widgets-grill.md"
+
 [lead]
 prompt_file = "widgets-lead.md"
 # From [lead_defaults] when init ran. Off means the lead asks the human.

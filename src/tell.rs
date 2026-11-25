@@ -57,7 +57,6 @@ mod tests {
     fn sends_on_the_main_view_and_confirms_it_went_working() {
         let herdr = FakeHerdr::new(&[]).with_agent("lh-1");
         herdr.set_screen(PANE, MAIN_VIEW);
-        herdr.set_working_on_prompt();
         let out = tell(&herdr, "lh-1", "rebase onto main", WAIT).unwrap();
         assert_eq!(out, "told lh-1; it's working");
         assert_eq!(
@@ -85,6 +84,7 @@ mod tests {
     fn says_so_when_the_member_did_not_go_working() {
         let herdr = FakeHerdr::new(&[]).with_agent_in("lh-1", AgentStatus::Idle);
         herdr.set_screen(PANE, MAIN_VIEW);
+        herdr.set_idle_on_prompt();
         let out = tell(&herdr, "lh-1", "rebase onto main", WAIT).unwrap();
         assert_eq!(
             out,

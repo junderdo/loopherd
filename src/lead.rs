@@ -2690,6 +2690,34 @@ mod tests {
     }
 
     #[test]
+    fn the_main_checkouts_local_settings_count_for_a_leads_permissions() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        ensure_detached_worktree(&setup.repo, "lead-h").unwrap();
+        let file = setup.repo.join(".claude/settings.local.json");
+        fs::create_dir_all(file.parent().unwrap()).unwrap();
+        fs::write(&file, r#"{"permissions": {"allow": ["Write"]}}"#).unwrap();
+
+        let err = lead(
+            &herdr(),
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &request(&[]),
+            Some("w1"),
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "sandbox: lead-h can't run sandboxed: your Claude settings loosen its sandbox: \
+                 {}: permissions.allow opens Write to writes; remove those, or set [lead] \
+                 sandbox = \"prefer\" in herd h to start it with them as warnings",
+                file.display()
+            )
+        );
+    }
+
+    #[test]
     fn empty_placeholder_settings_in_a_kept_lead_worktree_count_as_none() {
         let setup = Setup::with_lead("prompt = \"go\"");
         let worktree = ensure_detached_worktree(&setup.repo, "lead-h").unwrap();
@@ -2793,6 +2821,43 @@ mod tests {
         .unwrap();
 
         assert_eq!(code, 0);
+        let started = fs::read_to_string(setup.root.join("state/broker-started")).unwrap();
+        assert_eq!(started, "lead-h");
+    }
+
+    #[test]
+    fn a_lead_whose_prompt_stays_unsubmitted_still_gets_its_broker_and_exits_1() {
+        let setup = Setup::with_lead("prompt = \"go\"");
+        let req = LeadRequest {
+            broker: |paths, lead| {
+                let dir = paths.state_dir();
+                fs::create_dir_all(dir)?;
+                fs::write(dir.join("broker-started"), lead)?;
+                Ok(true)
+            },
+            ..request(&[])
+        };
+        let herdr = herdr();
+        herdr.swallow_enters(4);
+
+        let (report, code) = run(
+            &herdr,
+            &mut MemLedger::default(),
+            &setup.paths(),
+            &req,
+            false,
+            Some("w1"),
+        )
+        .unwrap();
+
+        assert_eq!(code, 1);
+        assert!(
+            report.ends_with(
+                "unsubmitted: lead-h's prompt is still unsubmitted in its input box after 3 \
+                 more Enters: press Enter in pane w1:p1"
+            ),
+            "{report}"
+        );
         let started = fs::read_to_string(setup.root.join("state/broker-started")).unwrap();
         assert_eq!(started, "lead-h");
     }

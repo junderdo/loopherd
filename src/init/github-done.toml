@@ -1,0 +1,1 @@
+done = "@GH_TOKEN@ gh issue view {number} --repo @OWNER_REPO@ --json state --jq .state | grep -qx CLOSED"
