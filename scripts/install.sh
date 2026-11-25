@@ -118,11 +118,6 @@ run_extras() {
     [ "$1" = splash ] || say "skipped the extras: they need bash"
     return 0
   fi
-  # The offers read what's installed through jq; without it they'd misreport.
-  if [ "$1" = offers ] && ! command -v jq >/dev/null; then
-    say "skipped the extras: they need jq; install it, then run this installer again"
-    return 0
-  fi
   tty=/dev/null
   # Opening, not -r: without a controlling terminal /dev/tty exists but won't open.
   if (: </dev/tty) 2>/dev/null; then tty=/dev/tty; fi

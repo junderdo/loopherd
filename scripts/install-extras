@@ -46,6 +46,12 @@ run_offers() {
   local status=0
   case "$agents" in yes) agents=--with-agents ;; no) agents=--no-extras ;; update) agents=--update ;; esac
   offer_agents "$agents" "$root/agents" "$claude_dir/agents" "${XDG_STATE_HOME:-$HOME/.local/state}/loopherd/agents.sha256"
+  # The other offers read what's installed through jq; without it they'd misreport.
+  if ! command -v jq >/dev/null; then
+    [[ "$skills$herdr_plugin$herdr_keys" == nonono ]] ||
+      echo "skipped the mattpocock-skills plugin and the herdr offers: they need jq; install it, then run this installer again"
+    return 0
+  fi
   # The plugin goes into the config dir beside --settings, like the hooks and agents (D27).
   # A failed install is reported, but the herdr offers still run before it fails the run.
   if [[ -n "$settings" ]]; then

@@ -484,6 +484,15 @@ impl Release {
     /// The installer as `curl | sh` on a pty fed `typed`, or None where
     /// util-linux `script` isn't available.
     fn install_on_terminal(&self, envs: &[(&str, &str)], typed: &str) -> Option<String> {
+        self.install_on_terminal_with_path(&self.path(), envs, typed)
+    }
+
+    fn install_on_terminal_with_path(
+        &self,
+        path: &str,
+        envs: &[(&str, &str)],
+        typed: &str,
+    ) -> Option<String> {
         let util_linux = Command::new("script")
             .arg("--version")
             .output()
@@ -496,7 +505,7 @@ impl Release {
         cmd.args(["-qec", &shell, "/dev/null"])
             .env_clear()
             .env("HOME", &self.home)
-            .env("PATH", self.path())
+            .env("PATH", path)
             .env("TERM", "xterm-256color")
             .env(
                 "LOOPHERD_RELEASE_BASE",
@@ -618,40 +627,57 @@ fn shipped_plugin_version() -> String {
         .to_string()
 }
 
-#[test]
-fn without_jq_the_extras_are_skipped_naming_it_and_the_install_succeeds() {
-    let release = Release::new("Linux", "x86_64");
-    let bin = release.dir.path().join("no-jq-bin");
-    fs::create_dir_all(&bin).unwrap();
-    symlink(release.fake_bin.join("uname"), bin.join("uname")).unwrap();
-    for tool in [
-        "sh",
-        "bash",
-        "curl",
-        "tar",
-        "gzip",
-        "mktemp",
-        "mkdir",
-        "rm",
-        "mv",
-        "cp",
-        "chmod",
-        "awk",
-        "sha256sum",
-    ] {
-        let found = run_ok(
-            Command::new("sh")
-                .arg("-c")
-                .arg(format!("command -v {tool}")),
-        );
-        let found = String::from_utf8(found).unwrap();
-        symlink(found.trim(), bin.join(tool)).unwrap();
+impl Release {
+    /// The fake bin, then links to everything in the system dirs but jq.
+    fn path_without_jq(&self) -> String {
+        let bin = self.dir.path().join("no-jq-bin");
+        fs::create_dir_all(&bin).unwrap();
+        for dir in ["/usr/bin", "/bin"] {
+            for entry in fs::read_dir(dir).unwrap().flatten() {
+                let link = bin.join(entry.file_name());
+                if entry.file_name() != "jq" && fs::symlink_metadata(&link).is_err() {
+                    symlink(entry.path(), link).unwrap();
+                }
+            }
+        }
+        format!("{}:{}", self.fake_bin.display(), bin.display())
     }
-    let out = release.run(INSTALL_SH, bin.to_str().unwrap(), &[]);
+}
+
+const NEEDS_JQ: &str = "skipped the mattpocock-skills plugin and the herdr offers: they need jq; install it, then run this installer again";
+
+#[test]
+fn without_jq_the_agent_types_are_still_offered_and_the_rest_skipped_naming_it() {
+    let release = Release::new("Linux", "x86_64");
+
+    let out = release.run(INSTALL_SH, &release.path_without_jq(), &[]);
+
     let said = text(&out);
     assert!(out.status.success(), "{said}");
-    assert!(said.contains("skipped the extras: they need jq"), "{said}");
+    assert!(
+        said.contains("skipped loopherd's agent types (no terminal); run this installer again in a terminal to be asked"),
+        "{said}"
+    );
+    assert!(said.contains(NEEDS_JQ), "{said}");
     assert!(release.installed().exists());
+}
+
+#[test]
+fn without_jq_on_a_terminal_yes_installs_the_agent_types() {
+    let release = Release::new("Linux", "x86_64");
+    let Some(said) =
+        release.install_on_terminal_with_path(&release.path_without_jq(), &[NO_SPLASH], "y\n")
+    else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+    assert!(said.contains(NEEDS_JQ), "{said}");
+    for name in AGENTS {
+        assert!(
+            release.agents_dir().join(format!("{name}.md")).exists(),
+            "{said}"
+        );
+    }
 }
 
 impl Release {
