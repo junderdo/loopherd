@@ -20,7 +20,7 @@ mod edit;
 mod remove;
 mod upgrade;
 
-pub use edit::{get, set, unset};
+pub use edit::{get, replace, rewrite, set, unset};
 pub use remove::{Removal, remove};
 pub use upgrade::{Upgrade, new_features, pending, upgrade};
 

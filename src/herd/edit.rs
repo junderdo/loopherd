@@ -82,6 +82,20 @@ pub fn unset(paths: &Paths, herd: &str, key: &str) -> Result<bool> {
     })
 }
 
+/// Replaces `herd`'s file, which reads `was`, with `now`, once that passes
+/// the checks `loopherd herds` makes; refuses a file changed since it read `was`.
+pub fn rewrite(paths: &Paths, herd: &str, was: &str, now: &str) -> Result<()> {
+    edit(paths, herd, |doc| {
+        let file = file_of(&paths.herds, herd)?;
+        if doc.to_string() != was {
+            bail!("{} changed while init asked; run it again", file.display());
+        }
+        *doc = parse(now, &file)?;
+        Ok(true)
+    })?;
+    Ok(())
+}
+
 /// Applies `change` to `herd`'s file under the file's lock and, when it
 /// returns true, replaces the file with the result through a temp file and a
 /// rename, once that passes the checks `loopherd herds` makes.
@@ -113,7 +127,7 @@ pub(super) fn edit(
 
 /// Replaces `file`, or a symlink's target, with `text` through a temp file
 /// and a rename, keeping its permissions.
-pub(super) fn replace(file: &Path, text: &str) -> Result<()> {
+pub fn replace(file: &Path, text: &str) -> Result<()> {
     // Renaming over a symlink would replace it, so write its target.
     let file = fs::canonicalize(file).with_context(|| format!("read {}", file.display()))?;
     let written = || format!("write {}", file.display());

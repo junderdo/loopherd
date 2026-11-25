@@ -34,6 +34,7 @@ pub enum Kind {
     Other,
 }
 
+#[derive(Clone)]
 pub struct Tracker {
     pub kind: Kind,
     pub labels: Labels,
@@ -42,6 +43,7 @@ pub struct Tracker {
 }
 
 /// The tracker's label for each triage role the herd uses.
+#[derive(Clone)]
 pub struct Labels {
     pub ready_for_agent: String,
     pub needs_info: String,
