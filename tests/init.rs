@@ -6666,3 +6666,67 @@ fn an_other_trackers_grill_prompt_marks_each_tracker_command_to_fill_in() {
         ],
     );
 }
+
+impl Fixture {
+    /// `loopherd <args>` on a terminal, typing `input`.
+    fn loopherd_on_terminal(&self, args: &[&str], input: &str) -> Output {
+        let typed = self.root.path().join("typed");
+        fs::write(&typed, input).unwrap();
+        let mut line = format!("'{}'", env!("CARGO_BIN_EXE_loopherd"));
+        for arg in args {
+            line.push_str(&format!(" '{arg}'"));
+        }
+        self.run(
+            Command::new("script")
+                .args(["-qec", &line, "/dev/null"])
+                .env("SHELL", "/bin/sh")
+                .stdin(fs::File::open(typed).unwrap()),
+        )
+    }
+}
+
+#[test]
+fn herd_upgrade_gives_a_herd_without_a_grill_the_one_init_writes_today() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let grill = grill_template(&fixture);
+    let prompt = grill_prompt(&fixture);
+    let herd_file = fixture.herds().join("widgets.toml");
+    let text_before = fs::read_to_string(&herd_file).unwrap();
+    let at = text_before.find("# A grill").unwrap();
+    let end = text_before[at..].find("\n\n").unwrap() + at + 1;
+    fs::write(
+        &herd_file,
+        format!("{}{}", &text_before[..at], &text_before[end + 1..]),
+    )
+    .unwrap();
+    fs::remove_file(fixture.herds().join("widgets-grill.md")).unwrap();
+    assert!(herd_toml(&fixture)["template"].get("grill").is_none());
+
+    let out = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n\n\n\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(shown.contains("grill — Adds [template.grill]"), "{shown}");
+    assert_eq!(grill_template(&fixture), grill);
+    assert_eq!(grill_prompt(&fixture), prompt);
+    assert_ok(&fixture.loopherd(&["herds"]));
+}
+
+#[test]
+fn herd_upgrade_without_a_terminal_lists_a_missing_grill_and_writes_nothing() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    assert_ok(&fixture.loopherd(&["herd", "unset", "widgets", "template.grill"]));
+    let before = fixture.config_listing();
+
+    let out = fixture.loopherd(&["herd", "upgrade", "widgets"]);
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("widgets: 1 new feature: grill\n"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(fixture.config_listing(), before);
+}

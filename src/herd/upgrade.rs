@@ -22,6 +22,16 @@ pub struct Upgrade<'a> {
     /// Where answers are read; without one nothing is applied and each herd's
     /// pending ids are listed.
     pub terminal: Option<&'a mut dyn BufRead>,
+    /// Renders a herd's named template as init would write it, only when offered.
+    pub render: &'a dyn Fn(&str, &str) -> Result<NewTemplate>,
+}
+
+/// A template as init would write it for one herd.
+pub struct NewTemplate {
+    /// Its `[template.<name>]` table as TOML, comment included.
+    pub table: String,
+    /// Its prompt file's name in the herds directory, and text.
+    pub prompt: Option<(String, String)>,
 }
 
 /// One change newer init writes. Whether a herd has it is read from the
@@ -44,9 +54,11 @@ enum State {
         place: &'static str,
         snippet: String,
     },
+    /// A template init writes, rendered when offered.
+    Template(&'static str),
 }
 
-const MIGRATIONS: [Migration; 2] = [
+const MIGRATIONS: [Migration; 3] = [
     Migration {
         id: "lead-follow-ups-ready",
         explanation: "Writes the lead's follow_ups_ready switch as [lead_defaults] sets it, else off.\n\
@@ -61,7 +73,62 @@ const MIGRATIONS: [Migration; 2] = [
         lead_reads_at_start: false,
         state: merged_repo,
     },
+    Migration {
+        id: "grill",
+        explanation: "Adds [template.grill], an attended grill the shepherd starts with\n\
+                      `loopherd add <herd> grill`, and its prompt file beside the herd file.",
+        lead_reads_at_start: false,
+        state: grill,
+    },
 ];
+
+fn grill(doc: &DocumentMut, _: &SwitchValues) -> State {
+    match doc.get("template").and_then(|t| t.get("grill")) {
+        Some(_) => State::Current,
+        None => State::Template("grill"),
+    }
+}
+
+/// Adds `table`, a TOML `[template.<name>]`, at the end of `doc`.
+fn add_template(doc: &mut DocumentMut, name: &str, table: &str) -> Result<()> {
+    let mut fragment: DocumentMut = table.parse().context("rendered template")?;
+    let mut new = fragment
+        .get_mut("template")
+        .and_then(|t| t.get_mut(name))
+        .and_then(|t| t.as_table_mut())
+        .map(std::mem::take)
+        .with_context(|| format!("rendered template has no [template.{name}]"))?;
+    let last = doc.iter().filter_map(|(_, item)| last_position(item)).max();
+    new.set_position(last.map(|p| p + 1));
+    // A table that follows another starts after a blank line.
+    let comment = new
+        .decor()
+        .prefix()
+        .and_then(|p| p.as_str())
+        .unwrap_or("")
+        .to_string();
+    new.decor_mut().set_prefix(format!("\n{comment}"));
+    let templates = doc
+        .entry("template")
+        .or_insert_with(|| {
+            let mut t = toml_edit::Table::new();
+            t.set_implicit(true);
+            Item::Table(t)
+        })
+        .as_table_mut()
+        .context("template is not a table")?;
+    templates.insert(name, Item::Table(new));
+    Ok(())
+}
+
+fn last_position(item: &Item) -> Option<isize> {
+    let table = item.as_table()?;
+    let nested = table
+        .iter()
+        .filter_map(|(_, item)| last_position(item))
+        .max();
+    table.position().max(nested)
+}
 
 fn follow_ups_ready(doc: &DocumentMut, defaults: &SwitchValues) -> State {
     // As init writes it, so a lead inheriting the switch keeps it.
@@ -194,6 +261,66 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                     true
                 }
             }
+            State::Template(name) => {
+                writeln!(out, "{header}")?;
+                let new = match (how.render)(herd, name) {
+                    Ok(new) => new,
+                    Err(e) => {
+                        writeln!(out, "Not applied: can't render it: {e:#}")?;
+                        continue;
+                    }
+                };
+                let prompt = new
+                    .prompt
+                    .as_ref()
+                    .map(|(name, text)| (paths.herds.join(name), text));
+                if let Some((path, _)) = prompt
+                    .as_ref()
+                    .filter(|(path, _)| fs::symlink_metadata(path).is_ok())
+                {
+                    writeln!(
+                        out,
+                        "Not applied: {} already exists, and upgrade never replaces a prompt.",
+                        path.display()
+                    )?;
+                    writeln!(out, "The template belongs in {}:", file.display())?;
+                    for line in new.table.lines() {
+                        writeln!(out, "  {line}")?;
+                    }
+                    ask(input, out, "Stop offering this?", false)?
+                } else {
+                    let mut after = doc.clone();
+                    add_template(&mut after, name, &new.table)?;
+                    let (was, now) = (doc.to_string(), after.to_string());
+                    let shown = file.display().to_string();
+                    let diff = similar::TextDiff::from_lines(&was, &now);
+                    write!(out, "{}", diff.unified_diff().header(&shown, &shown))?;
+                    if let Some((path, text)) = &prompt {
+                        let diff = similar::TextDiff::from_lines("", text.as_str());
+                        let shown = path.display().to_string();
+                        write!(out, "{}", diff.unified_diff().header("/dev/null", &shown))?;
+                    }
+                    if ask(input, out, "Apply?", true)? {
+                        backup.take()?;
+                        if let Some((path, text)) = &prompt {
+                            write_new(path, text)?;
+                        }
+                        let added = edit(paths, herd, |doc| {
+                            add_template(doc, name, &new.table)?;
+                            Ok(true)
+                        });
+                        if let Err(e) = added {
+                            if let Some((path, _)) = &prompt {
+                                let _ = fs::remove_file(path);
+                            }
+                            return Err(e);
+                        }
+                        false
+                    } else {
+                        true
+                    }
+                }
+            }
             State::Tailored { place, snippet } => {
                 writeln!(out, "{header}")?;
                 writeln!(
@@ -248,6 +375,17 @@ fn ask(
             _ => writeln!(out, "answer y or n")?,
         }
     }
+}
+
+/// Writes `text` to a new file at `path`, refusing one that exists.
+fn write_new(path: &Path, text: &str) -> Result<()> {
+    let mut file = fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .with_context(|| format!("write {}", path.display()))?;
+    file.write_all(text.as_bytes())
+        .with_context(|| format!("write {}", path.display()))
 }
 
 fn read(file: &Path) -> Result<DocumentMut> {
@@ -306,6 +444,11 @@ params = ["number"]
 prompt = "work {number}"
 done = "exit 0"
 
+[template.grill]
+params = ["number"]
+attended = true
+prompt = "grill {number}"
+
 [lead]
 prompt = "lead {herd}"
 # From [lead_defaults] when init ran.
@@ -328,6 +471,16 @@ merge = false # the human merges
         humantime::parse_rfc3339(stamp).unwrap()
     }
 
+    fn grill(_herd: &str, template: &str) -> Result<NewTemplate> {
+        assert_eq!(template, "grill");
+        Ok(NewTemplate {
+            table: "# Started live.\n[template.grill]\nparams = [\"number\"]\nattended = true\n\
+                    prompt_file = \"h-grill.md\"\n"
+                .into(),
+            prompt: Some(("h-grill.md".into(), "grill {number}\n".into())),
+        })
+    }
+
     /// Runs an upgrade of `herd` answering `answers` on a terminal; what it printed.
     fn answered(paths: &Paths, herd: Option<&str>, answers: &str, leads: &[&str]) -> String {
         let running_leads = leads.iter().map(|h| h.to_string()).collect();
@@ -337,6 +490,7 @@ merge = false # the human merges
             running_leads: &running_leads,
             now: at("2026-11-24T10:00:00Z"),
             terminal: Some(&mut input),
+            render: &grill,
         };
         upgrade(paths, herd, how, &mut out).unwrap();
         String::from_utf8(out).unwrap()
@@ -367,7 +521,7 @@ merge = false # the human merges
                  On, the lead files a reviewer's in-scope follow-ups ready for agents.\n\
                  --- {file}\n\
                  +++ {file}\n\
-                 @@ -15,3 +15,4 @@\n \
+                 @@ -20,3 +20,4 @@\n \
                  prompt = \"lead {{herd}}\"\n \
                  # From [lead_defaults] when init ran.\n \
                  merge = false # the human merges\n\
@@ -518,6 +672,7 @@ merge = false # the human merges
             running_leads: &running_leads,
             now: at("2026-11-24T10:00:00Z"),
             terminal: None,
+            render: &grill,
         };
         upgrade(&paths, None, how, &mut out).unwrap();
         assert_eq!(
@@ -543,6 +698,7 @@ merge = false # the human merges
             running_leads: &running_leads,
             now: at("2026-11-24T10:00:00Z"),
             terminal: None,
+            render: &grill,
         };
         upgrade(&paths, Some("h"), how, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "herd h is up to date\n");
@@ -604,5 +760,126 @@ merge = false # the human merges
                 .switches
                 .follow_ups_ready
         );
+    }
+
+    const GRILLLESS: &str = "# Herd h\nrepo = \"/src/repo\"\n\n[template.issue]\nparams = [\"number\"]\n\
+                             prompt = \"work {number}\"\ndone = \"exit 0\"\n";
+
+    #[test]
+    fn a_herd_without_a_grill_is_offered_one_and_a_yes_writes_the_template_and_its_prompt() {
+        let (_dir, paths) = herds(GRILLLESS);
+        let file = paths.herds.join("h.toml").display().to_string();
+        let prompt = paths.herds.join("h-grill.md").display().to_string();
+
+        let printed = answered(&paths, Some("h"), "\n", &[]);
+
+        assert_eq!(
+            printed,
+            format!(
+                "grill — Adds [template.grill], an attended grill the shepherd starts with\n\
+                 `loopherd add <herd> grill`, and its prompt file beside the herd file.\n\
+                 --- {file}\n\
+                 +++ {file}\n\
+                 @@ -5,3 +5,9 @@\n \
+                 params = [\"number\"]\n \
+                 prompt = \"work {{number}}\"\n \
+                 done = \"exit 0\"\n\
+                 +\n\
+                 +# Started live.\n\
+                 +[template.grill]\n\
+                 +params = [\"number\"]\n\
+                 +attended = true\n\
+                 +prompt_file = \"h-grill.md\"\n\
+                 --- /dev/null\n\
+                 +++ {prompt}\n\
+                 @@ -0,0 +1 @@\n\
+                 +grill {{number}}\n\
+                 Apply? [Y/n] "
+            )
+        );
+        assert_eq!(
+            text(&paths),
+            format!(
+                "{GRILLLESS}\n# Started live.\n[template.grill]\nparams = [\"number\"]\n\
+                 attended = true\nprompt_file = \"h-grill.md\"\n"
+            )
+        );
+        assert_eq!(
+            fs::read_to_string(paths.herds.join("h-grill.md")).unwrap(),
+            "grill {number}\n"
+        );
+        assert_eq!(
+            super::super::checked_repo(&paths, "h"),
+            Ok("/src/repo".into())
+        );
+    }
+
+    #[test]
+    fn a_no_to_the_grill_declines_it_and_writes_no_prompt() {
+        let (_dir, paths) = herds(GRILLLESS);
+
+        answered(&paths, Some("h"), "n\n", &[]);
+
+        assert_eq!(
+            text(&paths),
+            GRILLLESS.replace(
+                "repo = \"/src/repo\"\n",
+                "repo = \"/src/repo\"\ndeclined = [\"grill\"]\n"
+            )
+        );
+        assert!(!paths.herds.join("h-grill.md").exists());
+        assert_eq!(
+            answered(&paths, Some("h"), "", &[]),
+            "herd h is up to date\n"
+        );
+    }
+
+    #[test]
+    fn a_grill_prompt_without_its_template_is_shown_not_replaced() {
+        let (_dir, paths) = herds(GRILLLESS);
+        fs::write(paths.herds.join("h-grill.md"), "mine\n").unwrap();
+        let file = paths.herds.join("h.toml").display().to_string();
+        let prompt = paths.herds.join("h-grill.md").display().to_string();
+
+        let printed = answered(&paths, Some("h"), "\n", &[]);
+
+        assert!(
+            printed.ends_with(&format!(
+                "Not applied: {prompt} already exists, and upgrade never replaces a prompt.\n\
+                 The template belongs in {file}:\n\
+                 \x20 # Started live.\n  [template.grill]\n  params = [\"number\"]\n  attended = true\n  \
+                 prompt_file = \"h-grill.md\"\n\
+                 Stop offering this? [y/N] "
+            )),
+            "{printed}"
+        );
+        assert_eq!(text(&paths), GRILLLESS);
+        assert_eq!(
+            fs::read_to_string(paths.herds.join("h-grill.md")).unwrap(),
+            "mine\n"
+        );
+    }
+
+    #[test]
+    fn a_grill_that_cant_be_rendered_says_why_and_is_offered_again() {
+        let (_dir, paths) = herds(GRILLLESS);
+        let running_leads = BTreeSet::new();
+        let mut input = "".as_bytes();
+        let mut out = vec![];
+        let how = Upgrade {
+            running_leads: &running_leads,
+            now: at("2026-11-24T10:00:00Z"),
+            terminal: Some(&mut input),
+            render: &|_, _| bail!("no origin"),
+        };
+
+        upgrade(&paths, Some("h"), how, &mut out).unwrap();
+
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .ends_with("Not applied: can't render it: no origin\n")
+        );
+        assert_eq!(text(&paths), GRILLLESS);
     }
 }
