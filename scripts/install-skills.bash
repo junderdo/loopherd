@@ -6,10 +6,18 @@ skills_marketplace=claude-plugins-official
 skills_marketplace_repo=anthropics/claude-plugins-official
 skills_id="$skills_plugin@$skills_marketplace"
 
-# Read-only claude calls take stdin from /dev/null: under `curl | sh` it is
-# the terminal, and a claude reading it stops or eats the human's answers.
+# Runs a read-only claude call. stdin is /dev/null: under `curl | sh` it is
+# the terminal, which a claude would read from or stop on. A stalled claude
+# mustn't hang the install, and a stopped one ignores TERM until KILLed.
+# No --foreground: BusyBox's timeout lacks it (LH-613).
+claude_read() {
+  local wait=()
+  ! command -v timeout >/dev/null || wait=(timeout -k 5 10)
+  ${wait[@]+"${wait[@]}"} claude "$@" </dev/null 2>/dev/null
+}
+
 skills_marketplace_dir() {
-  claude plugin marketplace list --json </dev/null 2>/dev/null |
+  claude_read plugin marketplace list --json |
     jq -r --arg m "$skills_marketplace" '.[] | select(.name == $m) | .installLocation' 2>/dev/null
 }
 
@@ -54,12 +62,7 @@ skills_list_overlaps() {
 }
 
 skills_installed() {
-  local wait=()
-  # A claude stalled at startup mustn't hang the install. --foreground: in
-  # timeout's own background group, a claude touching the terminal stops
-  # for good, out of reach of the TERM (LH-613).
-  ! command -v timeout >/dev/null || wait=(timeout --foreground -k 5 10)
-  command -v claude >/dev/null && ${wait[@]+"${wait[@]}"} claude plugin list --json </dev/null 2>/dev/null | jq -e --arg id "$skills_id" \
+  command -v claude >/dev/null && claude_read plugin list --json | jq -e --arg id "$skills_id" \
     'any(.[]; .id == $id and (.scope == "user" or .scope == "managed"))' >/dev/null 2>&1
 }
 
