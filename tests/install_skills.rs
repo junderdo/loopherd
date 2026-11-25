@@ -99,6 +99,12 @@ impl Sandbox {
 echo "claude $*" >> '{stub_dir}/log'
 [ -z "$CLAUDE_CONFIG_DIR" ] || echo "config $CLAUDE_CONFIG_DIR" >> '{stub_dir}/log'
 case "$*" in
+  "plugin list --json" | "plugin marketplace list --json")
+    # Like claude's node, outlives the TERM timeout(1) sends.
+    [ ! -e '{stub_dir}/reads-stdin' ] || {{ trap '' TERM; read -r _ || :; }}
+    [ ! -e '{stub_dir}/hangs' ] || exec sleep 30 ;;
+esac
+case "$*" in
   "plugin list --json") cat '{stub_dir}/installed.json' 2>/dev/null || echo '[]' ;;
   "plugin marketplace list --json") cat '{stub_dir}/marketplaces.json' 2>/dev/null || echo '[]' ;;
   "plugin marketplace add"*) [ ! -e '{stub_dir}/add-fails' ] || exit 1 ;;
@@ -243,8 +249,9 @@ esac
             self.root.join("scripts/install").display(),
             args.join(" ")
         );
-        let mut cmd = self.command(Path::new("script"), &self.path());
-        cmd.args(["-qec", &shell, "/dev/null"])
+        // Bounded, so a claude stopped on the terminal fails the test, not hangs it.
+        let mut cmd = self.command(Path::new("timeout"), &self.path());
+        cmd.args(["-k", "5", "60", "script", "-qec", &shell, "/dev/null"])
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
@@ -834,7 +841,7 @@ fn the_installed_check_runs_claude_under_a_timeout() {
     executable(
         &sandbox.fake_bin.join("timeout"),
         format!(
-            "#!/bin/sh\necho \"timeout $*\" >> '{}/log'\nshift\nexec \"$@\"\n",
+            "#!/bin/sh\necho \"timeout $*\" >> '{}/log'\nshift 4\nexec \"$@\"\n",
             sandbox.stub.display()
         ),
     );
@@ -845,8 +852,39 @@ fn the_installed_check_runs_claude_under_a_timeout() {
     assert!(
         sandbox
             .log()
-            .contains(&"timeout 10 claude plugin list --json".to_string()),
+            .contains(&"timeout --foreground -k 5 10 claude plugin list --json".to_string()),
         "{:?}",
         sandbox.log()
     );
+}
+
+#[test]
+fn on_a_terminal_a_claude_reading_its_stdin_neither_stops_nor_takes_the_answers() {
+    let sandbox = Sandbox::new();
+    fs::write(sandbox.stub.join("reads-stdin"), "").unwrap();
+
+    let Some(out) = sandbox.install_on_terminal(&[], "\ny\n") else {
+        return;
+    };
+
+    assert!(
+        out.contains("Install the mattpocock-skills plugin"),
+        "{out}"
+    );
+    assert_eq!(
+        sandbox.claude_calls().last().unwrap(),
+        &format!("claude plugin install {PLUGIN}")
+    );
+}
+
+#[test]
+fn a_claude_that_hangs_is_cut_off_at_the_timeout() {
+    let sandbox = Sandbox::new();
+    fs::write(sandbox.stub.join("hangs"), "").unwrap();
+    let started = std::time::Instant::now();
+
+    let out = sandbox.install(&[]);
+
+    assert!(out.contains("add --with-skills"), "{out}");
+    assert!(started.elapsed().as_secs() < 25, "{:?}", started.elapsed());
 }
