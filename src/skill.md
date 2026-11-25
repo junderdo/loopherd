@@ -748,6 +748,11 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   call invalid. `herd unset <herd> lead.<switch>` hands the switch back to
   `[lead_defaults]`, not to off. Turn a lead's switches on only when the
   human says so.
+- **Bring a herd up to what newer init writes** with `loopherd herd upgrade
+  [<herd>]`, run by the human on a terminal: it offers each missing change
+  with a diff and `Apply? [Y/n]`, and a no lands in the herd file's
+  `declined`. Without a terminal it changes nothing and lists each herd's
+  pending ids.
 - **Remove a finished herd** with `loopherd herd remove <herd>` once the
   human says so: it deletes the herd file, its pause, its `[lead]`
   `prompt_file` (when that lies in the herds dir and no other herd file
