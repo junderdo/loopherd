@@ -2935,6 +2935,23 @@ fn an_existing_shepherd_runbook_is_left_as_it_was() {
 }
 
 #[test]
+fn diff_leaves_a_filled_in_shepherd_runbook_alone() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let path = fixture.repo().join("docs/agents/shepherd.md");
+    fs::write(
+        &path,
+        "# Shepherd runbook\n\nFeed with `loopherd feed widgets`.\n",
+    )
+    .unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stdout));
+    assert_eq!(text(&out.stdout), "");
+}
+
+#[test]
 fn diff_shows_a_missing_shepherd_runbook_as_new() {
     let fixture = Fixture::new(&["acme"]);
     assert_ok(&fixture.init(&[]));
@@ -4860,14 +4877,10 @@ fn diff_reads_max_context_limit_and_checks_back_from_the_herd_file() {
 }
 
 #[test]
-fn diff_shows_drift_in_loopherd_md_shepherd_md_and_triage_labels_md() {
+fn diff_shows_drift_in_loopherd_md_and_triage_labels_md() {
     let fixture = Fixture::new(&["acme"]);
     assert_ok(&fixture.init(&[]));
-    let docs = [
-        "docs/agents/loopherd.md",
-        "docs/agents/shepherd.md",
-        "docs/agents/triage-labels.md",
-    ];
+    let docs = ["docs/agents/loopherd.md", "docs/agents/triage-labels.md"];
     for doc in docs {
         let path = fixture.repo().join(doc);
         let mine = format!("{}Ours.\n", fs::read_to_string(&path).unwrap());

@@ -1874,6 +1874,18 @@ mod tests {
     }
 
     #[test]
+    fn the_humans_own_files_beside_the_references_dont_warn() {
+        let m = machine(&ALL);
+        let references = m.dir.path().join(".agents/skills/loopherd/references");
+        std::fs::write(references.join("my-notes.md"), "mine").unwrap();
+
+        let (out, code) = run(&m, &herdr());
+
+        assert_eq!(code, 0, "{out}");
+        assert!(!out.contains("references"), "{out}");
+    }
+
+    #[test]
     fn a_dangling_skill_link_warns_even_when_its_target_reads_right() {
         let m = machine(&ALL);
         let real = m.dir.path().join("dotfiles");

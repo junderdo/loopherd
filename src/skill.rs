@@ -318,7 +318,7 @@ pub fn path(skills_dir: &Path) -> PathBuf {
 }
 
 /// Writes the skill and its references, overwriting what's there and
-/// pruning references no longer shipped. Returns whether anything changed.
+/// deleting retired references. Returns whether anything changed.
 fn write(skills_dir: &Path) -> Result<bool> {
     let skill = write_file(&path(skills_dir), SKILL)?;
     let references = write_references(&references_dir(skills_dir))?;
@@ -355,41 +355,24 @@ fn write_references(dir: &Path) -> Result<bool> {
     for reference in &crate::references::ALL {
         changed |= write_file(&dir.join(reference.file_name()), &reference.text())?;
     }
-    for name in unshipped(dir)? {
-        let path = dir.join(&name);
-        match fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
-            true => fs::remove_dir_all(&path),
-            false => fs::remove_file(&path),
-        }
-        .with_context(|| format!("remove {}", path.display()))?;
-        changed = true;
+    for name in crate::references::RETIRED {
+        changed |= remove_if_present(&dir.join(name))?;
     }
     Ok(changed)
 }
 
-/// Entries in the references dir loopherd doesn't ship, but for dotfiles: a
-/// concurrent install's temp files.
-fn unshipped(dir: &Path) -> Result<Vec<String>> {
-    let shipped: Vec<String> = crate::references::ALL
-        .iter()
-        .map(|r| r.file_name())
-        .collect();
-    let entries = match fs::read_dir(dir) {
-        Ok(entries) => entries,
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(vec![]),
-        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
-    };
-    let mut names: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|name| !name.starts_with('.') && !shipped.contains(name))
-        .collect();
-    names.sort();
-    Ok(names)
+/// Removes a file, returning whether it was there.
+fn remove_if_present(path: &Path) -> Result<bool> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(true),
+        Err(e) if e.kind() == ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e).with_context(|| format!("remove {}", path.display())),
+    }
 }
 
 /// The references under `skill_dir` that are missing, differ from this
-/// binary's, or are no longer shipped, by file name.
+/// binary's, or were retired, by file name. Files loopherd never shipped
+/// are the human's and don't count.
 pub fn stale_references(skill_dir: &Path) -> Vec<String> {
     let dir = skill_dir.join(REFERENCES);
     let mut stale: Vec<String> = crate::references::ALL
@@ -399,7 +382,12 @@ pub fn stale_references(skill_dir: &Path) -> Vec<String> {
         })
         .map(|r| r.file_name())
         .collect();
-    stale.extend(unshipped(&dir).unwrap_or_default());
+    stale.extend(
+        crate::references::RETIRED
+            .iter()
+            .filter(|name| fs::symlink_metadata(dir.join(name)).is_ok())
+            .map(|name| name.to_string()),
+    );
     stale
 }
 
@@ -409,21 +397,23 @@ fn references_dir(skills_dir: &Path) -> PathBuf {
     skills_dir.join(NAME).join(REFERENCES)
 }
 
-/// Deletes the skill, its references, and its directory if that leaves it
-/// empty. Returns whether there was a skill or references.
+/// Deletes the skill, the references loopherd ships or retired, and each
+/// directory that leaves empty. Returns whether any of them was there.
 fn remove(skills_dir: &Path) -> Result<bool> {
     let references = references_dir(skills_dir);
-    let had_references = match fs::remove_dir_all(&references) {
-        Ok(()) => true,
-        Err(e) if e.kind() == ErrorKind::NotFound => false,
-        Err(e) => return Err(e).with_context(|| format!("remove {}", references.display())),
-    };
+    let ours = crate::references::ALL
+        .iter()
+        .map(|r| r.file_name())
+        .chain(crate::references::RETIRED.iter().map(|n| n.to_string()));
+    let mut had_references = false;
+    if fs::symlink_metadata(&references).is_ok_and(|m| m.is_dir()) {
+        for name in ours {
+            had_references |= remove_if_present(&references.join(name))?;
+        }
+        let _ = fs::remove_dir(&references);
+    }
     let path = path(skills_dir);
-    let had_skill = match fs::remove_file(&path) {
-        Ok(()) => true,
-        Err(e) if e.kind() == ErrorKind::NotFound => false,
-        Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
-    };
+    let had_skill = remove_if_present(&path)?;
     // Fails while the user keeps their own files there, which is the point.
     let _ = fs::remove_dir(path.parent().expect("the skill sits in a directory"));
     Ok(had_skill || had_references)
@@ -781,24 +771,50 @@ mod tests {
     }
 
     #[test]
-    fn install_updates_a_stale_reference_and_prunes_unshipped_ones() {
+    fn install_updates_a_stale_reference_and_keeps_the_humans_files() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path()).unwrap();
         let refs = references(dir.path());
         fs::write(refs.join("tour.md"), "old").unwrap();
-        fs::write(refs.join("retired.md"), "gone").unwrap();
-        fs::create_dir(refs.join("old-topic")).unwrap();
-        assert_eq!(
-            stale_references(&dir.path().join("loopherd")),
-            ["tour.md", "old-topic", "retired.md"]
-        );
+        fs::write(refs.join("my-notes.md"), "mine").unwrap();
+        fs::create_dir(refs.join("mine")).unwrap();
+        fs::write(refs.join("mine/notes.md"), "mine").unwrap();
+        assert_eq!(stale_references(&dir.path().join("loopherd")), ["tour.md"]);
 
         assert!(write(dir.path()).unwrap());
 
         let tour = crate::references::find("tour").unwrap().text();
         assert_eq!(fs::read_to_string(refs.join("tour.md")).unwrap(), tour);
-        assert!(!refs.join("retired.md").exists());
-        assert!(!refs.join("old-topic").exists());
+        assert_eq!(
+            fs::read_to_string(refs.join("my-notes.md")).unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            fs::read_to_string(refs.join("mine/notes.md")).unwrap(),
+            "mine"
+        );
+        assert_eq!(
+            stale_references(&dir.path().join("loopherd")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn remove_keeps_the_humans_files_in_references() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path()).unwrap();
+        let refs = references(dir.path());
+        fs::write(refs.join("my-notes.md"), "mine").unwrap();
+
+        assert!(remove(dir.path()).unwrap());
+
+        assert!(!path(dir.path()).exists());
+        assert!(!refs.join("tour.md").exists());
+        let left: Vec<_> = fs::read_dir(&refs)
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(left, ["my-notes.md"]);
     }
 
     #[test]

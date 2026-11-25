@@ -156,14 +156,12 @@ pub fn missing(repo: &Path, herd: &Herd, tracker_docs: Vec<Doc>) -> Result<Plan>
     Ok(plan)
 }
 
-/// What init would write now over the docs the repo already has, for `--diff`.
+/// What init would write now over the docs the repo already has, for
+/// `--diff`. Not the shepherd runbook: it's a stub meant to be filled in.
 pub fn present(repo: &Path, herd: &Herd) -> Result<Vec<Doc>> {
     let mut docs = Vec::new();
     if read(&repo.join(LOOPHERD_DOC))?.is_some() {
         docs.push(loopherd_doc(herd));
-    }
-    if read(&repo.join(SHEPHERD_DOC))?.is_some() {
-        docs.push(shepherd_doc());
     }
     Ok(docs)
 }

@@ -103,10 +103,16 @@ fn install_hook_writes_references_beside_the_default_skill_and_remove_deletes_th
     stdout(&loopherd(home.path(), &["install-hook", "--remove"]));
     assert!(!references.exists());
     assert!(!home.path().join(".agents/skills/loopherd").exists());
+
+    stdout(&loopherd(home.path(), &["install-hook"]));
+    fs::write(references.join("my-notes.md"), "mine").unwrap();
+    stdout(&loopherd(home.path(), &["install-hook", "--remove"]));
+    assert_eq!(files(&references), ["my-notes.md"]);
 }
 
 #[test]
-fn install_hook_beside_a_settings_file_writes_references_and_reruns_change_nothing() {
+fn install_hook_beside_a_settings_file_updates_references_keeping_the_humans_and_reruns_change_nothing()
+ {
     let home = tempfile::tempdir().unwrap();
     let dir = home.path().join("test-claude");
     fs::create_dir(&dir).unwrap();
@@ -115,12 +121,15 @@ fn install_hook_beside_a_settings_file_writes_references_and_reruns_change_nothi
     stdout(&loopherd(home.path(), &install));
     let references = dir.join(".agents/skills/loopherd/references");
     assert_eq!(files(&references), shipped());
-    fs::write(references.join("retired.md"), "no longer shipped").unwrap();
+    fs::write(references.join("my-notes.md"), "mine").unwrap();
     fs::write(references.join("tour.md"), "an older tour").unwrap();
 
     let rerun = stdout(&loopherd(home.path(), &install));
     assert!(rerun.contains("installed"), "{rerun}");
-    assert_eq!(files(&references), shipped());
+    assert_eq!(
+        fs::read_to_string(references.join("my-notes.md")).unwrap(),
+        "mine"
+    );
     let tour = stdout(&loopherd(home.path(), &["docs", "tour"]));
     assert_eq!(
         fs::read_to_string(references.join("tour.md")).unwrap(),

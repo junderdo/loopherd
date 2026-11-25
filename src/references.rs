@@ -51,6 +51,10 @@ pub const ALL: [Reference; 6] = [
     },
 ];
 
+/// Reference file names loopherd shipped once and no longer does, which
+/// `install-hook` deletes. Any other file in `references/` is the human's.
+pub const RETIRED: [&str; 0] = [];
+
 /// Repo files whose links point at the annotated herd file instead.
 const HERD_FILE_EXAMPLES: &str = "docs/examples";
 
