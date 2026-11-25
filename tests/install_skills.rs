@@ -827,3 +827,26 @@ fn a_relative_settings_path_gives_claude_an_absolute_config_dir() {
         "{stdout}"
     );
 }
+
+#[test]
+fn the_installed_check_runs_claude_under_a_timeout() {
+    let sandbox = Sandbox::new();
+    executable(
+        &sandbox.fake_bin.join("timeout"),
+        format!(
+            "#!/bin/sh\necho \"timeout $*\" >> '{}/log'\nshift\nexec \"$@\"\n",
+            sandbox.stub.display()
+        ),
+    );
+
+    let out = sandbox.install(&[]);
+
+    assert!(out.contains("add --with-skills"), "{out}");
+    assert!(
+        sandbox
+            .log()
+            .contains(&"timeout 10 claude plugin list --json".to_string()),
+        "{:?}",
+        sandbox.log()
+    );
+}

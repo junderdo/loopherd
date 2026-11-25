@@ -180,6 +180,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D171](decisions/D171.md) | `spawn` and `loopherd prompt` confirm a sent prompt was taken (agent `working`, `blocked` or `done`, or Claude's input box empty), pressing Enter again up to 3 times; spawn then reports the member `unsubmitted:` with exit 1 after its callers' bookkeeping, and `loopherd prompt` fails naming it. The prompt stays marked sent. |
 | [D172](decisions/D172.md) | Amends D122. `loopherd update` runs a release's `install.sh` with `LOOPHERD_UPDATE=1`, an env var older installers ignore where they'd refuse a flag: no splash and no offers, only refreshing the agent types loopherd installed and naming the skills plugin's update, as `scripts/install --update` does; plain `setup` still runs. |
 | [D173](decisions/D173.md) | Amends D100 and D107. The settings checks also read the main checkout's `.claude/settings.local.json`, where Claude Code keeps a worktree session's local settings, for a lead's or worker's permissions; its `/` rules start at the worktree, as Claude Code anchors them. |
+| [D174](decisions/D174.md) | Amends D135. Only the skills and herdr offers need jq, so without it the agent types are still offered; agent types found installed on an unasked run aren't recorded in `agents.sha256`; `claude plugin list` runs under `timeout 10`; `install.sh` installs the herdr plugin at the release tag (`--ref`) where herdr takes one, else from the default branch, saying so. |
 
 ## Emerging model
 
