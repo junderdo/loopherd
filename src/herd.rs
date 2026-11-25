@@ -18,9 +18,11 @@ use crate::worker_sandbox::WorkerSandbox;
 
 mod edit;
 mod remove;
+mod upgrade;
 
 pub use edit::{get, set, unset};
 pub use remove::{Removal, remove};
+pub use upgrade::{Upgrade, upgrade};
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -39,6 +41,9 @@ struct HerdFile {
     after_merge: Vec<String>,
     /// Minutes a member may sit idle on a paused stop before a watch says it stalled.
     stalled_after: Option<i64>,
+    /// Ids of upgrade migrations this herd turned down; `herd upgrade` skips them.
+    #[serde(default)]
+    declined: Vec<String>,
 }
 
 /// A herd's lead member (D17).
