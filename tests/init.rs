@@ -5908,8 +5908,10 @@ fn the_local_groom_prompt_writes_batch_lines_that_edit_and_push_the_issue_file()
         "Run `loopherd --skill --section groom` and follow it".to_string(),
         "`loopherd herd get {herd} queue.backlog` prints".into(),
         format!(
-            "Start each command with `cd '{repo}' && [ \"$(git branch --show-current)\" = main ] \
-             && git pull -q --ff-only origin main && `\nand end it, before any `# <reason>`, \
+            "Start each command with `cd '{repo}' && ([ \"$(git branch --show-current)\" = main ] \
+             && git pull -q --ff-only origin main && [ -z \"$(git rev-list origin/main..HEAD)\" ] \
+             && git diff --quiet HEAD -- <path> || (echo \"not run: check out main with no unpushed \
+             commits or edits to <path>\" >&2; false)) && `\nand end it, before any `# <reason>`, \
              with ` && git push -q origin HEAD:main`"
         ),
         "- mark ready: `sed -i 's/^Status:.*/& ready-for-agent/' <path> && git commit -qm \
@@ -6064,5 +6066,163 @@ fn diff_with_groom_shows_the_groom_template_init_would_add() {
         text(&out.stdout).contains("\n+[template.groom]\n"),
         "{}",
         text(&out.stdout)
+    );
+}
+
+/// The local groom prompt's mark-ready line for `path`, with the prefix and
+/// suffix it says every command takes.
+fn local_mark_ready(fixture: &Fixture, path: &str) -> String {
+    let prompt = groom(fixture)["prompt"].as_str().unwrap().to_string();
+    let between = |start: &str, end: &str| {
+        let from = prompt
+            .find(start)
+            .unwrap_or_else(|| panic!("{start:?} in\n{prompt}"))
+            + start.len();
+        prompt[from..from + prompt[from..].find(end).unwrap()].to_string()
+    };
+    let prefix = between("Start each command with `", "`\n");
+    let suffix = between("before any `# <reason>`, with `", "`");
+    let form = between("- mark ready: `", "`\n");
+    format!("{prefix}{form}{suffix}").replace("<path>", path)
+}
+
+fn origin_main(fixture: &Fixture) -> String {
+    let origin = fixture.root.path().join("origin.git");
+    let out = git_command(&origin)
+        .args(["log", "--format=%s", "main"])
+        .output()
+        .unwrap();
+    text(&out.stdout)
+}
+
+fn run_batch_line(fixture: &Fixture, line: &str) -> Output {
+    let mut command = Command::new("sh");
+    command
+        .args(["-c", line])
+        .current_dir(fixture.root.path())
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t");
+    isolate_git_config(&mut command).output().unwrap()
+}
+
+fn local_groom_fixture() -> Fixture {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    git(
+        &fixture.repo(),
+        &["checkout", "-q", "-B", "main", "origin/main"],
+    );
+    assert_ok(&fixture.init(&["--tracker", "local", "--with", "groom"]));
+    fixture
+}
+
+const LOGIN: &str = ".scratch/auth/issues/01-login-form.md";
+
+#[test]
+fn a_local_mark_ready_line_on_a_clean_up_to_date_main_pushes_only_its_own_commit() {
+    let fixture = local_groom_fixture();
+    let before = origin_main(&fixture);
+
+    let out = run_batch_line(&fixture, &local_mark_ready(&fixture, LOGIN));
+
+    assert_ok(&out);
+    assert_eq!(
+        origin_main(&fixture),
+        format!("Mark {LOGIN} ready\n{before}")
+    );
+}
+
+#[test]
+fn a_local_mark_ready_line_refuses_a_checkout_with_an_unpushed_commit() {
+    let fixture = local_groom_fixture();
+    fs::write(fixture.repo().join("wip.txt"), "wip\n").unwrap();
+    git(&fixture.repo(), &["add", "wip.txt"]);
+    git(
+        &fixture.repo(),
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "commit",
+            "-qm",
+            "human WIP",
+        ],
+    );
+    let before = origin_main(&fixture);
+
+    let out = run_batch_line(&fixture, &local_mark_ready(&fixture, LOGIN));
+
+    assert!(!out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("not run:"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(origin_main(&fixture), before);
+}
+
+#[test]
+fn a_local_mark_ready_line_refuses_an_issue_file_with_uncommitted_edits() {
+    let fixture = local_groom_fixture();
+    let issue = fixture.repo().join(LOGIN);
+    let edited = fs::read_to_string(&issue).unwrap() + "my edit\n";
+    fs::write(&issue, &edited).unwrap();
+    let before = origin_main(&fixture);
+
+    let out = run_batch_line(&fixture, &local_mark_ready(&fixture, LOGIN));
+
+    assert!(!out.status.success(), "{}", text(&out.stderr));
+    assert!(
+        text(&out.stderr).contains("not run:"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert_eq!(origin_main(&fixture), before);
+    assert_eq!(fs::read_to_string(&issue).unwrap(), edited);
+}
+
+const GROOM_EXPLANATION: &str = "A groomer triages unready tasks when the herd runs low, for you to approve.\r\n\
+     Say no if you keep the backlog ready yourself.\r\n";
+
+#[test]
+fn on_a_terminal_the_groom_question_shows_its_two_line_explanation_first() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    let question = "Add a groom template, to triage unready tasks when the herd runs low? [Y/n]: ";
+    assert!(
+        shown.contains(&format!("{GROOM_EXPLANATION}{question}")),
+        "{shown}"
+    );
+    for line in GROOM_EXPLANATION.lines() {
+        assert!(line.trim_end().chars().count() <= 80, "{line:?}");
+    }
+}
+
+#[test]
+fn the_groom_explanation_is_left_out_when_with_groom_answers_or_off_a_terminal() {
+    let fixture = Fixture::new(&["acme"]);
+    let asked = fixture.init_on_terminal(&["--with", "groom"], "\n");
+    assert_ok(&asked);
+    assert!(
+        !text(&asked.stdout).contains("A groomer triages"),
+        "{}",
+        text(&asked.stdout)
+    );
+
+    let other = Fixture::new(&["acme"]);
+    let out = other.init(&[]);
+    assert_ok(&out);
+    assert!(
+        !text(&out.stderr).contains("A groomer triages"),
+        "{}",
+        text(&out.stderr)
     );
 }

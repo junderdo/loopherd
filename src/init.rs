@@ -30,6 +30,10 @@ const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
 const MERGED_GITHUB: &str = include_str!("init/merged-github.toml");
 const LEAD: &str = include_str!("init/lead.md");
 const GROOM: &str = include_str!("init/groom.toml");
+/// Shown above the groom question: what it adds, then when to say no.
+const GROOM_EXPLAINED: &str = "\
+A groomer triages unready tasks when the herd runs low, for you to approve.
+Say no if you keep the backlog ready yourself.";
 
 const GITHUB_GROOM_READ: &str =
     "with `@GH_TOKEN@ gh issue view <n> --repo @OWNER_REPO@ --comments`";
@@ -40,9 +44,9 @@ const GITHUB_GROOM_FORMS: &str = "\
 const GITHUB_GROOM_NEVER: &str = "Never add @READY_FOR_AGENT@, close or move an issue, or add or remove @NEEDS_INFO@ or blocked.";
 const LOCAL_GROOM_READ: &str = "issue file at the path it prints";
 const LOCAL_GROOM_FORMS: &str = "\
-Start each command with `cd @CHECKOUT@ && [ \"$(git branch --show-current)\" = @BRANCH@ ] && git pull -q --ff-only origin @BRANCH@ && `
-and end it, before any `# <reason>`, with ` && git push -q origin HEAD:@BRANCH@`, so it lands
-on an up-to-date @BRANCH@:
+Start each command with `cd @CHECKOUT@ && ([ \"$(git branch --show-current)\" = @BRANCH@ ] && git pull -q --ff-only origin @BRANCH@ && [ -z \"$(git rev-list origin/@BRANCH@..HEAD)\" ] && git diff --quiet HEAD -- <path> || (echo \"not run: check out @BRANCH@ with no unpushed commits or edits to <path>\" >&2; false)) && `
+and end it, before any `# <reason>`, with ` && git push -q origin HEAD:@BRANCH@`, so it commits only
+its own edit, on an up-to-date @BRANCH@ with nothing unpushed:
 - mark ready: `sed -i 's/^Status:.*/& @READY_FOR_AGENT@/' <path> && git commit -qm \"Mark <path> ready\" -- <path>`
 - needs spec: `(grep -q '^## Comments' <path> || printf '\\n## Comments\\n' >> <path>) && printf '\\n%s\\n' \"<what's missing>\" >> <path> && git commit -qm \"Comment on <path>\" -- <path>`
 - close: `sed -i 's/^Status:.*/Status: closed/' <path> && git commit -qm \"Close <path>\" -- <path>  # <reason>`";
@@ -564,9 +568,13 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             Ok(branch.to_string())
         },
     )?;
+    let with_groom = req.with.contains(&Template::Groom);
+    if ask.terminal && !with_groom {
+        eprintln!("{GROOM_EXPLAINED}");
+    }
     let groom = ask.yes(
         "Add a groom template, to triage unready tasks when the herd runs low?",
-        req.with.contains(&Template::Groom).then_some(true),
+        with_groom.then_some(true),
         ask.terminal || recorded.as_ref().is_some_and(|r| r.groom),
     )?;
     let tracker_docs = tracker
