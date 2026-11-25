@@ -930,6 +930,33 @@ merge = false # the human merges
     }
 
     #[test]
+    fn each_prompt_migration_skips_and_tells_on_a_reworded_or_doubled_anchor() {
+        let grilling = "Grilling is always the human's.";
+        let re_arm = "re-arm after every exit.";
+        let reworded = old_lead_prompt()
+            .replace(grilling, "Grilling stays the human's.")
+            .replace(re_arm, "re-arm after each exit.");
+        let doubled = old_lead_prompt()
+            .replace(grilling, &format!("{grilling} {grilling}"))
+            .replace(re_arm, &format!("{re_arm} Then {re_arm}"));
+        for (prompt, times) in [(reworded, "is not"), (doubled, "appears 2 times")] {
+            let (_dir, paths) = led_by_file(&prompt);
+            let file = paths.herds.join("h-lead.md").display().to_string();
+            let printed = answered(&paths, Some("h"), "\n\n", &[]);
+            for (id, anchor) in [("lead-review-rounds", grilling), ("lead-drained", re_arm)] {
+                assert!(printed.contains(&format!("{id} — ")), "{printed}");
+                assert!(
+                    printed.contains(&format!("Not applied: {anchor:?} {times} in {file}.")),
+                    "{id}: {printed}"
+                );
+            }
+            assert!(!printed.contains("Apply?"), "{printed}");
+            assert_eq!(lead_prompt_text(&paths), prompt);
+            assert!(!text(&paths).contains("declined"), "{}", text(&paths));
+        }
+    }
+
+    #[test]
     fn an_inline_lead_prompt_is_edited_in_its_own_quoting_and_layout() {
         let herd = LED.replace(
             "prompt = \"lead {herd} to {herd} drained in {review_rounds} rounds\"\n",
