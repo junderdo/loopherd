@@ -2107,15 +2107,22 @@ fn gh_logins() -> Result<Vec<String>> {
     if !stderr.contains("unknown flag: --json") {
         bail!("gh {}: {}", args.join(" "), stderr.trim());
     }
-    // Plain auth status exits 1 when any account fails or none is logged in,
-    // and older gh prints it on stderr, so read both streams whatever the exit.
-    let output = gh_output(None, &["auth", "status", "--hostname", "github.com"])?;
+    // Plain auth status prints on stdout or stderr depending on the gh version,
+    // and gh before 2.54 exits 0 even when every account fails, so the exit
+    // code says nothing; any output without a login is gh's failure.
+    let args = ["auth", "status", "--hostname", "github.com"];
+    let output = gh_output(None, &args)?;
     let text = [output.stdout, output.stderr].concat();
-    Ok(String::from_utf8_lossy(&text)
+    let text = String::from_utf8_lossy(&text);
+    let logins: Vec<String> = text
         .lines()
         .filter_map(plain_login)
         .map(String::from)
-        .collect())
+        .collect();
+    if logins.is_empty() && !text.trim().is_empty() {
+        bail!("gh {}: {}", args.join(" "), text.trim());
+    }
+    Ok(logins)
 }
 
 /// The login on a plain `gh auth status` line, in its newer

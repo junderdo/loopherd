@@ -1132,7 +1132,40 @@ fn the_plain_auth_status_fallback_keeps_the_login_filter_and_errors() {
 }
 
 #[test]
-fn the_plain_auth_status_fallback_without_a_login_says_to_log_in() {
+fn a_failed_plain_auth_status_without_a_login_is_refused_with_ghs_own_error() {
+    let fixture = Fixture::new(&[]);
+    fixture.gh_json(
+        "auth-plain.err",
+        "github.com\n  X Timeout trying to log in to github.com account acme (keyring)\n",
+    );
+    fixture.gh_json("auth-plain.status", "1");
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&[]),
+        "loopherd init: gh auth status --hostname github.com: github.com\n  \
+         X Timeout trying to log in to github.com account acme (keyring)\n",
+    );
+}
+
+#[test]
+fn a_plain_auth_status_that_exits_0_without_a_login_is_refused_with_ghs_own_output() {
+    let fixture = Fixture::new(&[]);
+    fixture.gh_json(
+        "auth-plain.out",
+        "github.com\n  X Timeout trying to log in to github.com account acme (keyring)\n",
+    );
+
+    assert_refused(
+        &fixture,
+        &fixture.init(&[]),
+        "loopherd init: gh auth status --hostname github.com: github.com\n  \
+         X Timeout trying to log in to github.com account acme (keyring)\n",
+    );
+}
+
+#[test]
+fn the_plain_auth_status_fallback_without_a_login_passes_on_ghs_advice() {
     let fixture = Fixture::new(&[]);
     fixture.gh_json(
         "auth-plain.err",
@@ -1143,8 +1176,22 @@ fn the_plain_auth_status_fallback_without_a_login_says_to_log_in() {
     assert_refused(
         &fixture,
         &fixture.init(&[]),
-        "loopherd init: gh has no logged-in account; run `gh auth login`\n",
+        "loopherd init: gh auth status --hostname github.com: You are not logged into \
+         any GitHub hosts. To log in, run: gh auth login\n",
     );
+}
+
+#[test]
+fn a_failed_plain_auth_status_with_a_login_still_offers_it() {
+    let fixture = Fixture::new(&[]);
+    fixture.gh_json(
+        "auth-plain.err",
+        "github.com\n  \u{2713} Logged in to github.com account acme (keyring)\n  \
+         X Failed to log in to github.com account other (keyring)\n",
+    );
+    fixture.gh_json("auth-plain.status", "1");
+
+    assert_ok(&fixture.init(&[]));
 }
 
 #[test]
