@@ -12,7 +12,8 @@ Usage: scripts/install --update [--settings <file>] [install-hook args...]
                        [--settings <file>] [install-hook args...]
 
 Build loopherd, install it as ~/.local/bin/loopherd, and add its Claude
-Stop/StopFailure/SessionStart/PreToolUse/UserPromptSubmit hooks and the loopherd skill.
+Stop/StopFailure/SessionStart/PreToolUse/UserPromptSubmit/SubagentStart/SubagentStop
+hooks and the loopherd skill.
 On a terminal it then offers loopherd's agent types (builder, reviewer,
 researcher, scout), the mattpocock-skills plugin, loopherd's herdr
 plugin and herdr key bindings for that plugin's actions, each default no,

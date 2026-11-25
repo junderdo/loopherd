@@ -84,6 +84,13 @@ pub enum Outcome {
     Unchanged,
 }
 
+/// The hook events `install` adds, as prose: "Stop, …, SubagentStart and SubagentStop".
+pub fn events() -> String {
+    let (last, rest) = HOOKS.split_last().expect("HOOKS is not empty");
+    let rest: Vec<&str> = rest.iter().map(|h| h.event).collect();
+    format!("{} and {}", rest.join(", "), last.event)
+}
+
 /// `$CLAUDE_CONFIG_DIR/settings.json`, defaulting to `~/.claude/settings.json`.
 pub fn default_settings() -> Result<PathBuf> {
     Ok(claude_dir()?.join("settings.json"))

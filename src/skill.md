@@ -95,11 +95,11 @@ Init never launches an agent.
 
 1. **Feed.** Keep the `loopherd` on PATH current, since members call it for
    `loopherd report` and Claude calls it from its hooks. `loopherd
-   install-hook` adds the Stop, StopFailure, SessionStart, PreToolUse and
-   UserPromptSubmit hooks to Claude's user settings (backed up first;
+   install-hook` adds the Stop, StopFailure, SessionStart, PreToolUse,
+   UserPromptSubmit, SubagentStart and SubagentStop hooks to Claude's user settings (backed up first;
    re-running changes nothing) and installs this skill in
    `~/.agents/skills/loopherd`, linked from `~/.claude/skills/loopherd`. `watch` needs the
-   first three, not the last two. Running Claude sessions pick up a newly added hook without
+   first three, not the last four. Running Claude sessions pick up a newly added hook without
    a restart. Then `loopherd feed <herd> --dry-run` and, if it reads right,
    `loopherd feed <herd>`. The herd file (`<herd>.toml` in
    `$LOOPHERD_CONFIG_DIR/herds`, else `${XDG_CONFIG_HOME:-~/.config}/loopherd/herds`) turns each task its
@@ -570,7 +570,7 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   changing nothing: each loopherd hook in Claude's settings (a missing
   Stop, StopFailure, SessionStart or PreToolUse hook fails; a missing
   UserPromptSubmit hook fails while `[notify] pane_label` is on, else
-  warns), hooks calling a binary other than the `loopherd` on PATH
+  warns; a missing SubagentStart or SubagentStop hook warns), hooks calling a binary other than the `loopherd` on PATH
   (fails), running a binary other than PATH's (warns), herdr unreachable
   on its socket, silent for 5s, or older than 0.9.5 (fails). The loopherd
   herdr plugin missing, disabled, or at another version than loopherd
@@ -610,6 +610,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   the human sits in, reads `(attended)` and `--json` gives it `attended`:
   it holds no slot, and a watch wakes on its `gone` alone, and on its
   `merged` the lead's watch, or the shepherd's for an unled herd (D112).
+  `--json` gives each member `subagents`, its running subagents oldest
+  first, each with `id`, `type`, `description` (null until Claude writes
+  it) and `started`; `view` shows each as a dim `↳ <type>  <description>
+  <age>` row under its member. A gone member lists none (D133).
 - `loopherd reports` prints unread reports, questions first, and marks them
   read; `loopherd reports --all` prints every report and stop and marks
   none read. Both take member names or `--herd <herd>`. `--all` also takes
