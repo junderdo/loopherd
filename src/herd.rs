@@ -595,7 +595,7 @@ fn queue_in(file: &HerdFile, paths: &Paths, herd: &str) -> Result<Option<Queue>>
         source: queue.source.clone(),
         backlog: queue.backlog.clone(),
         max: queue.max as usize,
-        low_at: queue.low_at.unwrap_or(2 * queue.max) as usize,
+        low_at: queue.low_at() as usize,
         repo: expand_home(&file.repo, &paths.home),
     }))
 }
@@ -1442,7 +1442,11 @@ fn describe(
             Some(names) => format!("templates {}", names.join(", ")),
             None => format!("template {}", q.names().join(", ")),
         };
-        format!("  loopherd feed {herd}  ({template}, max {})", q.max)
+        format!(
+            "  loopherd feed {herd}  ({template}, max {}, low_at {})",
+            q.max,
+            q.low_at()
+        )
     });
     let backlog =
         parsed
@@ -1661,6 +1665,10 @@ impl QueueFile {
             (None, Some(names)) => names,
             (None, None) => &[],
         }
+    }
+
+    fn low_at(&self) -> i64 {
+        self.low_at.unwrap_or(2 * self.max)
     }
 }
 
@@ -3039,7 +3047,7 @@ args = ["--model", "opus"]
             [
                 "  loopherd add prs card <key>",
                 "  loopherd add prs grill <key>  (attended)",
-                "  loopherd feed prs  (templates card, grill, max 2)",
+                "  loopherd feed prs  (templates card, grill, max 2, low_at 4)",
                 "  warning: template grill is attended, so feed never spawns it from [queue] templates",
             ]
         );
@@ -3062,7 +3070,7 @@ args = ["--model", "opus"]
             [
                 "  loopherd add prs card <key>",
                 "  loopherd add prs groom  (no slot)",
-                "  loopherd feed prs  (templates card, groom, max 2)",
+                "  loopherd feed prs  (templates card, groom, max 2, low_at 4)",
                 "  warning: template groom has slot = false, so feed never spawns it from [queue] templates",
             ]
         );
@@ -3545,9 +3553,21 @@ args = ["--model", "opus"]
             report,
             "h  repo /r  workspace (current)  paused no  stalled after 30m\n\
              \x20 loopherd add h t <n>\n\
-             \x20 loopherd feed h  (template t, max 3)"
+             \x20 loopherd feed h  (template t, max 3, low_at 6)"
         );
         assert_eq!(code, 0);
+    }
+
+    #[test]
+    fn herds_shows_a_queues_low_at_when_set() {
+        let (report, _) = herds_line(
+            "prompt = \"go\"\n[queue]\ntemplate = \"t\"\nsource = \"echo 1\"\nmax = 3\nlow_at = 4",
+            &[],
+        );
+        assert!(
+            report.ends_with("\n  loopherd feed h  (template t, max 3, low_at 4)"),
+            "{report}"
+        );
     }
 
     #[test]
@@ -3561,7 +3581,7 @@ args = ["--model", "opus"]
             report,
             "h  repo /r  workspace (current)  paused no  stalled after 30m\n\
              \x20 loopherd add h t <n>\n\
-             \x20 loopherd feed h  (template t, max 3)\n\
+             \x20 loopherd feed h  (template t, max 3, low_at 6)\n\
              \x20 backlog: cat unready"
         );
         assert_eq!(code, 0);
@@ -3589,7 +3609,7 @@ args = ["--model", "opus"]
             "h  repo /r  workspace (current)  paused no  stalled after 30m\n\
              \x20 loopherd add h t <n>\n\
              \x20 loopherd add h u\n\
-             \x20 loopherd feed h  (templates u, t, max 3)"
+             \x20 loopherd feed h  (templates u, t, max 3, low_at 6)"
         );
         assert_eq!(code, 0);
     }

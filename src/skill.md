@@ -286,11 +286,11 @@ Init never launches an agent.
    closed unmerged.
 6. **Triage** a herd running low on ready work (D60, D116). A lead's
    triage arrives as its `question`: relay it to the human. In an unled
-   herd, act when `status` shows claimable at or below `low_at` with
-   unready above 0. If it has a `[template.groom]`, run `loopherd add
-   <herd> groom` (nothing while `groom-<herd>` is open); on its `done`,
-   relay its report to the human, then `loopherd retire --close
-   groom-<herd>`. Without the template, run the herd's `backlog` and sort
+   herd, act when `status` shows claimable at or below `low_at` (as
+   `herds` prints it beside `max`) with unready above 0. If it has a
+   `[template.groom]`, run `loopherd add <herd> groom` (nothing while
+   `groom-<herd>` is open); on its `done`, relay its report to the human,
+   then `loopherd retire --close groom-<herd>`. Without the template, run the herd's `backlog` and sort
    each task the same way.
 
    A groomer's report ends in a numbered batch, one command per line. The
