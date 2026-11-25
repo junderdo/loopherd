@@ -8,7 +8,7 @@ use std::path::Path;
 use anyhow::{Context, Result, bail};
 
 use super::agents::Doc;
-use super::ask::{interactive, line};
+use super::ask::{explain, interactive, line};
 
 const GITHUB: &str = include_str!("tracker/github.md");
 const LOCAL: &str = include_str!("tracker/local.md");
@@ -249,6 +249,7 @@ pub(super) fn read(path: &Path) -> Result<Option<String>> {
 }
 
 fn ask() -> Result<Choice> {
+    explain(super::explain::TRACKER);
     loop {
         let answer = line(&format!(
             "No {TRACKER_DOC}. Where does this repo track issues? \

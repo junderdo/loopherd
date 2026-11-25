@@ -763,3 +763,17 @@ fn the_shepherd_starts_an_unled_herds_groomer_and_runs_only_the_approved_batch_l
         assert!(triage.contains(rule), "Triage misses {rule:?}: {triage}");
     }
 }
+
+#[test]
+fn a_lead_getting_ready_for_a_revive_keeps_its_watch_and_reports_every_handoff() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let lead = flat_section(&printed, "\n## Lead\n", "\n## Groom\n");
+    for rule in [
+        "**Getting ready for a revive.** Keep your watch armed and keep working until the human quits your Claude",
+        "Stopping background shells and Monitors applies only before `restart --self`",
+        "Any handoff you write, for any reason, is followed by `loopherd report --kind handoff`, never a plain `note`",
+    ] {
+        assert!(lead.contains(rule), "{rule}: {lead}");
+    }
+}

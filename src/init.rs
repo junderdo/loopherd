@@ -13,6 +13,7 @@ use crate::worktree::{checkout_root, same_dir};
 
 mod agents;
 mod ask;
+mod explain;
 mod tracker;
 
 pub use tracker::Choice as Tracker;
@@ -29,6 +30,31 @@ const OTHER_ISSUE: &str = include_str!("init/other-issue.toml");
 const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
 const MERGED_GITHUB: &str = include_str!("init/merged-github.toml");
 const LEAD: &str = include_str!("init/lead.md");
+const GROOM: &str = include_str!("init/groom.toml");
+
+const GITHUB_GROOM_READ: &str =
+    "with `@GH_TOKEN@ gh issue view <n> --repo @OWNER_REPO@ --comments`";
+const GITHUB_GROOM_FORMS: &str = "\
+- mark ready: `@GH_TOKEN@ gh issue edit <n> --repo @OWNER_REPO@ --add-label @READY_FOR_AGENT@`
+- needs spec: `@GH_TOKEN@ gh issue comment <n> --repo @OWNER_REPO@ --body \"<what's missing>\"`
+- close: `@GH_TOKEN@ gh issue close <n> --repo @OWNER_REPO@ --reason \"not planned\"  # <reason>`";
+const GITHUB_GROOM_NEVER: &str = "Never add @READY_FOR_AGENT@, close or move an issue, or add or remove @NEEDS_INFO@ or blocked.";
+const LOCAL_GROOM_READ: &str = "issue file at the path it prints";
+const LOCAL_GROOM_FORMS: &str = "\
+Start each command with `cd @CHECKOUT@ && ([ \"$(git branch --show-current)\" = @BRANCH@ ] && git pull -q --ff-only origin @BRANCH@ && [ -z \"$(git rev-list origin/@BRANCH@..HEAD)\" ] && git diff --quiet HEAD -- <path> || (echo \"not run: check out @BRANCH@ with no unpushed commits or edits to <path>\" >&2; false)) && `
+and end it, before any `# <reason>`, with ` && git push -q origin HEAD:@BRANCH@`, so it commits only
+its own edit, on an up-to-date @BRANCH@ with nothing unpushed:
+- mark ready: `sed -i 's/^Status:.*/& @READY_FOR_AGENT@/' <path> && git commit -qm \"Mark <path> ready\" -- <path>`
+- needs spec: `(grep -q '^## Comments' <path> || printf '\\n## Comments\\n' >> <path>) && printf '\\n%s\\n' \"<what's missing>\" >> <path> && git commit -qm \"Comment on <path>\" -- <path>`
+- close: `sed -i 's/^Status:.*/Status: closed/' <path> && git commit -qm \"Close <path>\" -- <path>  # <reason>`";
+const LOCAL_GROOM_NEVER: &str = "Never change a Status: line, which marks a task ready, closes it and holds @NEEDS_INFO@ and\nblocked, and commit nothing.";
+const OTHER_GROOM_READ: &str = "with the tracker's own command (fill in)";
+const OTHER_GROOM_FORMS: &str = "\
+- mark ready: (fill in)
+- needs spec, a comment saying what's missing: (fill in)
+- close: (fill in)";
+const OTHER_GROOM_NEVER: &str =
+    "Never mark a task ready, close or move one, or add or remove @NEEDS_INFO@ or blocked.";
 
 const LOCAL_GH_NOTE: &str = "\nRun every gh command as @ACCOUNT@, prefixed with
 `@GH_TOKEN@` as in the commands below.
@@ -92,6 +118,14 @@ pub struct Request<'a> {
     pub merge_guard: Option<MergeGuard>,
     /// Tokens or a percentage of the window, as the human gave it.
     pub context_limit: Option<String>,
+    /// Templates to add without asking.
+    pub with: &'a [Template],
+}
+
+/// A template init offers beyond the herd's own, asked on a terminal.
+#[derive(Clone, Copy, PartialEq, clap::ValueEnum)]
+pub enum Template {
+    Groom,
 }
 
 struct GitHub {
@@ -122,6 +156,7 @@ struct Herd {
     docs: Vec<agents::Doc>,
     /// What the human writes in the repo that init wouldn't.
     agents_steps: Vec<String>,
+    groom: bool,
 }
 
 /// Writes the herd file and its lead prompt and creates missing labels,
@@ -136,7 +171,7 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
     let herd = settle(paths, req, &ask, Mode::Write)?;
     if ask.terminal {
         eprint!("{}", summary(&herd));
-        if !ask.yes("Write this herd?", None, true)? {
+        if !ask.yes("Write this herd?", "", None, true)? {
             bail!("nothing written");
         }
     } else if herd.github.is_none() {
@@ -202,10 +237,17 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             req.dir.display()
         )
     })?;
-    let repo = ask.value("Repo", None, Some(&here.to_string_lossy()), "", |answer| {
-        checkout_root(Path::new(answer))
-            .with_context(|| format!("can't read a git repo at {answer}"))
-    })?;
+    let repo = ask.value(
+        "Repo",
+        explain::REPO,
+        None,
+        Some(&here.to_string_lossy()),
+        "",
+        |answer| {
+            checkout_root(Path::new(answer))
+                .with_context(|| format!("can't read a git repo at {answer}"))
+        },
+    )?;
     // No herd name can get past these, so on a terminal they end init before it asks for one.
     if ask.terminal {
         refuse_second_herd(paths, &repo)?;
@@ -217,6 +259,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     .or_else(|| repo.file_name().map(|n| n.to_string_lossy().into_owned()));
     let name = ask.value(
         "Herd name",
+        explain::HERD_NAME,
         req.herd,
         inferred.as_deref(),
         "the repo has no directory name; pass --herd",
@@ -282,6 +325,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         _ if req.no_github || (recorded_no_github && req.github.is_none()) => None,
         (Err(_), tracker::Kind::Local | tracker::Kind::Other) => ask.value(
             "GitHub repo (owner/name); Enter for none",
+            explain::GITHUB,
             req.github,
             Some(recorded_github.unwrap_or("")),
             "",
@@ -290,6 +334,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         (Ok(origin), tracker::Kind::Local) if ask.terminal && req.gh_account.is_none() => ask
             .value(
                 &format!("GitHub repo (owner/name, origin is {origin}); Enter for none"),
+                explain::GITHUB,
                 req.github,
                 Some(""),
                 "",
@@ -299,6 +344,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         _ => Some(
             ask.value(
                 "GitHub repo (owner/name)",
+                explain::GITHUB,
                 req.github,
                 recorded_github.or(origin.as_ref().ok().map(String::as_str)),
                 &origin
@@ -336,6 +382,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     let checks = checks(&repo, given, ask)?;
     let max = ask.value(
         "max, how many workers run at once",
+        explain::MAX,
         req.max
             .or(recorded.as_ref().and_then(|r| r.max))
             .map(|m| m.to_string())
@@ -354,6 +401,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     let lead = loop {
         let lead = ask.yes(
             "Give the herd a lead, a member that feeds, watches and verifies its workers?",
+            explain::LEAD,
             req.lead,
             recorded.as_ref().is_none_or(|r| r.lead),
         )?;
@@ -408,6 +456,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
              Enter leaves it unset, \
              so {config_limit} applies"
         ),
+        explain::CONTEXT_LIMIT,
         req.context_limit
             .clone()
             .or(recorded
@@ -505,6 +554,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     };
     let branch = ask.value(
         "Default branch",
+        explain::DEFAULT_BRANCH,
         None,
         default_branch,
         match default_branch {
@@ -529,6 +579,12 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             }
             Ok(branch.to_string())
         },
+    )?;
+    let groom = ask.yes(
+        "Add a groom template, to triage unready tasks when the herd runs low?",
+        explain::GROOM,
+        req.with.contains(&Template::Groom).then_some(true),
+        ask.terminal || recorded.as_ref().is_some_and(|r| r.groom),
     )?;
     let tracker_docs = tracker
         .writes
@@ -577,6 +633,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         config_limit,
         docs,
         agents_steps: plan.steps,
+        groom,
     })
 }
 
@@ -593,6 +650,7 @@ fn merge_guard(
     let default = recorded.unwrap_or_default().name();
     ask.value(
         "merge_guard",
+        "",
         given,
         Some(default),
         "",
@@ -641,19 +699,20 @@ fn checks(repo: &Path, given: &[String], ask: &ask::Asker) -> Result<Vec<String>
         }
         return Ok(suggested);
     }
+    ask::explain(explain::CHECKS);
     if !suggested.is_empty() {
         eprintln!("Checks workers run before calling work done:");
         for check in &suggested {
             eprintln!("  {check}");
         }
-        if ask.yes("Use these checks?", None, true)? {
+        if ask.yes("Use these checks?", "", None, true)? {
             return Ok(suggested);
         }
         eprintln!("Enter keeps a check, - drops it, anything else replaces it.");
     }
     let mut checks = vec![];
     for check in &suggested {
-        let kept = ask.value("Check", None, Some(check), "", |answer| match answer {
+        let kept = ask.value("Check", "", None, Some(check), "", |answer| match answer {
             "-" => Ok(None),
             answer => prompt_text(answer).map(|_| Some(answer.to_string())),
         })?;
@@ -759,8 +818,8 @@ fn summary(herd: &Herd) -> String {
     };
     format!(
         "\nHerd {name}:\n  repo    {repo}\n  {branch}\n  \
-         max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n\
-         {also}{no_merged}",
+         max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n  \
+         groom   {groom}\n{also}{no_merged}",
         name = herd.name,
         repo = herd.repo.display(),
         max = herd.max,
@@ -770,6 +829,7 @@ fn summary(herd: &Herd) -> String {
             (true, Some(guard)) => format!("yes, merge_guard {}", guard.name()),
         },
         checks = herd.checks.join("; "),
+        groom = if herd.groom { "yes" } else { "no" },
     )
 }
 
@@ -963,11 +1023,39 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     values.push(("TEMPLATE", template.trim_end()));
     values.push(("LEAD_TABLE", &lead_table));
     values.push(("LEAD_TASKS", &lead_tasks));
+    let groom = match herd.groom {
+        true => groom(herd, &values)?,
+        false => String::new(),
+    };
+    values.push(("GROOM", &groom));
     let lead = herd.lead.then(|| (lead_file, fill(LEAD, &values)));
     Ok(lead
         .into_iter()
         .chain([(herd_file, fill(HERD, &values))])
         .collect())
+}
+
+/// The `[template.groom]` for the herd's tracker.
+fn groom(herd: &Herd, values: &[(&str, &str)]) -> Result<String> {
+    let (read, forms, never) = match herd.tracker.kind {
+        tracker::Kind::GitHub => (GITHUB_GROOM_READ, GITHUB_GROOM_FORMS, GITHUB_GROOM_NEVER),
+        tracker::Kind::Local => (LOCAL_GROOM_READ, LOCAL_GROOM_FORMS, LOCAL_GROOM_NEVER),
+        tracker::Kind::Other => (OTHER_GROOM_READ, OTHER_GROOM_FORMS, OTHER_GROOM_NEVER),
+    };
+    let repo = herd.repo.to_string_lossy();
+    let checkout = prompt_text(&format!("'{}'", repo.replace('\'', r"'\''")))?;
+    let values = [values, &[("CHECKOUT", checkout.as_str())]].concat();
+    let snippets = [read, forms, never].map(|text| fill(text, &values));
+    let values = [
+        values.as_slice(),
+        &[
+            ("GROOM_READ", snippets[0].as_str()),
+            ("GROOM_FORMS", &snippets[1]),
+            ("GROOM_NEVER", &snippets[2]),
+        ],
+    ]
+    .concat();
+    Ok(fill(GROOM, &values))
 }
 
 fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
@@ -1216,6 +1304,7 @@ struct Recorded {
     /// The `owner/name` that `merged` checks PRs on.
     github: Option<String>,
     has_merged: bool,
+    groom: bool,
 }
 
 impl Recorded {
@@ -1270,6 +1359,9 @@ impl Recorded {
                 })
                 .map(String::from),
             has_merged: issue.is_some_and(|t| t.contains_key("merged")),
+            groom: herd
+                .get("template")
+                .is_some_and(|t| t.get("groom").is_some()),
         })
     }
 }
@@ -1367,6 +1459,7 @@ fn account(owner: &str, wanted: Option<&str>, ask: &ask::Asker) -> Result<String
     let logged_in = |name: &str| logins.iter().find(|l| l.eq_ignore_ascii_case(name));
     ask.value(
         &format!("gh account (logged in: {found})"),
+        explain::GH_ACCOUNT,
         wanted,
         logged_in(owner).copied(),
         &format!(
