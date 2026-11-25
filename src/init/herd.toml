@@ -1,5 +1,5 @@
 # Herd @HERD@: one worker per @TASK@.
-# Written by `loopherd init`; yours to edit, loopherd never rewrites it.
+# Written by `loopherd init`; yours to edit. loopherd changes it only on a yes to `loopherd herd upgrade`.
 repo = @REPO@
 args = ["--permission-mode", "auto"]
 
