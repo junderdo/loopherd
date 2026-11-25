@@ -50,7 +50,9 @@ curl -fsSL https://junderdo.dev/loopherd/install.sh | LOOPHERD_NO_SPLASH=1 sh
 ```
 
 **Update:** `loopherd update`, from 0.2.1 on (`--check` to only look,
-`--version vX.Y.Z` to pick a release, older ones included). After it
+`--version vX.Y.Z` to pick a release, older ones included). It asks
+none of the installer's questions: it refreshes only the agent types
+loopherd installed and prints the skills plugin's update command. After it
 installs, or finds nothing new, it runs the installed binary's
 `loopherd herd upgrade`, which offers each herd what newer init writes;
 `--check` counts those instead.
