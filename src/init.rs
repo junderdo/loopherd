@@ -13,6 +13,7 @@ use crate::worktree::{checkout_root, same_dir};
 
 mod agents;
 mod ask;
+mod explain;
 mod tracker;
 
 pub use tracker::Choice as Tracker;
@@ -136,7 +137,7 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
     let herd = settle(paths, req, &ask, Mode::Write)?;
     if ask.terminal {
         eprint!("{}", summary(&herd));
-        if !ask.yes("Write this herd?", None, true)? {
+        if !ask.yes("Write this herd?", "", None, true)? {
             bail!("nothing written");
         }
     } else if herd.github.is_none() {
@@ -202,10 +203,17 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             req.dir.display()
         )
     })?;
-    let repo = ask.value("Repo", None, Some(&here.to_string_lossy()), "", |answer| {
-        checkout_root(Path::new(answer))
-            .with_context(|| format!("can't read a git repo at {answer}"))
-    })?;
+    let repo = ask.value(
+        "Repo",
+        explain::REPO,
+        None,
+        Some(&here.to_string_lossy()),
+        "",
+        |answer| {
+            checkout_root(Path::new(answer))
+                .with_context(|| format!("can't read a git repo at {answer}"))
+        },
+    )?;
     // No herd name can get past these, so on a terminal they end init before it asks for one.
     if ask.terminal {
         refuse_second_herd(paths, &repo)?;
@@ -217,6 +225,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     .or_else(|| repo.file_name().map(|n| n.to_string_lossy().into_owned()));
     let name = ask.value(
         "Herd name",
+        explain::HERD_NAME,
         req.herd,
         inferred.as_deref(),
         "the repo has no directory name; pass --herd",
@@ -282,6 +291,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         _ if req.no_github || (recorded_no_github && req.github.is_none()) => None,
         (Err(_), tracker::Kind::Local | tracker::Kind::Other) => ask.value(
             "GitHub repo (owner/name); Enter for none",
+            explain::GITHUB,
             req.github,
             Some(recorded_github.unwrap_or("")),
             "",
@@ -290,6 +300,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         (Ok(origin), tracker::Kind::Local) if ask.terminal && req.gh_account.is_none() => ask
             .value(
                 &format!("GitHub repo (owner/name, origin is {origin}); Enter for none"),
+                explain::GITHUB,
                 req.github,
                 Some(""),
                 "",
@@ -299,6 +310,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         _ => Some(
             ask.value(
                 "GitHub repo (owner/name)",
+                explain::GITHUB,
                 req.github,
                 recorded_github.or(origin.as_ref().ok().map(String::as_str)),
                 &origin
@@ -336,6 +348,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     let checks = checks(&repo, given, ask)?;
     let max = ask.value(
         "max, how many workers run at once",
+        explain::MAX,
         req.max
             .or(recorded.as_ref().and_then(|r| r.max))
             .map(|m| m.to_string())
@@ -354,6 +367,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     let lead = loop {
         let lead = ask.yes(
             "Give the herd a lead, a member that feeds, watches and verifies its workers?",
+            explain::LEAD,
             req.lead,
             recorded.as_ref().is_none_or(|r| r.lead),
         )?;
@@ -408,6 +422,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
              Enter leaves it unset, \
              so {config_limit} applies"
         ),
+        explain::CONTEXT_LIMIT,
         req.context_limit
             .clone()
             .or(recorded
@@ -505,6 +520,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     };
     let branch = ask.value(
         "Default branch",
+        explain::DEFAULT_BRANCH,
         None,
         default_branch,
         match default_branch {
@@ -593,6 +609,7 @@ fn merge_guard(
     let default = recorded.unwrap_or_default().name();
     ask.value(
         "merge_guard",
+        "",
         given,
         Some(default),
         "",
@@ -641,19 +658,20 @@ fn checks(repo: &Path, given: &[String], ask: &ask::Asker) -> Result<Vec<String>
         }
         return Ok(suggested);
     }
+    ask::explain(explain::CHECKS);
     if !suggested.is_empty() {
         eprintln!("Checks workers run before calling work done:");
         for check in &suggested {
             eprintln!("  {check}");
         }
-        if ask.yes("Use these checks?", None, true)? {
+        if ask.yes("Use these checks?", "", None, true)? {
             return Ok(suggested);
         }
         eprintln!("Enter keeps a check, - drops it, anything else replaces it.");
     }
     let mut checks = vec![];
     for check in &suggested {
-        let kept = ask.value("Check", None, Some(check), "", |answer| match answer {
+        let kept = ask.value("Check", "", None, Some(check), "", |answer| match answer {
             "-" => Ok(None),
             answer => prompt_text(answer).map(|_| Some(answer.to_string())),
         })?;
@@ -1367,6 +1385,7 @@ fn account(owner: &str, wanted: Option<&str>, ask: &ask::Asker) -> Result<String
     let logged_in = |name: &str| logins.iter().find(|l| l.eq_ignore_ascii_case(name));
     ask.value(
         &format!("gh account (logged in: {found})"),
+        explain::GH_ACCOUNT,
         wanted,
         logged_in(owner).copied(),
         &format!(
