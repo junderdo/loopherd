@@ -584,48 +584,61 @@ fn an_https_remote_names_the_repo_too() {
 
 #[test]
 fn a_rerun_without_a_terminal_or_flags_changes_nothing_and_says_the_herd_is_up_to_date() {
-    let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&[]));
-    let before = fixture.config_listing();
-    fs::remove_file(fixture.gh_dir().join("calls")).unwrap();
+    for tracker in TRACKERS {
+        let fixture = Fixture::with_herd(tracker);
+        let before = fixture.config_listing();
+        fs::remove_file(fixture.gh_dir().join("calls")).unwrap();
 
-    let out = fixture.loopherd(&["init"]);
+        let out = fixture.loopherd(&["init"]);
 
-    assert_ok(&out);
-    assert_eq!(text(&out.stdout), "herd widgets is up to date\n");
-    assert_eq!(fixture.config_listing(), before);
-    assert_eq!(fixture.gh_calls(), "");
+        assert_ok(&out);
+        assert_eq!(
+            text(&out.stdout),
+            "herd widgets is up to date\n",
+            "{tracker:?}"
+        );
+        assert_eq!(fixture.config_listing(), before, "{tracker:?}");
+        assert_eq!(fixture.gh_calls(), "", "{tracker:?}");
+    }
 }
 
 #[test]
 fn a_rerun_without_a_terminal_changes_what_flags_set_and_lists_pending_migrations() {
-    let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&[]));
-    let file = fixture.herds().join("widgets.toml");
-    let behind = fs::read_to_string(&file)
-        .unwrap()
-        .replace("follow_ups_ready = false\n", "");
-    fs::write(&file, &behind).unwrap();
-
-    let out = fixture.loopherd(&["init", "--max", "5", "--context-limit", "100000"]);
-
-    assert_ok(&out);
-    let shown = text(&out.stdout);
-    assert!(shown.contains("-max = 3\n+max = 5\n"), "{shown}");
-    assert!(shown.contains("+context_limit = 100000\n"), "{shown}");
-    assert!(
-        shown.ends_with(
-            "widgets: 1 new feature: lead-follow-ups-ready\n  run: loopherd herd upgrade widgets\n"
-        ),
-        "{shown}"
-    );
-    assert_eq!(fixture.herd_get_int("queue.max"), 5);
-    assert_eq!(fixture.herd_get_int("template.issue.context_limit"), 100000);
-    assert!(
-        !fs::read_to_string(&file)
+    for tracker in TRACKERS {
+        let fixture = Fixture::with_herd(tracker);
+        let file = fixture.herds().join("widgets.toml");
+        let behind = fs::read_to_string(&file)
             .unwrap()
-            .contains("follow_ups_ready")
-    );
+            .replace("follow_ups_ready = false\n", "");
+        fs::write(&file, &behind).unwrap();
+
+        let out = fixture.loopherd(&["init", "--max", "5", "--context-limit", "100000"]);
+
+        assert_ok(&out);
+        let shown = text(&out.stdout);
+        assert!(
+            shown.contains("-max = 3\n+max = 5\n"),
+            "{tracker:?}: {shown}"
+        );
+        assert!(
+            shown.contains("+context_limit = 100000\n"),
+            "{tracker:?}: {shown}"
+        );
+        assert!(
+            shown.ends_with(
+                "widgets: 1 new feature: lead-follow-ups-ready\n  run: loopherd herd upgrade widgets\n"
+            ),
+            "{tracker:?}: {shown}"
+        );
+        assert_eq!(fixture.herd_get_int("queue.max"), 5);
+        assert_eq!(fixture.herd_get_int("template.issue.context_limit"), 100000);
+        assert!(
+            !fs::read_to_string(&file)
+                .unwrap()
+                .contains("follow_ups_ready"),
+            "{tracker:?}"
+        );
+    }
 }
 
 #[test]
@@ -697,24 +710,26 @@ fn a_rerun_keeps_a_context_limit_a_later_config_put_over_the_cap() {
 
 #[test]
 fn a_rerun_naming_a_herd_that_runs_another_repo_is_refused() {
-    let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&[]));
-    fs::write(
-        fixture.herds().join("gadgets.toml"),
-        "repo = \"/elsewhere/gadgets\"\n",
-    )
-    .unwrap();
-    let before = fixture.config_listing();
+    for tracker in TRACKERS {
+        let fixture = Fixture::with_herd(tracker);
+        fs::write(
+            fixture.herds().join("gadgets.toml"),
+            "repo = \"/elsewhere/gadgets\"\n",
+        )
+        .unwrap();
+        let before = fixture.config_listing();
 
-    let out = fixture.init(&["--herd", "gadgets"]);
+        let out = fixture.init(&["--herd", "gadgets"]);
 
-    assert_eq!(out.status.code(), Some(1));
-    assert_eq!(
-        text(&out.stderr),
-        "loopherd init: herd gadgets already points at /elsewhere/gadgets; \
-         pass --herd <name> to name this repo's herd\n"
-    );
-    assert_eq!(fixture.config_listing(), before);
+        assert_eq!(out.status.code(), Some(1), "{tracker:?}");
+        assert_eq!(
+            text(&out.stderr),
+            "loopherd init: herd gadgets already points at /elsewhere/gadgets; \
+             pass --herd <name> to name this repo's herd\n",
+            "{tracker:?}"
+        );
+        assert_eq!(fixture.config_listing(), before, "{tracker:?}");
+    }
 }
 
 #[test]
@@ -2579,6 +2594,29 @@ fn without_locks(mut listing: Vec<(PathBuf, String)>) -> Vec<(PathBuf, String)> 
     listing
 }
 
+/// The init flags for each tracker a re-run is tested on.
+const TRACKERS: [&[&str]; 3] = [
+    &["--tracker", "github"],
+    &["--tracker", "local"],
+    &[
+        "--tracker",
+        "other",
+        "--tracker-desc",
+        "Issues live in Linear.",
+    ],
+];
+
+impl Fixture {
+    /// A fixture whose herd init wrote with `tracker`, an other tracker's
+    /// queue source filled in as its human would.
+    fn with_herd(tracker: &[&str]) -> Fixture {
+        let fixture = Fixture::new(&["acme"]);
+        assert_ok(&fixture.init(tracker));
+        fill_in_the_source(&fixture);
+        fixture
+    }
+}
+
 /// Fills an other tracker's empty queue source, as its human would.
 fn fill_in_the_source(fixture: &Fixture) {
     let file = fixture.herds().join("widgets.toml");
@@ -2592,19 +2630,8 @@ fn fill_in_the_source(fixture: &Fixture) {
 
 #[test]
 fn on_a_terminal_a_rerun_entered_through_changes_nothing_for_each_tracker() {
-    for tracker in [
-        &["--tracker", "github"][..],
-        &["--tracker", "local"],
-        &[
-            "--tracker",
-            "other",
-            "--tracker-desc",
-            "Issues live in Linear.",
-        ],
-    ] {
-        let fixture = Fixture::new(&["acme"]);
-        assert_ok(&fixture.init(tracker));
-        fill_in_the_source(&fixture);
+    for tracker in TRACKERS {
+        let fixture = Fixture::with_herd(tracker);
         let before = fixture.config_listing();
 
         let out = fixture.on_terminal(&[], &"\n".repeat(12));
@@ -2621,19 +2648,8 @@ fn on_a_terminal_a_rerun_entered_through_changes_nothing_for_each_tracker() {
 
 #[test]
 fn on_a_terminal_a_rerun_changes_max_for_each_tracker() {
-    for tracker in [
-        &["--tracker", "github"][..],
-        &["--tracker", "local"],
-        &[
-            "--tracker",
-            "other",
-            "--tracker-desc",
-            "Issues live in Linear.",
-        ],
-    ] {
-        let fixture = Fixture::new(&["acme"]);
-        assert_ok(&fixture.init(tracker));
-        fill_in_the_source(&fixture);
+    for tracker in TRACKERS {
+        let fixture = Fixture::with_herd(tracker);
         let typed = ["", "", "7", "y", "", "", "", "", ""];
 
         let out = fixture.on_terminal(&[], &(typed.join("\n") + "\n"));
@@ -2815,56 +2831,60 @@ fn on_a_terminal_a_rerun_carries_a_changed_branch_into_the_herd_files_text() {
 
 #[test]
 fn on_a_terminal_a_rerun_skips_tailored_checks_naming_where_to_edit_them() {
-    let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&[]));
-    let file = fixture.herds().join("widgets.toml");
-    let tailored = fs::read_to_string(&file)
-        .unwrap()
-        .replace("   - `cargo test`", "   - run `cargo test` twice");
-    fs::write(&file, &tailored).unwrap();
+    for tracker in TRACKERS {
+        let fixture = Fixture::with_herd(tracker);
+        let file = fixture.herds().join("widgets.toml");
+        let tailored = fs::read_to_string(&file)
+            .unwrap()
+            .replace("   - `cargo test`", "   - run `cargo test` twice");
+        fs::write(&file, &tailored).unwrap();
 
-    let out = fixture.on_terminal(&[], &"\n".repeat(12));
+        let out = fixture.on_terminal(&[], &"\n".repeat(12));
 
-    assert_ok(&out);
-    let shown = text(&out.stdout);
-    assert!(
-        shown.contains(&format!(
-            "checks: not asked, as the herd's text isn't init's own; \
-             edit it in [template.issue]'s prompt in {}",
-            file.display()
-        )),
-        "{shown}"
-    );
-    assert!(!shown.contains("Use these checks?"), "{shown}");
-    assert_eq!(fs::read_to_string(&file).unwrap(), tailored);
+        assert_ok(&out);
+        let shown = text(&out.stdout);
+        assert!(
+            shown.contains(&format!(
+                "checks: not asked, as the herd's text isn't init's own; \
+                 edit it in [template.issue]'s prompt in {}",
+                file.display()
+            )),
+            "{tracker:?}: {shown}"
+        );
+        assert!(!shown.contains("Use these checks?"), "{tracker:?}: {shown}");
+        assert_eq!(fs::read_to_string(&file).unwrap(), tailored, "{tracker:?}");
+    }
 }
 
 #[test]
 fn on_a_terminal_a_rerun_adds_a_lead_as_init_writes_one() {
-    let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&[]));
-    let led = fixture.config_listing();
-    fs::remove_dir_all(fixture.herds()).unwrap();
-    assert_ok(&fixture.init(&["--no-lead"]));
-    let typed = [
-        "",  // repo
-        "",  // checks
-        "",  // max
-        "y", // lead
-        "",  // merge_guard
-        "y", // apply
-        "", "", "", "",
-    ];
+    for tracker in TRACKERS {
+        let fixture = Fixture::with_herd(tracker);
+        let led = fixture.config_listing();
+        fs::remove_dir_all(fixture.herds()).unwrap();
+        // The repo's tracker doc, written by the first init, now names the tracker.
+        assert_ok(&fixture.init(&["--no-lead"]));
+        fill_in_the_source(&fixture);
+        let typed = [
+            "",  // repo
+            "",  // checks
+            "",  // max
+            "y", // lead
+            "",  // merge_guard
+            "y", // apply
+            "", "", "", "",
+        ];
 
-    let out = fixture.on_terminal(&[], &(typed.join("\n") + "\n"));
+        let out = fixture.on_terminal(&[], &(typed.join("\n") + "\n"));
 
-    assert_ok(&out);
-    assert!(
-        text(&out.stdout).contains("loopherd lead widgets"),
-        "{}",
-        text(&out.stdout)
-    );
-    assert_eq!(without_locks(fixture.config_listing()), led);
+        assert_ok(&out);
+        assert!(
+            text(&out.stdout).contains("loopherd lead widgets"),
+            "{tracker:?}: {}",
+            text(&out.stdout)
+        );
+        assert_eq!(without_locks(fixture.config_listing()), led, "{tracker:?}");
+    }
 }
 
 #[test]
