@@ -7,7 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use crate::broker::{RestartBroker, StartBroker};
+use crate::broker::{LockHeld, RestartBroker, StartBroker};
 use crate::herd::Paths;
 use crate::herdr::{
     Agent, AgentStatus, Herdr, Pane, StartOutcome, Workspace, wait_for_shell_prompt,
@@ -238,7 +238,13 @@ pub fn revive(
                 false => (req.broker)(&req.paths, &record.name).map(|_| ()),
             }
         {
-            warnings.push(format!("its broker didn't start: {e:#}"));
+            warnings.push(match e.downcast_ref::<LockHeld>() {
+                Some(held) => format!(
+                    "its broker didn't start, as {}, which revive doesn't stop: {e:#}",
+                    held.holder()
+                ),
+                None => format!("its broker didn't start: {e:#}"),
+            });
             revived.failed = true;
         }
         if noted
@@ -3095,6 +3101,35 @@ mod tests {
             (out.as_str(), code),
             (
                 "warning lead-h: its broker didn't start: no binary\n\
+                 alive lead-h w1:p4 (prompted to re-arm its watch)",
+                1
+            )
+        );
+    }
+
+    #[test]
+    fn a_broker_an_older_one_holds_the_lock_of_is_a_failure_naming_the_holder() {
+        let cwd = tempfile::tempdir().unwrap();
+        let herdr = herdr().with_live_agent(Some("lead-h"), Some("sess-lead-h"), "w1:p4");
+        let mut ledger = ledger([lead("lead-h", cwd.path())]);
+        let req = ReviveRequest {
+            broker: |_, _| {
+                Err(LockHeld {
+                    pid: Some(7),
+                    why: "held by pid 7".into(),
+                }
+                .into())
+            },
+            ..request()
+        };
+
+        let (out, code) = run(&herdr, &mut ledger, &req);
+
+        assert_eq!(
+            (out.as_str(), code),
+            (
+                "warning lead-h: its broker didn't start, as an older broker still holds its \
+                 lock, which revive doesn't stop: held by pid 7\n\
                  alive lead-h w1:p4 (prompted to re-arm its watch)",
                 1
             )
