@@ -11,7 +11,7 @@ use anyhow::{Context, Result, bail};
 use toml_edit::{Array, DocumentMut, Item, Value, value};
 
 use super::edit::edit;
-use super::{Paths, file_of, load, names};
+use super::{Paths, SwitchValues, file_of, lead_defaults, load, names};
 
 /// How an upgrade runs.
 pub struct Upgrade<'a> {
@@ -32,13 +32,13 @@ struct Migration {
     explanation: &'static str,
     /// Whether a running lead only sees the change once restarted or revived.
     lead_reads_at_start: bool,
-    state: fn(&DocumentMut) -> State,
+    state: fn(&DocumentMut, &SwitchValues) -> State,
 }
 
 enum State {
     /// Already there, or not for this herd.
     Current,
-    Pending(fn(&mut DocumentMut)),
+    Pending(Box<dyn Fn(&mut DocumentMut)>),
     /// The herd's own value sits where the change goes, so it's shown, not made.
     Tailored {
         place: &'static str,
@@ -49,7 +49,7 @@ enum State {
 const MIGRATIONS: [Migration; 2] = [
     Migration {
         id: "lead-follow-ups-ready",
-        explanation: "Writes the lead's follow_ups_ready switch, off, beside its others.\n\
+        explanation: "Writes the lead's follow_ups_ready switch as [lead_defaults] sets it, else off.\n\
                       On, the lead files a reviewer's in-scope follow-ups ready for agents.",
         lead_reads_at_start: true,
         state: follow_ups_ready,
@@ -63,18 +63,22 @@ const MIGRATIONS: [Migration; 2] = [
     },
 ];
 
-fn follow_ups_ready(doc: &DocumentMut) -> State {
+fn follow_ups_ready(doc: &DocumentMut, defaults: &SwitchValues) -> State {
+    // As init writes it, so a lead inheriting the switch keeps it.
+    let on = defaults.follow_ups_ready.unwrap_or(false);
     match doc.get("lead").and_then(Item::as_table_like) {
-        Some(lead) if !lead.contains_key("follow_ups_ready") => State::Pending(|doc| {
-            if let Some(lead) = doc.get_mut("lead").and_then(Item::as_table_like_mut) {
-                lead.insert("follow_ups_ready", value(false));
-            }
-        }),
+        Some(lead) if !lead.contains_key("follow_ups_ready") => {
+            State::Pending(Box::new(move |doc| {
+                if let Some(lead) = doc.get_mut("lead").and_then(Item::as_table_like_mut) {
+                    lead.insert("follow_ups_ready", value(on));
+                }
+            }))
+        }
         _ => State::Current,
     }
 }
 
-fn merged_repo(doc: &DocumentMut) -> State {
+fn merged_repo(doc: &DocumentMut, _: &SwitchValues) -> State {
     let merged = doc
         .get("template")
         .and_then(|t| t.get("issue"))
@@ -128,11 +132,12 @@ pub fn upgrade(
 fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Write) -> Result<()> {
     let file = file_of(&paths.herds, herd)?;
     let declined = load(&paths.herds, herd)?.declined;
+    let defaults = lead_defaults(paths)?;
     let offered = |doc: &DocumentMut| -> Vec<(&Migration, State)> {
         MIGRATIONS
             .iter()
             .filter(|m| !declined.iter().any(|id| id == m.id))
-            .map(|m| (m, (m.state)(doc)))
+            .map(|m| (m, (m.state)(doc, &defaults)))
             .filter(|(_, state)| !matches!(state, State::Current))
             .collect()
     };
@@ -162,7 +167,7 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
         // Read again: an earlier answer may have written the file.
         let doc = read(&file)?;
         let header = format!("{} — {}", migration.id, migration.explanation);
-        let decline = match (migration.state)(&doc) {
+        let decline = match (migration.state)(&doc, &defaults) {
             State::Current => continue,
             State::Pending(change) => {
                 writeln!(out, "{header}")?;
@@ -358,7 +363,7 @@ merge = false # the human merges
         assert_eq!(
             printed,
             format!(
-                "lead-follow-ups-ready — Writes the lead's follow_ups_ready switch, off, beside its others.\n\
+                "lead-follow-ups-ready — Writes the lead's follow_ups_ready switch as [lead_defaults] sets it, else off.\n\
                  On, the lead files a reviewer's in-scope follow-ups ready for agents.\n\
                  --- {file}\n\
                  +++ {file}\n\
@@ -571,5 +576,33 @@ merge = false # the human merges
             "{printed}"
         );
         assert!(text(&paths).contains("follow_ups_ready = false"));
+    }
+
+    #[test]
+    fn a_lead_inheriting_follow_ups_ready_from_lead_defaults_keeps_it_on() {
+        let (_dir, paths) = herds(LED);
+        fs::write(
+            paths.config_dir().join("config.toml"),
+            "[lead_defaults]\nfollow_ups_ready = true\n",
+        )
+        .unwrap();
+        let printed = answered(&paths, Some("h"), "\n", &[]);
+        assert!(
+            printed.contains("\n+follow_ups_ready = true\n"),
+            "{printed}"
+        );
+        assert_eq!(
+            text(&paths),
+            LED.replace(
+                "merge = false # the human merges\n",
+                "merge = false # the human merges\nfollow_ups_ready = true\n"
+            )
+        );
+        assert!(
+            super::super::lead_config(&paths, "h")
+                .unwrap()
+                .switches
+                .follow_ups_ready
+        );
     }
 }
