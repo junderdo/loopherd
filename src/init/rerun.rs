@@ -127,6 +127,7 @@ fn base(paths: &Paths, repo: &Path, name: &str, recorded: &Recorded) -> Option<H
         groom: recorded.groom,
         grill: recorded.grill,
         wayfinding: recorded.wayfinding,
+        grill_batch: recorded.grill_batch,
     })
 }
 

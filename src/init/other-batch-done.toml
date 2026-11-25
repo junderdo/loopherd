@@ -1,0 +1,4 @@
+# @FILL_IN@:
+# done, a shell command that exits 0 once task {number} is closed, or open and
+# marked @NEEDS_INFO@ while its batch waits on the human, its braces doubled.
+# Until it's set no batch grill counts as done, so feed never reaps one.

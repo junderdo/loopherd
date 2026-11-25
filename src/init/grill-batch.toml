@@ -1,0 +1,10 @@
+# A batch grill: answers a grilling task's questions itself, posts them as one
+# batch for the human and stops. Its done check passes while the batch waits,
+# so feed reaps it. Once the human answers, the shepherd drops @NEEDS_INFO@ and
+# runs `loopherd release <member>`, and feed starts a fresh one to finish.
+[template.grill-batch]
+params = @BATCH_PARAMS@
+name = "{herd}-grill-batch-{@GRILL_KEY@}"
+branch = "docs/{@GRILL_KEY@}-{slug}"
+@CONTEXT_LIMIT@@BATCH_CHECKS@
+prompt_file = @BATCH_PROMPT@

@@ -62,7 +62,26 @@ const GITHUB_ROUTING_NOTE: &str = "
 const GITHUB_ROUTE: &str = r#"  | ([$labels[] | {"wayfinding:research": "research", "wayfinding:domain": "domain-modeling", "wayfinding:prototype": "prototype"}[.] | values][0]) as $wayfinding
 "#;
 const GITHUB_TASK_HEAD: &str = r"\(.number) \($type) \($skill)";
-const GITHUB_ROUTED_TASK_HEAD: &str = r#"\(if $wayfinding then "wayfinding \(.number) docs \($wayfinding)" else "issue \(.number) \($type) \($skill)" end)"#;
+const GITHUB_ROUTED_TASK: &str = r#""issue \(.number) \($type) \($skill)""#;
+const GITHUB_WAYFINDING_TASK: &str = r#""wayfinding \(.number) docs \($wayfinding)""#;
+const GITHUB_GRILL_BATCH_TASK: &str = r#""grill-batch \(.number) docs grilling""#;
+const GITHUB_READY: &str = r#"any($labels[]; . == "@READY_FOR_AGENT_LC@")"#;
+/// A grilling issue is claimable only with grill:batch, ready label or not.
+const GITHUB_GRILL_BATCH_CLAIMABLE: &str = r#"(if any($labels[]; . == "grilling") then any($labels[]; . == "grill:batch") else any($labels[]; . == "@READY_FOR_AGENT_LC@") end)"#;
+const GITHUB_GRILLING: &str = r#"  | select(@GITHUB_CLAIMABLE@)
+  | any($labels[]; . == "grilling") as $grilling
+"#;
+const GITHUB_GRILL_BATCH_NOTE: &str = "
+# An issue labelled grilling and grill:batch goes to the grill-batch template,
+# ready or not, as type docs with the grilling skill; a grilling issue without
+# grill:batch waits for a live grill, so it isn't listed.";
+const OTHER_GRILL_BATCH_NOTE: &str = "
+# grill-batch, as type docs with the grilling skill, for a task marked grilling
+# and grill:batch, ready or not (a grilling task without grill:batch waits for
+# a live grill, so leave it out),";
+const ANY_OTHER_ISSUE: &str = "\n# Any other issue goes to issue.";
+const BACKLOG_GRILLING_NOTE: &str =
+    "\n# A grilling issue without grill:batch stays too: it waits for a live grill.";
 const LOCAL_ROUTING_NOTE: &str = "
 # A wayfinding:research, wayfinding:domain or wayfinding:prototype word routes
 # the issue to the wayfinding template, as type docs with the research,
@@ -84,16 +103,35 @@ const LOCAL_ROUTED_PRINT: &str = r#"      template = "issue"
         id = id "-" num[f]
       }
       print template, id, type, skill, slug, f"#;
-const OTHER_ROUTING_NOTE: &str = ": <template> is
+const OTHER_ROUTING_HEAD: &str = ": <template> is";
+const OTHER_WAYFINDING_NOTE: &str = "
 # wayfinding for a task marked wayfinding:research, wayfinding:domain or
-# wayfinding:prototype, whose <skill> is research, domain-modeling or prototype,
-# and issue for any other";
+# wayfinding:prototype, whose <skill> is research, domain-modeling or prototype,";
+const OTHER_ROUTING_TAIL: &str = "\n# and issue for any other";
 const GITHUB_DONE: &str = include_str!("init/github-done.toml");
 const LOCAL_DONE: &str = include_str!("init/local-done.toml");
 const OTHER_DONE: &str = include_str!("init/other-done.toml");
 const GRILL: &str = include_str!("init/grill.toml");
 const GRILL_PROMPT: &str = include_str!("init/grill.md");
+const GRILL_BATCH: &str = include_str!("init/grill-batch.toml");
+const GRILL_BATCH_PROMPT: &str = include_str!("init/grill-batch.md");
+const GITHUB_BATCH_DONE: &str = include_str!("init/github-batch-done.toml");
+const OTHER_BATCH_DONE: &str = include_str!("init/other-batch-done.toml");
+const GITHUB_BATCH_POST: &str =
+    "`@GH_TOKEN@ gh issue comment {number} --repo @OWNER_REPO@ --body-file <file>`.";
+const GITHUB_BATCH_WAIT: &str =
+    "`@GH_TOKEN@ gh issue edit {number} --repo @OWNER_REPO@ --add-label @NEEDS_INFO@`.";
+const OTHER_BATCH_POST: &str = "comment it on task {number}. (fill in)";
+const OTHER_BATCH_WAIT: &str = "mark task {number} @NEEDS_INFO@. (fill in)";
+const LEAD_GRILLING: &str = "Grilling is always the human's.";
+const LEAD_GRILL_BATCH: &str =
+    "Grilling is the human's, but for a batch grill: a grilling task marked
+grill:batch goes to a grill-batch member, which posts its batch, marks the
+task @NEEDS_INFO@ and stops, so feed reaps it. Once the human answers there,
+the shepherd drops @NEEDS_INFO@ and runs `loopherd release <member>`; your next
+feed starts a fresh member, which writes the decision.";
 
+const AGREED: &str = "When the human agrees the outcome, ";
 const GRILL_PUSH: &str = "push the branch as @ACCOUNT@:
   `@GH_TOKEN@ git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
   Open a PR with `@GH_TOKEN@ gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`";
@@ -224,6 +262,7 @@ pub struct Request<'a> {
 pub enum Template {
     Groom,
     Wayfinding,
+    GrillBatch,
 }
 
 #[derive(Clone)]
@@ -261,6 +300,8 @@ struct Herd {
     grill: bool,
     /// Routes the queue's wayfinding tasks to their own template.
     wayfinding: bool,
+    /// Routes the queue's batch grills to their own template.
+    grill_batch: bool,
 }
 
 /// Writes the herd file, its lead and grill prompts and creates missing labels,
@@ -406,6 +447,10 @@ fn settle(
             Ok(name)
         },
     )?;
+    let batch_file = grill_batch_file(paths, &name);
+    if mode == Mode::Write && req.with.contains(&Template::GrillBatch) {
+        refuse_grill_batch_prompt(&batch_file)?;
+    }
     let herd_file = paths.herds.join(format!("{name}.toml"));
     let recorded = match mode {
         Mode::Diff => Recorded::read(&herd_file),
@@ -666,13 +711,55 @@ fn settle(
             with_wayfinding.then_some(true),
             ask.terminal || recorded.as_ref().is_some_and(|r| r.wayfinding),
         )?;
-    let tracker_kind = tracker.kind;
+    // A local batch would post on the default branch before the human answers.
+    let no_grill_batch = match tracker.kind {
+        tracker::Kind::Local => Some("a local tracker's herd has none yet".to_string()),
+        _ if name.len() + "-grill-batch-".len() + 6 > 32 => Some(format!(
+            "the herd name {name} leaves no room for grill-batch members' names, \
+             {name}-grill-batch-<number>, in 32 characters; a herd with grill-batch takes a \
+             name of at most 13"
+        )),
+        _ => None,
+    };
+    let with_grill_batch = req.with.contains(&Template::GrillBatch);
+    if let Some(why) = &no_grill_batch {
+        if with_grill_batch {
+            bail!("no grill-batch template: {why}");
+        }
+        if ask.terminal {
+            eprintln!("No grill-batch template: {why}.");
+        }
+    }
+    let grill_batch = no_grill_batch.is_none()
+        && loop {
+            let grill_batch = ask.yes(
+                "Add a grill-batch template, so grilling tasks marked for batch mode run unattended?",
+                explain::GRILL_BATCH,
+                with_grill_batch.then_some(true),
+                ask.terminal || recorded.as_ref().is_some_and(|r| r.grill_batch),
+            )?;
+            // `--with` refused it before any question.
+            if !grill_batch || mode == Mode::Diff || with_grill_batch {
+                break grill_batch;
+            }
+            match refuse_grill_batch_prompt(&batch_file) {
+                Ok(()) => break grill_batch,
+                Err(refusal) if ask.terminal => eprintln!("{refusal}; answer n or remove it"),
+                Err(refusal) => return Err(refusal),
+            }
+        };
+    let sections = sections(
+        tracker.kind,
+        wayfinding,
+        grill_batch,
+        &tracker.labels.needs_info,
+    );
     let tracker_docs = tracker
         .writes
         .drain(..)
         .map(|(path, mut text)| {
-            if wayfinding && path == tracker::TRACKER_DOC {
-                text.push_str(wayfinding_section(tracker_kind));
+            if path == tracker::TRACKER_DOC {
+                text.push_str(&sections);
             }
             agents::Doc::new(path, text)
         })
@@ -683,7 +770,7 @@ fn settle(
         checks: &checks,
         needs_info: &tracker.labels.needs_info,
         tracker: tracker.kind,
-        wayfinding,
+        sections: &sections,
     };
     let plan = agents::missing(&repo, &agents_herd, tracker_docs)?;
     let mut docs = plan.docs;
@@ -697,11 +784,12 @@ fn settle(
                 [herd_file]
                     .into_iter()
                     .chain(lead.then(|| lead_file.clone()))
+                    .chain(grill_batch.then(|| batch_file.clone()))
                     .chain(new_docs.map(|doc| repo.join(doc.path))),
             )?;
         }
         Mode::Diff => {
-            docs.extend(tracker::built_in(&repo, wayfinding)?);
+            docs.extend(tracker::built_in(&repo, &sections)?);
             docs.extend(agents::present(&repo, &agents_herd)?);
         }
     }
@@ -723,7 +811,18 @@ fn settle(
         groom,
         grill: true,
         wayfinding,
+        grill_batch,
     })
+}
+
+fn refuse_grill_batch_prompt(file: &Path) -> Result<()> {
+    if fs::symlink_metadata(file).is_ok() {
+        bail!(
+            "{} already exists; init never replaces a grill-batch prompt",
+            file.display()
+        );
+    }
+    Ok(())
 }
 
 /// The workers' `context_limit`, Enter taking `default` and an empty answer
@@ -982,10 +1081,11 @@ fn summary(herd: &Herd) -> String {
     if let Some(github) = &herd.github
         && herd.tracker.kind == tracker::Kind::GitHub
     {
-        let names: Vec<&str> = wanted_labels(&herd.tracker.labels, herd.wayfinding)
-            .into_iter()
-            .map(|(name, ..)| name)
-            .collect();
+        let names: Vec<&str> =
+            wanted_labels(&herd.tracker.labels, herd.wayfinding, herd.grill_batch)
+                .into_iter()
+                .map(|(name, ..)| name)
+                .collect();
         let (last, rest) = names.split_last().expect("at least four labels");
         also.push(format!(
             "creates the labels {} and {last} in {} where missing",
@@ -1022,7 +1122,8 @@ fn summary(herd: &Herd) -> String {
     format!(
         "\nHerd {name}:\n  repo    {repo}\n  {branch}\n  \
          max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n  \
-         groom   {groom}\n  wayfinding {wayfinding}\n  also    grill (attended)\n{also}{no_merged}",
+         groom   {groom}\n  wayfinding {wayfinding}\n  grill-batch {grill_batch}\n  \
+         also    grill (attended)\n{also}{no_merged}",
         name = herd.name,
         repo = herd.repo.display(),
         max = herd.max,
@@ -1034,6 +1135,7 @@ fn summary(herd: &Herd) -> String {
         checks = herd.checks.join("; "),
         groom = if herd.groom { "yes" } else { "no" },
         wayfinding = if herd.wayfinding { "yes" } else { "no" },
+        grill_batch = if herd.grill_batch { "yes" } else { "no" },
     )
 }
 
@@ -1199,35 +1301,99 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
         tracker::Kind::Local => "<id> <type> <skill> <slug> <path>",
         tracker::Kind::GitHub | tracker::Kind::Other => "<number> <type> <skill> <slug>",
     };
-    let source_prints = match herd.wayfinding {
+    let routed = herd.wayfinding || herd.grill_batch;
+    let source_prints = match routed {
         true => format!("<template> {task_fields}"),
         false => task_fields.to_string(),
     };
-    let routing_note = match (herd.wayfinding, tracker.kind) {
-        (false, _) => "",
-        (true, tracker::Kind::GitHub) => GITHUB_ROUTING_NOTE,
-        (true, tracker::Kind::Local) => LOCAL_ROUTING_NOTE,
-        (true, tracker::Kind::Other) => OTHER_ROUTING_NOTE,
+    let (batch_note, wayfinding_note) = match tracker.kind {
+        tracker::Kind::GitHub => (GITHUB_GRILL_BATCH_NOTE, GITHUB_ROUTING_NOTE),
+        tracker::Kind::Local => ("", LOCAL_ROUTING_NOTE),
+        tracker::Kind::Other => (OTHER_GRILL_BATCH_NOTE, OTHER_WAYFINDING_NOTE),
     };
-    let routed = |routed: &'static str, plain: &'static str| match herd.wayfinding {
-        true => routed,
-        false => plain,
+    let routing_note = match (routed, tracker.kind) {
+        (false, _) => String::new(),
+        (true, tracker::Kind::Other) => [
+            OTHER_ROUTING_HEAD,
+            if herd.grill_batch { batch_note } else { "" },
+            if herd.wayfinding { wayfinding_note } else { "" },
+            OTHER_ROUTING_TAIL,
+        ]
+        .concat(),
+        (true, _) => [
+            if herd.grill_batch { batch_note } else { "" },
+            match herd.wayfinding {
+                true => wayfinding_note,
+                false => ANY_OTHER_ISSUE,
+            },
+        ]
+        .concat(),
+    };
+    let mut templates = vec!["\"issue\""];
+    templates.extend(herd.wayfinding.then_some("\"wayfinding\""));
+    templates.extend(herd.grill_batch.then_some("\"grill-batch\""));
+    let queue_template = match routed {
+        true => format!("templates = [{}]", templates.join(", ")),
+        false => "template = \"issue\"".to_string(),
+    };
+    // Searching keeps gh's 1000-issue window to claimable ones, as --label does.
+    let ready_label = match herd.grill_batch {
+        true => format!(
+            "--search 'label:\"{}\",\"grill:batch\"' ",
+            labels.ready_for_agent
+        ),
+        false => format!("--label {} ", labels.ready_for_agent),
+    };
+    let github_claimable = match herd.grill_batch {
+        true => fill(GITHUB_GRILL_BATCH_CLAIMABLE, &values),
+        false => fill(GITHUB_READY, &values),
+    };
+    let github_grilling = match herd.grill_batch {
+        true => fill(GITHUB_GRILLING, &[("GITHUB_CLAIMABLE", &github_claimable)]),
+        false => String::new(),
+    };
+    let task_head = match routed {
+        true => {
+            let mut branches = vec![];
+            if herd.grill_batch {
+                branches.push(format!("$grilling then {GITHUB_GRILL_BATCH_TASK}"));
+            }
+            if herd.wayfinding {
+                branches.push(format!("$wayfinding then {GITHUB_WAYFINDING_TASK}"));
+            }
+            format!(
+                r"\(if {} else {GITHUB_ROUTED_TASK} end)",
+                branches.join(" elif ")
+            )
+        }
+        false => GITHUB_TASK_HEAD.to_string(),
+    };
+    let local_print = match herd.wayfinding {
+        true => LOCAL_ROUTED_PRINT,
+        false => LOCAL_PRINT,
+    };
+    let lead_grilling = match herd.grill_batch {
+        true => fill(LEAD_GRILL_BATCH, &values),
+        false => LEAD_GRILLING.to_string(),
     };
     values.extend([
         ("SOURCE_PRINTS", source_prints.as_str()),
-        ("ROUTING_NOTE", routing_note),
-        ("ROUTE", routed(GITHUB_ROUTE, "")),
+        ("ROUTING_NOTE", &routing_note),
+        ("ROUTE", if herd.wayfinding { GITHUB_ROUTE } else { "" }),
+        ("TASK_HEAD", &task_head),
+        ("QUEUE_TEMPLATE", &queue_template),
+        ("READY_LABEL", &ready_label),
+        ("GITHUB_CLAIMABLE", &github_claimable),
+        ("GITHUB_GRILLING", &github_grilling),
         (
-            "TASK_HEAD",
-            routed(GITHUB_ROUTED_TASK_HEAD, GITHUB_TASK_HEAD),
+            "BACKLOG_NOTE",
+            if herd.grill_batch {
+                BACKLOG_GRILLING_NOTE
+            } else {
+                ""
+            },
         ),
-        (
-            "QUEUE_TEMPLATE",
-            routed(
-                "templates = [\"issue\", \"wayfinding\"]",
-                "template = \"issue\"",
-            ),
-        ),
+        ("GRILLING", &lead_grilling),
     ]);
     let local = |list, print| {
         fill(
@@ -1235,10 +1401,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
             &[values.as_slice(), &[("LIST", list), ("LOCAL_PRINT", print)]].concat(),
         )
     };
-    let (local_ready, local_backlog) = (
-        local("ready", routed(LOCAL_ROUTED_PRINT, LOCAL_PRINT)),
-        local("backlog", LOCAL_PRINT),
-    );
+    let (local_ready, local_backlog) = (local("ready", local_print), local("backlog", LOCAL_PRINT));
     values.push(("LOCAL_READY", &local_ready));
     values.push(("LOCAL_BACKLOG", &local_backlog));
     // Filled before they join the herd file, whose fill leaves inserted text literal.
@@ -1271,6 +1434,13 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
         true => grill(herd, &values, done),
         false => (String::new(), String::new()),
     };
+    let batch = herd
+        .grill_batch
+        .then(|| grill_batch(herd, &values, &template));
+    let grill_batch_table = match &batch {
+        Some((table, _)) => format!("\n\n{table}"),
+        None => String::new(),
+    };
     let lead_table = match herd.lead {
         true => format!("\n{}", fill(LEAD_TABLE, &values)),
         false => String::new(),
@@ -1278,6 +1448,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     values.push(("SOURCE", source));
     values.push(("TEMPLATE", template.trim_end()));
     values.push(("WAYFINDING", wayfinding.trim_end()));
+    values.push(("GRILL_BATCH", grill_batch_table.trim_end()));
     values.push(("LEAD_TABLE", &lead_table));
     values.push(("LEAD_TASKS", &lead_tasks));
     let groom = match herd.groom {
@@ -1288,15 +1459,18 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     values.push(("GRILL", &grill));
     let lead = herd.lead.then(|| (lead_file, fill(LEAD, &values)));
     let grill_prompt = herd.grill.then(|| (grill_file(paths, name), grill_prompt));
+    let batch_prompt = batch.map(|(_, prompt)| (grill_batch_file(paths, name), prompt));
     let files = lead
         .into_iter()
         .chain(grill_prompt)
+        .chain(batch_prompt)
         .chain([(herd_file, fill(HERD, &values))])
         .collect();
     Ok(Rendered {
         files,
         grill: grill.trim_start().to_string(),
         wayfinding: wayfinding.trim_start().to_string(),
+        grill_batch: grill_batch_table.trim_start().to_string(),
     })
 }
 
@@ -1322,6 +1496,8 @@ struct Rendered {
     grill: String,
     /// The `[template.wayfinding]` within the herd file, empty without one.
     wayfinding: String,
+    /// The `[template.grill-batch]` within the herd file, empty without one.
+    grill_batch: String,
 }
 
 /// `template` as init would write it now for the existing `herd`, rendered as
@@ -1330,6 +1506,7 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
     let with = match template {
         "grill" => vec![],
         "wayfinding" => vec![Template::Wayfinding],
+        "grill-batch" => vec![Template::GrillBatch],
         _ => bail!("init writes no template {template}"),
     };
     let repo = herd::repo(paths, herd)?;
@@ -1353,8 +1530,10 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
     let ask = ask::Asker { terminal: false };
     let repo = ask_repo(&repo, &ask)?;
     let mut herd = settle(paths, repo, req, &ask, Mode::Diff)?;
-    if template == "wayfinding" {
-        return routed_wayfinding(paths, &mut herd);
+    match template {
+        "wayfinding" => return routed(paths, &mut herd, Template::Wayfinding),
+        "grill-batch" => return routed(paths, &mut herd, Template::GrillBatch),
+        _ => {}
     }
     let mut rendered = rendered(paths, &herd)?;
     let prompt_file = grill_file(paths, &herd.name);
@@ -1371,11 +1550,17 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
     })
 }
 
-/// The `[template.wayfinding]` with the `[queue]` init writes without and with it.
-fn routed_wayfinding(paths: &Paths, herd: &mut Herd) -> Result<herd::NewTemplate> {
+/// A template the queue routes to, with the `[queue]` init writes without and
+/// with it, and its prompt file when it has one.
+fn routed(paths: &Paths, herd: &mut Herd, template: Template) -> Result<herd::NewTemplate> {
     let herd_file = paths.herds.join(format!("{}.toml", herd.name));
-    let mut queue = |wayfinding| -> Result<(toml_edit::Table, String)> {
-        herd.wayfinding = wayfinding;
+    let batch_file = grill_batch_file(paths, &herd.name);
+    let mut render = |on| -> Result<(toml_edit::Table, Rendered)> {
+        match template {
+            Template::Wayfinding => herd.wayfinding = on,
+            Template::GrillBatch => herd.grill_batch = on,
+            Template::Groom => unreachable!("the queue routes nothing to groom"),
+        }
         let rendered = rendered(paths, herd)?;
         let (_, text) = rendered
             .files
@@ -1387,13 +1572,24 @@ fn routed_wayfinding(paths: &Paths, herd: &mut Herd) -> Result<herd::NewTemplate
             .get("queue")
             .and_then(toml_edit::Item::as_table)
             .context("rendered herd file has no [queue]")?;
-        Ok((queue.clone(), rendered.wayfinding))
+        Ok((queue.clone(), rendered))
     };
-    let (before, _) = queue(false)?;
-    let (after, table) = queue(true)?;
+    let (before, _) = render(false)?;
+    let (after, rendered) = render(true)?;
+    let (table, prompt) = match template {
+        Template::GrillBatch => {
+            let prompt = rendered
+                .files
+                .into_iter()
+                .find(|(path, _)| *path == batch_file)
+                .map(|(_, text)| (format!("{}-grill-batch.md", herd.name), text));
+            (rendered.grill_batch, prompt)
+        }
+        _ => (rendered.wayfinding, None),
+    };
     Ok(herd::NewTemplate {
         table,
-        prompt: None,
+        prompt,
         queue: Some(herd::RoutedQueue { before, after }),
     })
 }
@@ -1402,24 +1598,30 @@ fn grill_file(paths: &Paths, herd: &str) -> PathBuf {
     paths.herds.join(format!("{herd}-grill.md"))
 }
 
-/// The `[template.grill]`, led by a blank line, and its prompt, for the herd's tracker.
-fn grill(herd: &Herd, values: &[(&str, &str)], done: &str) -> (String, String) {
+fn grill_batch_file(paths: &Paths, herd: &str) -> PathBuf {
+    paths.herds.join(format!("{herd}-grill-batch.md"))
+}
+
+/// A grill's words for the herd's tracker: the issue it names, how to read and
+/// claim it, and how to hand in the outcome, each filled from `values`.
+struct GrillSteps {
+    issue: String,
+    read: String,
+    claim: String,
+    hand_in: String,
+}
+
+fn grill_steps(herd: &Herd, values: &[(&str, &str)]) -> GrillSteps {
     let github = herd.github.is_some();
     let pick = |with: &'static str, without: &'static str| if github { with } else { without };
-    let (key, params, usage, issue, read, claim, hand_in) = match herd.tracker.kind {
+    let (issue, read, claim, hand_in) = match herd.tracker.kind {
         tracker::Kind::GitHub => (
-            "number",
-            r#"["number", "slug"]"#,
-            "<number> <slug>",
             "GitHub issue #{number} of @OWNER_REPO@",
             GITHUB_GRILL_READ,
             GITHUB_GRILL_CLAIM,
             GITHUB_GRILL_HAND_IN.to_string(),
         ),
         tracker::Kind::Local => (
-            "id",
-            r#"["id", "slug", "path"]"#,
-            "<id> <slug> <path>",
             "the local issue {path}",
             LOCAL_GRILL_READ,
             LOCAL_GRILL_CLAIM,
@@ -1429,9 +1631,6 @@ fn grill(herd: &Herd, values: &[(&str, &str)], done: &str) -> (String, String) {
             ),
         ),
         tracker::Kind::Other => (
-            "number",
-            r#"["number", "slug"]"#,
-            "<number> <slug>",
             "task {number}",
             OTHER_GRILL_READ,
             OTHER_GRILL_CLAIM,
@@ -1440,34 +1639,55 @@ fn grill(herd: &Herd, values: &[(&str, &str)], done: &str) -> (String, String) {
     };
     let push = fill(GRILL_PUSH, values);
     let values = [values, &[("GRILL_PUSH", push.as_str())]].concat();
-    // A grill takes the worker's context limit from the herd's default, not the issue's.
-    let done = fill(
-        done,
-        &[&[("CONTEXT_LIMIT", "")], values.as_slice()].concat(),
-    );
-    let merged = values
+    GrillSteps {
+        issue: fill(issue, &values),
+        read: fill(read, &values),
+        claim: fill(claim, &values),
+        hand_in: fill(&hand_in, &values),
+    }
+}
+
+fn value<'a>(values: &[(&str, &'a str)], key: &str) -> &'a str {
+    values
         .iter()
-        .find(|(k, _)| *k == "MERGED")
-        .map_or("", |(_, v)| *v);
-    let checks = [done.trim_end(), merged]
-        .into_iter()
+        .find(|(k, _)| *k == key)
+        .map_or("", |(_, v)| *v)
+}
+
+fn check_lines(checks: &[&str]) -> String {
+    checks
+        .iter()
+        .map(|check| check.trim_end())
         .filter(|check| !check.is_empty())
         .collect::<Vec<_>>()
-        .join("\n");
+        .join("\n")
+}
+
+/// The `[template.grill]`, led by a blank line, and its prompt, for the herd's tracker.
+fn grill(herd: &Herd, values: &[(&str, &str)], done: &str) -> (String, String) {
+    let (key, params, usage) = match herd.tracker.kind {
+        tracker::Kind::GitHub | tracker::Kind::Other => {
+            ("number", r#"["number", "slug"]"#, "<number> <slug>")
+        }
+        tracker::Kind::Local => ("id", r#"["id", "slug", "path"]"#, "<id> <slug> <path>"),
+    };
+    // A grill takes the worker's context limit from the herd's default, not the issue's.
+    let done = fill(done, &[&[("CONTEXT_LIMIT", "")], values].concat());
+    let checks = check_lines(&[&done, value(values, "MERGED")]);
     let prompt_file = toml_string(&format!("{}-grill.md", herd.name));
-    let snippets = [issue, read, claim, &hand_in].map(|text| fill(text, &values));
+    let steps = grill_steps(herd, values);
     let values = [
-        values.as_slice(),
+        values,
         &[
             ("GRILL_KEY", key),
             ("GRILL_PARAMS", params),
             ("GRILL_USAGE", usage),
             ("GRILL_CHECKS", &checks),
             ("GRILL_PROMPT", &prompt_file),
-            ("GRILL_ISSUE", &snippets[0]),
-            ("GRILL_READ", &snippets[1]),
-            ("GRILL_CLAIM", &snippets[2]),
-            ("GRILL_HAND_IN", &snippets[3]),
+            ("GRILL_ISSUE", &steps.issue),
+            ("GRILL_READ", &steps.read),
+            ("GRILL_CLAIM", &steps.claim),
+            ("GRILL_HAND_IN", &steps.hand_in),
             ("TRACKER_DOC", tracker::TRACKER_DOC),
         ],
     ]
@@ -1475,6 +1695,57 @@ fn grill(herd: &Herd, values: &[(&str, &str)], done: &str) -> (String, String) {
     (
         format!("\n{}", fill(GRILL, &values)),
         fill(GRILL_PROMPT, &values),
+    )
+}
+
+/// The `[template.grill-batch]` and its prompt, for the herd's tracker. Its
+/// params are the issue template's, as the queue routes tasks to it.
+fn grill_batch(herd: &Herd, values: &[(&str, &str)], issue: &str) -> (String, String) {
+    let params = issue
+        .lines()
+        .find_map(|line| line.strip_prefix("params = "))
+        .expect("the issue template has params");
+    let (task_word, done, post, wait) = match herd.tracker.kind {
+        tracker::Kind::GitHub => (
+            "issue",
+            GITHUB_BATCH_DONE,
+            GITHUB_BATCH_POST,
+            GITHUB_BATCH_WAIT,
+        ),
+        tracker::Kind::Other => ("task", OTHER_BATCH_DONE, OTHER_BATCH_POST, OTHER_BATCH_WAIT),
+        tracker::Kind::Local => unreachable!("init offers a local tracker's herd no grill-batch"),
+    };
+    let done = fill(done, values);
+    let checks = check_lines(&[&done, value(values, "MERGED")]);
+    let prompt_file = toml_string(&format!("{}-grill-batch.md", herd.name));
+    let steps = grill_steps(herd, values);
+    let [post, wait] = [post, wait].map(|text| fill(text, values));
+    // The batch's outcome runs once the human has accepted, so it waits on no one.
+    let hand_in = match steps.hand_in.strip_prefix(AGREED) {
+        Some(rest) => rest[..1].to_uppercase() + &rest[1..],
+        None => steps.hand_in.clone(),
+    };
+    let values = [
+        values,
+        &[
+            ("GRILL_KEY", "number"),
+            ("BATCH_PARAMS", params),
+            ("BATCH_CHECKS", &checks),
+            ("BATCH_PROMPT", &prompt_file),
+            ("GRILL_ISSUE", &steps.issue),
+            ("GRILL_READ", &steps.read),
+            ("GRILL_HAND_IN", &hand_in),
+            ("GRILL_CLAIM", &steps.claim),
+            ("TASK_WORD", task_word),
+            ("BATCH_POST", &post),
+            ("BATCH_WAIT", &wait),
+            ("TRACKER_DOC", tracker::TRACKER_DOC),
+        ],
+    ]
+    .concat();
+    (
+        fill(GRILL_BATCH, &values),
+        fill(GRILL_BATCH_PROMPT, &values),
     )
 }
 
@@ -1496,13 +1767,22 @@ fn wayfinding(issue: &str, kind: tracker::Kind, values: &[(&str, &str)]) -> Stri
     format!("{settings}{}", fill(prompt, values))
 }
 
-/// The tracker doc's and `docs/agents/loopherd.md`'s word on wayfinding tasks.
-fn wayfinding_section(kind: tracker::Kind) -> &'static str {
-    match kind {
-        tracker::Kind::GitHub => GITHUB_WAYFINDING_SECTION,
-        tracker::Kind::Local => LOCAL_WAYFINDING_SECTION,
-        tracker::Kind::Other => OTHER_WAYFINDING_SECTION,
+/// The tracker doc's and `docs/agents/loopherd.md`'s word on the herd's routed
+/// templates: wayfinding tasks and batch grills, each only when the herd has it.
+fn sections(kind: tracker::Kind, wayfinding: bool, grill_batch: bool, needs_info: &str) -> String {
+    let (wayfinding_section, batch_section) = match kind {
+        tracker::Kind::GitHub => (GITHUB_WAYFINDING_SECTION, GITHUB_BATCH_SECTION),
+        tracker::Kind::Local => (LOCAL_WAYFINDING_SECTION, ""),
+        tracker::Kind::Other => (OTHER_WAYFINDING_SECTION, OTHER_BATCH_SECTION),
+    };
+    let mut text = String::new();
+    if wayfinding {
+        text.push_str(wayfinding_section);
     }
+    if grill_batch {
+        text.push_str(&fill(batch_section, &[("NEEDS_INFO", needs_info)]));
+    }
+    text
 }
 
 const GITHUB_WAYFINDING_SECTION: &str = "
@@ -1536,6 +1816,31 @@ it to the herd's wayfinding template, whose worker resolves it with the
 research note, a decision record or a prototype) on a `docs/` branch.
 ";
 
+const GITHUB_BATCH_SECTION: &str = "
+## Batch grills
+
+An open issue labelled `grilling` and `grill:batch` is grilled without the
+human in the pane, ready or not. loopherd's queue routes it to the
+herd's grill-batch template, whose worker answers the grill's questions itself,
+posts them as one batch comment on the issue, labels it `@NEEDS_INFO@` and
+stops. The human replies there: `accept all`, overrides by number, or
+`discuss <n>`. Then the shepherd drops `@NEEDS_INFO@` and runs
+`loopherd release <member>`, and the next feed starts a fresh member, which
+writes the decision and files its issues. A `grilling` issue without
+`grill:batch` waits for a live grill.
+";
+const OTHER_BATCH_SECTION: &str = "
+## Batch grills
+
+An open task marked `grilling` and `grill:batch` is grilled without the human
+in the pane, ready or not. loopherd's queue routes it to the herd's grill-batch
+template, whose worker answers the grill's questions itself, comments them as
+one batch on the task, marks it `@NEEDS_INFO@` and stops. The human replies
+there: `accept all`, overrides by number, or `discuss <n>`. Then the shepherd
+drops `@NEEDS_INFO@` and runs `loopherd release <member>`, and the next feed
+starts a fresh member, which writes the decision and files its tasks. A
+`grilling` task without `grill:batch` waits for a live grill.
+";
 /// The `[template.groom]` for the herd's tracker.
 fn groom(herd: &Herd, values: &[(&str, &str)]) -> Result<String> {
     let (read, forms, never) = match herd.tracker.kind {
@@ -1576,6 +1881,7 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
             &github.slug,
             &tracker.labels,
             herd.wayfinding,
+            herd.grill_batch,
         )?,
         _ => vec![],
     };
@@ -1601,6 +1907,9 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         lines.push(format!("wrote {}", lead_file.display()));
     }
     lines.push(format!("wrote {}", grill_file(paths, name).display()));
+    if herd.grill_batch {
+        lines.push(format!("wrote {}", grill_batch_file(paths, name).display()));
+    }
     lines.extend(herd.docs.iter().map(agents::Doc::done));
     let mut steps = vec![format!(
         "Open Claude in {} once and accept its trust dialog; members can't start past \
@@ -1633,6 +1942,14 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
             herd_file.display(),
             grill_file(paths, name).display()
         ));
+        if herd.grill_batch {
+            steps.push(format!(
+                "{FILL_IN}, in {}: [template.grill-batch] done, and in {} each line marked \
+                 (fill in).",
+                herd_file.display(),
+                grill_batch_file(paths, name).display()
+            ));
+        }
         steps.push(
             "Fill in each section of docs/agents/loopherd.md marked (fill in), or adapt the \
              doc to the same tracker if it was already there."
@@ -1828,6 +2145,7 @@ struct Recorded {
     groom: bool,
     grill: bool,
     wayfinding: bool,
+    grill_batch: bool,
 }
 
 impl Recorded {
@@ -1901,6 +2219,9 @@ impl Recorded {
             wayfinding: herd
                 .get("template")
                 .is_some_and(|t| t.get("wayfinding").is_some()),
+            grill_batch: herd
+                .get("template")
+                .is_some_and(|t| t.get("grill-batch").is_some()),
         })
     }
 }
@@ -2014,7 +2335,11 @@ fn account(owner: &str, wanted: Option<&str>, ask: &ask::Asker) -> Result<String
 }
 
 /// The labels the herd's queue and workers use: name, description and color.
-fn wanted_labels(labels: &tracker::Labels, wayfinding: bool) -> Vec<(&str, &str, &str)> {
+fn wanted_labels(
+    labels: &tracker::Labels,
+    wayfinding: bool,
+    grill_batch: bool,
+) -> Vec<(&str, &str, &str)> {
     let mut wanted = vec![
         (
             labels.ready_for_agent.as_str(),
@@ -2038,6 +2363,16 @@ fn wanted_labels(labels: &tracker::Labels, wayfinding: bool) -> Vec<(&str, &str,
             WAYFINDING_SKILLS.map(|(label, _, description)| (label, description, "1D76DB")),
         );
     }
+    if grill_batch {
+        wanted.extend([
+            ("grilling", "A decision to grill before building", "5319E7"),
+            (
+                "grill:batch",
+                "Grilled unattended, as one batch to review",
+                "5319E7",
+            ),
+        ]);
+    }
     wanted
 }
 
@@ -2048,8 +2383,9 @@ fn create_labels(
     slug: &str,
     labels: &tracker::Labels,
     wayfinding: bool,
+    grill_batch: bool,
 ) -> Result<Vec<String>> {
-    let wanted = wanted_labels(labels, wayfinding);
+    let wanted = wanted_labels(labels, wayfinding, grill_batch);
     let existing = gh(
         Some(token),
         &[
