@@ -2736,7 +2736,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = credentials_lead(root.path());
 
-        let settings = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+        let settings = settings(&paths, "lead-h", "h").unwrap();
 
         let groups = settings["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(groups.len(), 1, "{groups:?}");
@@ -2755,7 +2755,7 @@ mod tests {
     fn the_loopherd_that_wrote_the_proc_guard_isnt_a_switch_change() {
         let root = tempfile::tempdir().unwrap();
         let paths = credentials_lead(root.path());
-        let built = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+        let built = settings(&paths, "lead-h", "h").unwrap();
         let mut elsewhere = built.clone();
         let hook = &mut elsewhere["hooks"]["PreToolUse"][0]["hooks"][0]["command"];
         let command = hook.as_str().unwrap().to_string();
@@ -2776,7 +2776,7 @@ mod tests {
         let text = std::fs::read_to_string(&herd).unwrap();
         std::fs::write(&herd, text.replace("\"credentials\"", "\"hook\"")).unwrap();
 
-        let settings = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+        let settings = settings(&paths, "lead-h", "h").unwrap();
 
         assert!(settings.get("hooks").is_none(), "{settings}");
     }
