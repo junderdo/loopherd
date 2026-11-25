@@ -61,6 +61,7 @@ fn loopherd(dir: &Path, args: &[&str]) -> Command {
         .env("LOOPHERD_CONFIG_DIR", dir.join("config"))
         .env("PATH", "")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .env_remove("CLAUDE_PID")
         .env("HERDR_SOCKET_PATH", SOCKET);
     cmd

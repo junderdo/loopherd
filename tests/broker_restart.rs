@@ -73,6 +73,7 @@ impl World {
             )
             .env("HERDR_SOCKET_PATH", SOCKET)
             .env_remove("CLAUDE_PID");
+        cmd.env_remove("LOOPHERD_BROKER_OF");
         match pane {
             Some(pane) => cmd.env("HERDR_PANE_ID", pane),
             None => cmd.env_remove("HERDR_PANE_ID"),
@@ -194,7 +195,9 @@ fn a_command_run_inside_a_sandbox_lacks_the_variables_it_removes() {
     };
     sandbox.env("HERDR_PANE_ID", "w9:p9").env("CLAUDE_PID", "1");
     let mut env = Command::new("env");
-    env.env_remove("HERDR_PANE_ID").env_remove("CLAUDE_PID");
+    env.env_remove("HERDR_PANE_ID")
+        .env_remove("CLAUDE_PID")
+        .env_remove("LOOPHERD_BROKER_OF");
 
     let seen = stdout(&inside(sandbox, &env).output().unwrap());
 
@@ -331,6 +334,29 @@ fn broker_restart_run_by_a_brokers_own_request_is_refused() {
         "{refused:?}"
     );
     assert!(!broker.wait_exited(Duration::from_millis(300)));
+}
+
+/// As when a lead's gate runs `cargo test`: the broker's identity is in the
+/// tests' own environment, and a helper that passed it on would refuse every restart.
+#[test]
+fn restarts_behave_the_same_when_the_tests_run_inside_a_broker() {
+    let tests = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "broker_restart_replaces_a_running_broker_with_one_from_this_binary",
+            "broker_restart_run_by_a_brokers_own_request_is_refused",
+        ])
+        .env("LOOPHERD_BROKER_OF", "lead-elsewhere")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let out = wait_with_timeout(tests, Duration::from_secs(60));
+
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "{report}");
+    assert!(report.contains("2 passed"), "{report}");
 }
 
 #[test]

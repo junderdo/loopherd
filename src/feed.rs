@@ -756,19 +756,23 @@ pub fn run_after_merge(
     let _lock = Lock::wait(file, req.after_merge_wait)
         .with_context(|| format!("lock {}", path.display()))?;
     for name in &pending.members {
-        let (line, text) =
-            match run_commands(&pending.commands, &pending.repo, req.after_merge_timeout) {
-                None => ("ok".to_string(), "after_merge ok".to_string()),
-                Some((why, tail)) => {
-                    if fed.code == 0 {
-                        fed.code = 1;
-                    }
-                    (
-                        format!("failed: {why}"),
-                        format!("after_merge failed: {why}{tail}"),
-                    )
+        let (line, text) = match run_commands(
+            &pending.commands,
+            &pending.repo,
+            &[],
+            req.after_merge_timeout,
+        ) {
+            None => ("ok".to_string(), "after_merge ok".to_string()),
+            Some((why, tail)) => {
+                if fed.code == 0 {
+                    fed.code = 1;
                 }
-            };
+                (
+                    format!("failed: {why}"),
+                    format!("after_merge failed: {why}{tail}"),
+                )
+            }
+        };
         fed.lines.push(format!("after_merge {name}: {line}"));
         // Marked first, so a failed write leaves only the next feed's interrupted note.
         match set_after_merge(ledger, name, AfterMerge::Noted) {
@@ -785,12 +789,13 @@ pub fn run_after_merge(
 const TAIL_LINES: usize = 20;
 const TAIL_BYTES: usize = 4000;
 
-/// Runs `commands` in order in `repo`, stopping at the first failure,
-/// which it returns as the command and its exit, and the last lines of its
-/// output.
+/// Runs `commands` in order in `repo`, without the environment variables
+/// `unset`, stopping at the first failure, which it returns as the command
+/// and its exit, and the last lines of its output.
 pub(crate) fn run_commands(
     commands: &[String],
     repo: &Path,
+    unset: &[&str],
     timeout: Duration,
 ) -> Option<(String, String)> {
     // A file rather than a pipe, so a command killed at the timeout still leaves its output.
@@ -803,16 +808,17 @@ pub(crate) fn run_commands(
         Err(e) => return Some((format!("could not create its log: {e}"), String::new())),
     };
     for command in commands {
-        let ran = run_within(
-            Command::new("sh")
-                .arg("-c")
-                .arg(format!(
-                    "exec >\"$LOOPHERD_AFTER_MERGE_LOG\" 2>&1\n{command}"
-                ))
-                .env("LOOPHERD_AFTER_MERGE_LOG", log.path())
-                .current_dir(repo),
-            timeout,
-        );
+        let mut sh = Command::new("sh");
+        sh.arg("-c")
+            .arg(format!(
+                "exec >\"$LOOPHERD_AFTER_MERGE_LOG\" 2>&1\n{command}"
+            ))
+            .env("LOOPHERD_AFTER_MERGE_LOG", log.path())
+            .current_dir(repo);
+        for name in unset {
+            sh.env_remove(name);
+        }
+        let ran = run_within(&mut sh, timeout);
         let why = match ran {
             Ok(Some(output)) if output.status.success() => continue,
             Ok(Some(output)) => match output.status.code() {

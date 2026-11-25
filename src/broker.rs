@@ -457,7 +457,9 @@ fn gate(ctx: &mut Ctx, rev: &str, base: Option<&str>, sink: &mut dyn Sink) -> Re
         ));
         return Ok(1);
     }
-    match crate::feed::run_commands(&commands, &merged.path, GATE_COMMAND_TIMEOUT) {
+    // A gate checks another checkout; a loopherd it runs isn't a request this broker serves.
+    let unset = [BROKER_ENV];
+    match crate::feed::run_commands(&commands, &merged.path, &unset, GATE_COMMAND_TIMEOUT) {
         None => {
             sink.out(&format!("{checked}: pass"));
             Ok(0)

@@ -169,6 +169,7 @@ impl Fixture {
             .env("XDG_STATE_HOME", self.state())
             .env("CLAUDE_CONFIG_DIR", self.config().join("claude"))
             .env_remove("HERDR_PANE_ID")
+            .env_remove("LOOPHERD_BROKER_OF")
             .env_remove("HERDR_WORKSPACE_ID")
             .env_remove("GH_TOKEN")
             .output()
@@ -6207,6 +6208,50 @@ fn on_a_terminal_the_groom_question_shows_its_two_line_explanation_first() {
 }
 
 #[test]
+fn on_a_terminal_each_question_explains_itself_above_its_prompt() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::write(
+        fixture.repo().join("Cargo.toml"),
+        "[package]\nname = \"w\"\n",
+    )
+    .unwrap();
+
+    let out = fixture.on_terminal(&[], &"\n".repeat(13));
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    let at = |needle: &str| {
+        shown
+            .find(needle)
+            .unwrap_or_else(|| panic!("missing {needle:?} in\n{shown}"))
+    };
+    let explained = at("How many workers the herd runs at once");
+    let asked = at("max, how many workers run at once (3): ");
+    assert!(explained < asked, "{shown}");
+    assert!(
+        !shown[explained..asked].contains("): "),
+        "another prompt between max's explanation and its prompt:\n{shown}"
+    );
+    for (explanation, prompt) in [
+        ("The checkout the herd", "Repo ("),
+        ("Names the herd's file", "Herd name ("),
+        (
+            "Where the herd finds issues",
+            "Where does this repo track issues?",
+        ),
+        ("The GitHub repo the herd", "GitHub repo (owner/name)"),
+        ("Commands each worker runs", "Use these checks?"),
+        ("A lead is a member", "Give the herd a lead"),
+        ("How full a worker's context", "Workers' handoff limit"),
+        ("The gh login the herd", "gh account ("),
+        ("The branch workers cut", "Default branch ("),
+        ("A groomer triages", "Add a groom template"),
+    ] {
+        assert!(at(explanation) < at(prompt), "{explanation:?}\n{shown}");
+    }
+}
+
+#[test]
 fn the_groom_explanation_is_left_out_when_with_groom_answers_or_off_a_terminal() {
     let fixture = Fixture::new(&["acme"]);
     let asked = fixture.init_on_terminal(&["--with", "groom"], "\n");
@@ -6225,4 +6270,14 @@ fn the_groom_explanation_is_left_out_when_with_groom_answers_or_off_a_terminal()
         "{}",
         text(&out.stderr)
     );
+}
+
+#[test]
+fn without_a_terminal_init_explains_nothing() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    assert_eq!(text(&out.stderr), "");
 }
