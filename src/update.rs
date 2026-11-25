@@ -396,7 +396,9 @@ fn install(fetch: &Fetch, base: &str, tag: &str) -> Result<()> {
     let status = Command::new("sh")
         .arg(&script)
         .env("LOOPHERD_VERSION", tag)
-        // The splash belongs to a first install.
+        // An env var, not a flag: older installers refuse flags but ignore it.
+        .env("LOOPHERD_UPDATE", "1")
+        // For an older installer, which still plays the splash under LOOPHERD_UPDATE.
         .env("LOOPHERD_NO_SPLASH", "1")
         .status()
         .context("run the installer with sh")?;

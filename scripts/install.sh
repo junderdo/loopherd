@@ -5,7 +5,10 @@
 # Claude hooks and skill, then, like scripts/install, offers the agent types,
 # the mattpocock-skills plugin, the herdr plugin and its key bindings, asking
 # on /dev/tty, runs `loopherd setup` and, last, `loopherd doctor`.
-# LOOPHERD_NO_SPLASH=1 skips the splash. LOOPHERD_VERSION=vX.Y.Z pins a
+# LOOPHERD_NO_SPLASH=1 skips the splash. LOOPHERD_UPDATE=1, set by `loopherd
+# update`, also asks none of the offers: it refreshes only the agent types
+# loopherd installed and names the skills plugin's update, as `scripts/install
+# --update` does. LOOPHERD_VERSION=vX.Y.Z pins a
 # release; LOOPHERD_RELEASE_BASE replaces
 # https://github.com/junderdo/loopherd/releases. Unless it does, the installed
 # tag is recorded in <config dir>/install.toml for `loopherd update`.
@@ -101,8 +104,10 @@ warn_missing() {
 # Usage: run_extras splash|offers. Reads answers from the terminal: under
 # `curl | sh` stdin is this script.
 run_extras() {
+  updating=
+  [ "${LOOPHERD_UPDATE:-}" != 1 ] || updating=1
   case "$1" in
-    splash) [ "${LOOPHERD_NO_SPLASH:-}" != 1 ] || return 0 ;;
+    splash) [ "${LOOPHERD_NO_SPLASH:-}" != 1 ] && [ -z "$updating" ] || return 0 ;;
   esac
   extras="$work/scripts/install-extras"
   if [ ! -f "$extras" ]; then
@@ -123,6 +128,9 @@ run_extras() {
   if (: </dev/tty) 2>/dev/null; then tty=/dev/tty; fi
   if [ "$1" = splash ]; then
     bash "$extras" splash <"$tty"
+  elif [ -n "$updating" ]; then
+    bash "$extras" offers update update no no "$bin_dir/loopherd" <"$tty" ||
+      say "an extra failed to update (said above); the rest of the install is unaffected"
   else
     LOOPHERD_EXTRAS_NO_TERMINAL="run this installer again in a terminal to be asked" \
       bash "$extras" offers ask ask ask ask "$bin_dir/loopherd" <"$tty" ||

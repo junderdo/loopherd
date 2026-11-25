@@ -144,7 +144,7 @@ impl Releases {
         fs::write(
             dir.join("install.sh"),
             format!(
-                "echo \"install.sh {tag} LOOPHERD_VERSION=$LOOPHERD_VERSION LOOPHERD_NO_SPLASH=$LOOPHERD_NO_SPLASH $*\" >> '{log}'\n\
+                "echo \"install.sh {tag} LOOPHERD_VERSION=$LOOPHERD_VERSION LOOPHERD_NO_SPLASH=$LOOPHERD_NO_SPLASH LOOPHERD_UPDATE=${{LOOPHERD_UPDATE:-}} $*\" >> '{log}'\n\
                  echo 'install: installed {bin}'\n\
                  /bin/cp '{fake}' '{bin}.tmp'\n\
                  /bin/mv -f '{bin}.tmp' '{bin}'\n\
@@ -228,7 +228,7 @@ fn behind_it_names_both_tags_then_runs_the_latest_release_s_installer_pinned_to_
     assert_eq!(out.status.code(), Some(0), "{}", stderr(&out));
     assert_eq!(
         releases.log(),
-        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 \n"
+        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 LOOPHERD_UPDATE=1 \n"
     );
     let said = stdout(&out);
     assert!(said.starts_with("v0.1.0 → v0.2.0\n"), "{said}");
@@ -327,7 +327,7 @@ fn version_installs_an_older_release_without_asking_for_the_latest() {
     );
     assert_eq!(
         releases.log(),
-        "install.sh v0.1.0 LOOPHERD_VERSION=v0.1.0 LOOPHERD_NO_SPLASH=1 \n"
+        "install.sh v0.1.0 LOOPHERD_VERSION=v0.1.0 LOOPHERD_NO_SPLASH=1 LOOPHERD_UPDATE=1 \n"
     );
 }
 
@@ -347,7 +347,7 @@ fn version_naming_the_current_tag_reinstalls_it() {
     );
     assert_eq!(
         releases.log(),
-        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 \n"
+        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 LOOPHERD_UPDATE=1 \n"
     );
 }
 
@@ -419,7 +419,7 @@ fn with_only_wget_it_reads_the_redirect_and_downloads_with_wget() {
     assert!(lines[1].contains("download/v0.2.0/install.sh"), "{log}");
     assert_eq!(
         lines[2],
-        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 "
+        "install.sh v0.2.0 LOOPHERD_VERSION=v0.2.0 LOOPHERD_NO_SPLASH=1 LOOPHERD_UPDATE=1 "
     );
 }
 

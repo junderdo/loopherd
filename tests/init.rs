@@ -605,6 +605,20 @@ fn init_refuses_changing_nothing_when_the_herd_file_exists() {
 }
 
 #[test]
+fn init_recreates_a_herd_after_herd_remove() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    assert_ok(&fixture.loopherd(&["herd", "remove", "widgets"]));
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    for file in ["widgets.toml", "widgets-lead.md", "widgets-grill.md"] {
+        assert!(fixture.herds().join(file).is_file(), "{file}");
+    }
+}
+
+#[test]
 fn init_refuses_changing_nothing_when_the_lead_prompt_exists() {
     let fixture = Fixture::new(&["acme"]);
     fs::create_dir_all(fixture.herds()).unwrap();
