@@ -1411,6 +1411,42 @@ mod tests {
     }
 
     #[test]
+    fn require_refuses_a_worker_the_main_checkouts_local_settings_loosen() {
+        let h = herd_with_args("sandbox = \"require\"", "", "");
+        let worktree = worktree_of(&h);
+        let admin = h.repo.join(".git/worktrees/feat-x");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+        let local = h.repo.join(".claude/settings.local.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, r#"{"permissions": {"allow": ["Write"]}}"#).unwrap();
+
+        let err = prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree)),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "w1 can't start sandboxed: your Claude settings loosen its sandbox: {}: \
+                 permissions.allow opens Write to writes; remove those, or set [worker] sandbox \
+                 = \"prefer\" in herd h to start it with them as warnings",
+                local.display()
+            )
+        );
+    }
+
+    #[test]
     fn require_refuses_a_worker_the_users_or_worktrees_settings_loosen_naming_each_file_and_key() {
         let h = herd_with_args("sandbox = \"require\"", "", "");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
