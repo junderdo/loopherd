@@ -242,6 +242,15 @@ pub fn lineage(procs: &dyn Procs, me: u32) -> Vec<Process> {
     lineage
 }
 
+/// The first Claude above `lineage`'s first process, which [`lineage`] gives nearest first.
+pub fn nearest_claude(procs: &dyn Procs, lineage: &[Process]) -> Option<Process> {
+    lineage.iter().skip(1).copied().find(|p| {
+        procs
+            .exe(p.pid)
+            .is_some_and(|exe| is_claude(procs, p.pid, &exe))
+    })
+}
+
 /// The member's recorded process, if it is still that process.
 pub fn live(procs: &dyn Procs, recorded: Option<Process>) -> Option<Process> {
     let recorded = recorded?;
