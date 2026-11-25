@@ -350,6 +350,7 @@ mod tests {
 
         fn paths(&self) -> Paths {
             Paths {
+                env: |_| None,
                 herds: self.root.join("config/herds"),
                 home: PathBuf::from("/home/me"),
                 feed_lock: self.root.join("state/feed.lock"),
