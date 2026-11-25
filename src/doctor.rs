@@ -1807,6 +1807,7 @@ mod tests {
         crate::skill::install(&skill).unwrap();
         let setup = Setup {
             paths: Paths {
+                env: |_| None,
                 herds: dir.path().join("config/herds"),
                 home: dir.path().to_path_buf(),
                 feed_lock: dir.path().join("state/feed.lock"),
@@ -4777,6 +4778,7 @@ mod tests {
 
         fn paths(&self) -> crate::herd::Paths {
             crate::herd::Paths {
+                env: |_| None,
                 herds: self.dir.path().join("herds"),
                 home: self.dir.path().to_path_buf(),
                 feed_lock: self.dir.path().join("feed.lock"),

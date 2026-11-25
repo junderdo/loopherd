@@ -978,6 +978,7 @@ mod tests {
         )
         .unwrap();
         Paths {
+            env: |_| None,
             herds,
             home: PathBuf::from("/home/me"),
             feed_lock: root.join("state/feed.lock"),

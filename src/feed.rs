@@ -1158,6 +1158,7 @@ mod tests {
 
         fn paths(&self) -> Paths {
             Paths {
+                env: |_| None,
                 herds: self.config.path().join("herds"),
                 home: PathBuf::from("/home/me"),
                 feed_lock: self.config.path().join("feed.lock"),
@@ -2238,6 +2239,7 @@ mod tests {
             fs::write(config.path().join("herds/prs.toml"), herd).unwrap();
         };
         let paths = Paths {
+            env: |_| None,
             herds: config.path().join("herds"),
             home: PathBuf::from("/home/me"),
             feed_lock: config.path().join("feed.lock"),

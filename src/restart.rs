@@ -995,6 +995,7 @@ mod tests {
         fn paths(&self) -> Paths {
             let config = self.state.path().join("config");
             Paths {
+                env: |_| None,
                 herds: config.join("herds"),
                 home: self.state.path().join("home"),
                 feed_lock: config.join("feed.lock"),

@@ -937,7 +937,7 @@ fn settings(paths: &Paths, name: &str, herd: &str, worktree: &Path) -> Result<Va
             herd,
             &mut settings,
             [],
-            &crate::sandbox::THIS_MACHINE,
+            &crate::sandbox::this_machine(paths),
         )
         .map_err(|e| NotStarted(format!("{e:#}")))?;
     }
@@ -1820,6 +1820,30 @@ mod tests {
 
     fn worktree_of(h: &Herd) -> PathBuf {
         h.repo.parent().unwrap().join("worktrees/feat-x")
+    }
+
+    #[test]
+    fn a_sandboxed_worker_in_a_credentials_herd_cant_read_the_gh_dir_its_env_moves() {
+        let mut h = credentials_herd("sandbox = \"require\"");
+        h.paths.env = |name| (name == "XDG_CONFIG_HOME").then(|| "/home/me/.xdg".into());
+
+        prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree_of(&h))),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap();
+
+        let settings = read_json(&settings_file(&h.paths, "w1"));
+        let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap();
+        assert!(
+            deny_read.contains(&json!("/home/me/.xdg/gh")),
+            "{deny_read:?}"
+        );
     }
 
     #[test]
