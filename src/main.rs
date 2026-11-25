@@ -388,7 +388,7 @@ enum Command {
         /// Restart the lead in this pane once its turn ends: starts a detached
         /// waiter that runs the plain restart after its stop since the handoff
         /// reads finished, giving up after 30 minutes with a note. From the
-        /// shepherd's recorded pane, with `[shepherd] self_restart` on, it also
+        /// shepherd's recorded pane, unless `[shepherd] self_restart = false`, it also
         /// waits until the human leaves the pane alone for 5 minutes, and any
         /// prompt there cancels it.
         #[arg(long = "self", id = "own", conflicts_with_all = ["name", "force"])]
