@@ -7,13 +7,14 @@ skills_marketplace_repo=anthropics/claude-plugins-official
 skills_id="$skills_plugin@$skills_marketplace"
 
 # Runs a read-only claude call. stdin is /dev/null: under `curl | sh` it is
-# the terminal, which a claude would read from or stop on. A stalled claude
-# mustn't hang the install, and a stopped one ignores TERM until KILLed.
-# No --foreground: BusyBox's timeout lacks it (LH-613).
+# the terminal, which a claude would read from or stop on. setsid leaves it
+# no terminal to stop on at all: uutils' timeout never KILLs a stopped child
+# (LH-620). No --foreground: BusyBox's timeout lacks it (LH-613).
 claude_read() {
-  local wait=()
-  ! command -v timeout >/dev/null || wait=(timeout -k 5 10)
-  ${wait[@]+"${wait[@]}"} claude "$@" </dev/null 2>/dev/null
+  local run=(claude "$@")
+  ! command -v setsid >/dev/null || run=(setsid "${run[@]}")
+  ! command -v timeout >/dev/null || run=(timeout -k 5 10 "${run[@]}")
+  "${run[@]}" </dev/null 2>/dev/null
 }
 
 skills_marketplace_dir() {

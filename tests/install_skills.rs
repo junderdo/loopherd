@@ -852,14 +852,14 @@ fn the_read_only_claude_calls_run_under_a_timeout() {
     assert!(
         sandbox
             .log()
-            .contains(&"timeout -k 5 10 claude plugin list --json".to_string()),
+            .contains(&"timeout -k 5 10 setsid claude plugin list --json".to_string()),
         "{:?}",
         sandbox.log()
     );
     assert!(
         sandbox
             .log()
-            .contains(&"timeout -k 5 10 claude plugin marketplace list --json".to_string()),
+            .contains(&"timeout -k 5 10 setsid claude plugin marketplace list --json".to_string()),
         "{:?}",
         sandbox.log()
     );
@@ -897,7 +897,7 @@ fn a_claude_that_hangs_is_cut_off_at_the_timeout() {
 }
 
 #[test]
-fn on_a_terminal_a_claude_stopped_on_the_terminal_is_killed() {
+fn on_a_terminal_a_claude_opening_the_terminal_cannot_hang_the_offers() {
     let sandbox = Sandbox::new();
     fs::write(sandbox.stub.join("reads-tty"), "").unwrap();
     let started = std::time::Instant::now();
@@ -910,5 +910,5 @@ fn on_a_terminal_a_claude_stopped_on_the_terminal_is_killed() {
         out.contains("Install the mattpocock-skills plugin"),
         "{out}"
     );
-    assert!(started.elapsed().as_secs() < 50, "{:?}", started.elapsed());
+    assert!(started.elapsed().as_secs() < 20, "{:?}", started.elapsed());
 }
