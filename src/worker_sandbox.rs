@@ -745,9 +745,18 @@ pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<Stri
         let credentials = herd::guards_by_credentials(paths, &herd)?;
         let Some(otherwise) = unsandboxed_fix(&herd, credentials, mode, "run") else {
             let warning = format!("{name} runs unsandboxed ({why})");
+            let kept_args = match Member::kept(paths, name)? {
+                Some(member) => disallowed(&arg_sources(paths, &member, ArgsFrom::Kept)?),
+                None => vec![],
+            };
+            let arg_warnings = kept_args.iter().map(|line| disallowed_warning(name, line));
             return Ok((
                 Some(why),
-                [warning].into_iter().chain(mcp_warning).collect(),
+                [warning]
+                    .into_iter()
+                    .chain(arg_warnings)
+                    .chain(mcp_warning)
+                    .collect(),
             ));
         };
         bail!("{name} can't run sandboxed: {why}; {resume} to resume it sandboxed, or {otherwise}");
@@ -1408,6 +1417,70 @@ mod tests {
             args: args.iter().map(|a| a.to_string()).collect(),
             ..member(Some(worktree))
         }
+    }
+
+    #[test]
+    fn require_refuses_a_worker_the_main_checkouts_local_settings_loosen() {
+        let h = herd_with_args("sandbox = \"require\"", "", "");
+        let worktree = worktree_of(&h);
+        let admin = h.repo.join(".git/worktrees/feat-x");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+        let local = h.repo.join(".claude/settings.local.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, r#"{"permissions": {"allow": ["Write"]}}"#).unwrap();
+
+        let err = prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree)),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "w1 can't start sandboxed: your Claude settings loosen its sandbox: {}: \
+                 permissions.allow opens Write to writes; remove those, or set [worker] sandbox \
+                 = \"prefer\" in herd h to start it with them as warnings",
+                local.display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_rooted_edit_rule_in_the_main_checkouts_local_settings_anchors_at_the_worktree() {
+        let h = herd_with_args("sandbox = \"require\"", "", "");
+        let worktree = worktree_of(&h);
+        let admin = h.repo.join(".git/worktrees/feat-x");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+        let local = h.repo.join(".claude/settings.local.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, r#"{"permissions": {"allow": ["Edit(/src/**)"]}}"#).unwrap();
+
+        let launch = prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree)),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap();
+
+        assert_eq!(launch.warnings("w1"), Vec::<String>::new());
     }
 
     #[test]

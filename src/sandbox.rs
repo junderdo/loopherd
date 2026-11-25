@@ -1496,8 +1496,16 @@ pub fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
             &own_writes,
         ));
     }
-    for name in ["settings.json", "settings.local.json"] {
-        let file = worktree.join(".claude").join(name);
+    let mut project_files = vec![
+        worktree.join(".claude/settings.json"),
+        worktree.join(".claude/settings.local.json"),
+    ];
+    // Claude Code keeps a worktree's local settings at its main checkout, but
+    // anchors their `/` rules at the worktree.
+    if let Some(main) = main_checkout(worktree) {
+        project_files.push(main.join(".claude/settings.local.json"));
+    }
+    for file in project_files {
         if let Some(project) = read_settings(&file, &mut found) {
             found.extend(permission_loosenings(
                 &project,
@@ -1510,6 +1518,16 @@ pub fn loosenings(home: &Path, worktree: &Path, own: &Value) -> Vec<String> {
         }
     }
     found
+}
+
+/// The main checkout `worktree` is linked from; `None` when it is one itself
+/// or isn't a git checkout.
+fn main_checkout(worktree: &Path) -> Option<PathBuf> {
+    let main = crate::worktree::common_dir(worktree)
+        .ok()?
+        .parent()?
+        .to_path_buf();
+    (!same_dir(&main, worktree)).then_some(main)
 }
 
 /// A settings file's contents; `None` when it's missing or empty, or, noted

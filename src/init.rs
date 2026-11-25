@@ -229,7 +229,7 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
 /// from empty.
 pub fn diff(paths: &Paths, req: Request) -> Result<Option<String>> {
     let herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
-    let mut files = rendered(paths, &herd)?;
+    let mut files = rendered(paths, &herd)?.files;
     for doc in &herd.docs {
         let path = herd.repo.join(doc.path);
         let text = match doc.append {
@@ -291,8 +291,9 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         refuse_second_herd(paths, &repo)?;
     }
     let inferred = match mode {
-        Mode::Diff => herd_running(paths, &repo)?,
-        Mode::Write => None,
+        // A named herd needs no inference, so another herd's unreadable file can't stop it.
+        Mode::Diff if req.herd.is_none() => herd_running(paths, &repo)?,
+        _ => None,
     }
     .or_else(|| repo.file_name().map(|n| n.to_string_lossy().into_owned()));
     let name = ask.value(
@@ -872,7 +873,7 @@ fn summary(herd: &Herd) -> String {
 }
 
 /// The lead prompt, when the herd has a lead, the grill prompt, then the herd file, each with its text.
-fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
+fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     let Herd {
         repo,
         name,
@@ -1076,13 +1077,77 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     values.push(("GROOM", &groom));
     values.push(("GRILL", &grill));
     let lead = herd.lead.then(|| (lead_file, fill(LEAD, &values)));
-    Ok(lead
+    let files = lead
         .into_iter()
         .chain([
             (grill_file(paths, name), grill_prompt),
             (herd_file, fill(HERD, &values)),
         ])
-        .collect())
+        .collect();
+    Ok(Rendered {
+        files,
+        grill: grill.trim_start().to_string(),
+    })
+}
+
+/// The gh account `[template.issue]`'s checks run as, from their `--user <login>`.
+fn recorded_account(herd_file: &Path) -> Option<String> {
+    let herd: toml::Table = fs::read_to_string(herd_file).ok()?.parse().ok()?;
+    let issue = herd.get("template")?.get("issue")?;
+    ["done", "merged"]
+        .iter()
+        .filter_map(|key| issue.get(key)?.as_str())
+        .find_map(|check| {
+            let (_, after) = check.split_once("gh auth token --user ")?;
+            let login = after
+                .split(|c: char| c == ')' || c.is_whitespace())
+                .next()?;
+            is_github_name(login).then(|| login.to_string())
+        })
+}
+
+struct Rendered {
+    files: Vec<(PathBuf, String)>,
+    /// The `[template.grill]` within the herd file.
+    grill: String,
+}
+
+/// `template` as init would write it now for the existing `herd`, rendered as
+/// `init --diff` renders over the herd's files.
+pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTemplate> {
+    if template != "grill" {
+        bail!("init writes no template {template}");
+    }
+    let repo = herd::repo(paths, herd)?;
+    let account = recorded_account(&paths.herds.join(format!("{herd}.toml")));
+    let req = Request {
+        dir: &repo,
+        herd: Some(herd),
+        // A grill's prompt names no checks, so a herd without readable ones still renders.
+        checks: &["true".to_string()],
+        gh_account: account.as_deref(),
+        github: None,
+        no_github: false,
+        tracker: None,
+        max: None,
+        lead: None,
+        merge_guard: None,
+        context_limit: None,
+        with: &[],
+    };
+    let herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
+    let mut rendered = rendered(paths, &herd)?;
+    let prompt_file = grill_file(paths, &herd.name);
+    let prompt = rendered
+        .files
+        .iter_mut()
+        .find(|(path, _)| *path == prompt_file)
+        .map(|(_, text)| std::mem::take(text))
+        .context("init renders no grill prompt")?;
+    Ok(herd::NewTemplate {
+        table: rendered.grill,
+        prompt: Some((format!("{}-grill.md", herd.name), prompt)),
+    })
 }
 
 fn grill_file(paths: &Paths, herd: &str) -> PathBuf {
@@ -1198,7 +1263,7 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     } = &herd;
     let herd_file = paths.herds.join(format!("{name}.toml"));
     let lead_file = paths.herds.join(format!("{name}-lead.md"));
-    let herd_files = rendered(paths, &herd)?;
+    let herd_files = rendered(paths, &herd)?.files;
     let mut lines = match github {
         Some(github) if tracker.kind == tracker::Kind::GitHub => {
             create_labels(&github.token, &github.slug, &tracker.labels)?

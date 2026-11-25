@@ -1758,7 +1758,12 @@ mod tests {
         fn herd(&self, herd: &str) -> PathBuf {
             let repo = self.dir.path().join(format!("repos/{herd}"));
             std::fs::create_dir_all(repo.join(".git")).unwrap();
-            self.herd_file(herd, &format!("repo = {:?}\n", repo.to_str().unwrap()));
+            // With a grill, so `herd upgrade` has nothing to offer it.
+            let grill = "[template.grill]\nparams = []\nattended = true\nprompt = \"grill\"\n";
+            self.herd_file(
+                herd,
+                &format!("repo = {:?}\n{grill}", repo.to_str().unwrap()),
+            );
             repo
         }
 

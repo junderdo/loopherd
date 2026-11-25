@@ -1121,6 +1121,7 @@ fn run_herd(action: HerdAction) -> Result<i32> {
                 running_leads: &running_leads,
                 now: SystemTime::now(),
                 terminal: terminal.then_some(&mut input as &mut dyn BufRead),
+                render: &|herd, template| init::template(&paths, herd, template),
             };
             herd::upgrade(&paths, herd.as_deref(), how, &mut std::io::stdout())?;
         }
