@@ -66,7 +66,7 @@ enum Change {
     },
 }
 
-const MIGRATIONS: [Migration; 4] = [
+static MIGRATIONS: [Migration; 4] = [
     Migration {
         id: "lead-review-rounds",
         explanation: "Writes the lead's review-round limit into its prompt where init puts it,\n\
@@ -251,6 +251,48 @@ pub fn upgrade(
     Ok(())
 }
 
+/// Each valid herd's pending migration ids, declined ones left out, for
+/// the herds that have any.
+pub fn pending(paths: &Paths) -> Result<Vec<(String, Vec<&'static str>)>> {
+    let defaults = lead_defaults(paths)?;
+    let mut pending = vec![];
+    for herd in names(&paths.herds)? {
+        if super::checked(&file_of(&paths.herds, &herd)?, paths).is_err() {
+            continue;
+        }
+        let ids = offered(paths, &herd, &defaults)?;
+        if !ids.is_empty() {
+            pending.push((herd, ids.iter().map(|m| m.id).collect()));
+        }
+    }
+    Ok(pending)
+}
+
+/// `n new feature(s)`.
+pub fn new_features(n: usize) -> String {
+    match n {
+        1 => "1 new feature".to_string(),
+        n => format!("{n} new features"),
+    }
+}
+
+fn offered(paths: &Paths, herd: &str, defaults: &SwitchValues) -> Result<Vec<&'static Migration>> {
+    let declined = load(&paths.herds, herd)?.declined;
+    let doc = read(&file_of(&paths.herds, herd)?)?;
+    Ok(MIGRATIONS
+        .iter()
+        .filter(|m| !declined.iter().any(|id| id == m.id))
+        .filter(|m| {
+            let herd = Herd {
+                doc: &doc,
+                defaults,
+                paths,
+            };
+            !matches!((m.state)(&herd), State::Current)
+        })
+        .collect())
+}
+
 fn upgrade_herd(
     paths: &Paths,
     herd: &str,
@@ -259,7 +301,6 @@ fn upgrade_herd(
     out: &mut dyn Write,
 ) -> Result<()> {
     let file = file_of(&paths.herds, herd)?;
-    let declined = load(&paths.herds, herd)?.declined;
     let defaults = lead_defaults(paths)?;
     let state = |migration: &Migration, doc: &DocumentMut| {
         (migration.state)(&Herd {
@@ -268,27 +309,17 @@ fn upgrade_herd(
             paths,
         })
     };
-    let doc = read(&file)?;
-    let pending: Vec<&Migration> = MIGRATIONS
-        .iter()
-        .filter(|m| !declined.iter().any(|id| id == m.id))
-        .filter(|m| !matches!(state(m, &doc), State::Current))
-        .collect();
+    let pending = offered(paths, herd, &defaults)?;
     if pending.is_empty() {
         writeln!(out, "herd {herd} is up to date")?;
         return Ok(());
     }
     let Some(input) = how.terminal.as_deref_mut() else {
         let ids: Vec<_> = pending.iter().map(|m| m.id).collect();
-        let features = if ids.len() == 1 {
-            "feature"
-        } else {
-            "features"
-        };
         writeln!(
             out,
-            "{herd}: {} new {features}: {}",
-            ids.len(),
+            "{herd}: {}: {}",
+            new_features(ids.len()),
             ids.join(", ")
         )?;
         writeln!(out, "  run: loopherd herd upgrade {herd}")?;

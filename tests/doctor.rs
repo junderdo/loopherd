@@ -656,3 +656,72 @@ fn a_missing_repo_fails_once_under_trackers() {
     );
     assert_eq!(out.status.code(), Some(1));
 }
+
+/// A herd `h` whose lead lacks `follow_ups_ready`, the one pending upgrade,
+/// with `declined` above its tables.
+fn herd_pending_one_upgrade(s: &Sandbox, declined: &str) {
+    let repo = s.dir.path().join("repo");
+    fs::create_dir_all(repo.join(".git")).unwrap();
+    fs::create_dir_all(s.dir.path().join("config/herds")).unwrap();
+    fs::write(
+        s.dir.path().join("config/herds/h.toml"),
+        format!(
+            "repo = {repo:?}\n{declined}[template.t]\nparams = [\"n\"]\nprompt = \"go\"\n\
+             [lead]\nprompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n"
+        ),
+    )
+    .unwrap();
+}
+
+#[test]
+fn a_herd_with_pending_upgrades_gets_an_info_line_never_a_failure() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    herd_pending_one_upgrade(&s, "");
+    let without = sandbox(Some("0.9.5"));
+    without.install_hooks();
+    herd_pending_one_upgrade(&without, "declined = [\"lead-follow-ups-ready\"]\n");
+
+    let out = s.doctor(&[]);
+
+    let text = stdout(&out);
+    assert!(
+        text.contains(
+            "info herd h upgrade: 1 new feature: lead-follow-ups-ready; fix: loopherd herd upgrade h\n"
+        ),
+        "{text}"
+    );
+    assert_eq!(
+        out.status.code(),
+        without.doctor(&[]).status.code(),
+        "{text}"
+    );
+}
+
+#[test]
+fn declined_upgrades_get_no_info_line() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    herd_pending_one_upgrade(&s, "declined = [\"lead-follow-ups-ready\"]\n");
+
+    let text = stdout(&s.doctor(&["--verbose"]));
+
+    assert!(!text.contains("herd h upgrade"), "{text}");
+}
+
+#[test]
+fn json_gives_pending_upgrades_the_info_status() {
+    let s = sandbox(Some("0.9.5"));
+    s.install_hooks();
+    herd_pending_one_upgrade(&s, "");
+
+    let doctor: serde_json::Value = serde_json::from_slice(&s.doctor(&["--json"]).stdout).unwrap();
+
+    let upgrade = doctor["checks"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == "herd h upgrade")
+        .unwrap();
+    assert_eq!(upgrade["status"], "info");
+}

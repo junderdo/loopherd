@@ -34,7 +34,8 @@ for yourself. The herds run themselves in between.
 
 ## New since 0.2.0
 
-- `loopherd update` updates a release or a source install in place.
+- `loopherd update` updates a release or a source install in place, then
+  offers each herd what newer init writes (`loopherd herd upgrade`).
 - The release installer asks about each extra as it installs: agent types,
   the `mattpocock-skills` plugin, the herdr plugin and its key bindings.
 - The view lists each member's running subagents, and `view.layout` (or
