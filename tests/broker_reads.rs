@@ -83,6 +83,7 @@ impl World {
         let mut cmd = Command::new(env!("CARGO_BIN_EXE_loopherd"));
         let bin = self.root.path().join("bin");
         set_env(&mut cmd, self.root.path(), pane.is_none().then_some(&bin));
+        cmd.env_remove("LOOPHERD_BROKER_OF");
         match pane {
             Some(pane) => cmd.env("HERDR_PANE_ID", pane),
             None => cmd.env_remove("HERDR_PANE_ID"),

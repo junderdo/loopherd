@@ -125,6 +125,7 @@ impl Sandbox {
             .env("LOOPHERD_CONFIG_DIR", self.dir.path().join("config"))
             .env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"))
             .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("LOOPHERD_BROKER_OF")
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()));
         command
     }

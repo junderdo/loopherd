@@ -27,6 +27,7 @@ impl Broker {
         let child = loopherd
             .args(["broker", lead])
             .env_remove("HERDR_PANE_ID")
+            .env_remove("LOOPHERD_BROKER_OF")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
