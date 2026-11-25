@@ -25,12 +25,14 @@ pub struct Asker {
 }
 
 impl Asker {
-    /// `given` when set. Else on a terminal the answer to `question`, Enter
-    /// taking `default` (shown when not empty), re-asked until `parse` takes
-    /// it. Else `default`, failing with `missing` when there is none.
+    /// `given` when set. Else on a terminal the answer to `question`, shown
+    /// below `explanation` when not empty, Enter taking `default` (shown when
+    /// not empty), re-asked until `parse` takes it. Else `default`, failing
+    /// with `missing` when there is none.
     pub fn value<T>(
         &self,
         question: &str,
+        explanation: &str,
         given: Option<&str>,
         default: Option<&str>,
         missing: &str,
@@ -45,6 +47,7 @@ impl Asker {
                 None => bail!("{missing}"),
             };
         }
+        explain(explanation);
         if default.is_none() && !missing.is_empty() {
             eprintln!("{missing}");
         }
@@ -66,14 +69,22 @@ impl Asker {
         }
     }
 
-    /// `given` when set, else a yes or no to `question` on a terminal, else `default`.
-    pub fn yes(&self, question: &str, given: Option<bool>, default: bool) -> Result<bool> {
+    /// `given` when set, else a yes or no to `question` on a terminal, shown
+    /// below `explanation` when not empty, else `default`.
+    pub fn yes(
+        &self,
+        question: &str,
+        explanation: &str,
+        given: Option<bool>,
+        default: bool,
+    ) -> Result<bool> {
         if let Some(given) = given {
             return Ok(given);
         }
         if !self.terminal {
             return Ok(default);
         }
+        explain(explanation);
         let options = if default { "[Y/n]" } else { "[y/N]" };
         loop {
             match line(&format!("{question} {options}: "))?
@@ -87,5 +98,12 @@ impl Asker {
                 _ => eprintln!("answer y or n"),
             }
         }
+    }
+}
+
+/// `explanation` on stderr, above the prompt that follows it.
+pub fn explain(explanation: &str) {
+    if !explanation.is_empty() {
+        eprintln!("{explanation}");
     }
 }
