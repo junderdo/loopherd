@@ -1456,6 +1456,34 @@ mod tests {
     }
 
     #[test]
+    fn a_rooted_edit_rule_in_the_main_checkouts_local_settings_anchors_at_the_worktree() {
+        let h = herd_with_args("sandbox = \"require\"", "", "");
+        let worktree = worktree_of(&h);
+        let admin = h.repo.join(".git/worktrees/feat-x");
+        std::fs::create_dir_all(&admin).unwrap();
+        std::fs::create_dir_all(&worktree).unwrap();
+        std::fs::write(
+            worktree.join(".git"),
+            format!("gitdir: {}\n", admin.display()),
+        )
+        .unwrap();
+        let local = h.repo.join(".claude/settings.local.json");
+        std::fs::create_dir_all(local.parent().unwrap()).unwrap();
+        std::fs::write(&local, r#"{"permissions": {"allow": ["Edit(/src/**)"]}}"#).unwrap();
+
+        let launch = prepare(
+            &h.paths,
+            "w1",
+            &member(Some(&worktree)),
+            ArgsFrom::Fresh,
+            &blocked,
+        )
+        .unwrap();
+
+        assert_eq!(launch.warnings("w1"), Vec::<String>::new());
+    }
+
+    #[test]
     fn require_refuses_a_worker_the_users_or_worktrees_settings_loosen_naming_each_file_and_key() {
         let h = herd_with_args("sandbox = \"require\"", "", "");
         let worktree = h.repo.parent().unwrap().join("worktrees/feat-x");
