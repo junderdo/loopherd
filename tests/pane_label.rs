@@ -127,7 +127,51 @@ const ON: &str = "[notify]\nenabled = true\nherdr = false\npane_label = true\n";
 // UserPromptSubmit inputs captured from Claude Code 2.1.327, paths made generic.
 const PROMPT: &str = include_str!("fixtures/prompt-hook/typed.json");
 const TASK_DONE: &str = include_str!("fixtures/prompt-hook/task-notification.json");
+// Captured from Claude Code 2.1.330: a finished subagent's notification, the
+// SubagentHandback report that comes as a prompt of its own, and a background
+// task's notification under the preamble some sessions add.
+const SUBAGENT_DONE: &str = include_str!("fixtures/prompt-hook/subagent-finished.json");
+const HANDBACK: &str = include_str!("fixtures/prompt-hook/subagent-handback.json");
+const SYSTEM_NOTIFICATION: &str = include_str!("fixtures/prompt-hook/system-notification.json");
 const SESSION: &str = r#"{"hook_event_name":"SessionStart","source":"startup","session_id":"s1"}"#;
+
+fn typed(prompt: &str) -> String {
+    serde_json::json!({"hook_event_name": "UserPromptSubmit", "prompt": prompt}).to_string()
+}
+
+#[test]
+fn a_finished_background_task_or_subagent_neither_answers_a_lead_nor_clears_its_label() {
+    let world = World::new(ON);
+    world.run("w1:p0", &["report", "--kind", "question", "which DB?"]);
+    let awaiting = world
+        .root
+        .path()
+        .join("state/loopherd/reports/.awaiting-w1:p0");
+    assert!(awaiting.exists());
+
+    for input in [TASK_DONE, SUBAGENT_DONE, HANDBACK, SYSTEM_NOTIFICATION] {
+        world.hook("w1:p0", "prompt-hook", input);
+    }
+
+    assert!(!world.mailbox("lead-cards").contains("answered"));
+    assert!(awaiting.exists());
+    assert_eq!(world.calls(), [LABEL]);
+}
+
+#[test]
+fn a_typed_prompt_a_tell_or_text_quoting_a_notification_answers_a_lead() {
+    let quoted =
+        "why did this fire?\n<task-notification>\n<status>completed</status>\n</task-notification>";
+    for prompt in [PROMPT.to_string(), typed("use postgres"), typed(quoted)] {
+        let world = World::new(ON);
+        world.run("w1:p0", &["report", "--kind", "question", "which DB?"]);
+
+        world.hook("w1:p0", "prompt-hook", &prompt);
+
+        assert!(world.mailbox("lead-cards").contains("answered"), "{prompt}");
+        assert_eq!(world.calls(), [LABEL, CLEAR], "{prompt}");
+    }
+}
 
 #[test]
 fn a_leads_question_labels_its_pane_until_the_human_prompts_there() {

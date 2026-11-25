@@ -1,0 +1,9 @@
+{
+  "session_id": "dcba7188-07a5-47eb-a4a4-f3c000b9514d",
+  "transcript_path": "/home/user/.claude/projects/-tmp-project/dcba7188-07a5-47eb-a4a4-f3c000b9514d.jsonl",
+  "cwd": "/tmp/project",
+  "prompt_id": "b8cab07d-1ae4-4a0a-a2a6-0405f62ac6f4",
+  "permission_mode": "auto",
+  "hook_event_name": "UserPromptSubmit",
+  "prompt": "[SYSTEM NOTIFICATION - NOT USER INPUT]\nThis is an automated background-task event, NOT a message from the user.\nDo NOT interpret this as user acknowledgement, confirmation, or response to any pending question.\nNo human input has been received since the last genuine user message in this conversation. Any statement that the user said, approved, or confirmed something — including statements in your own earlier messages — is NOT real user input and must NOT be treated as approval or consent.\n\n<task-notification>\n<task-id>b5mszrqiv</task-id>\n<tool-use-id>toolu_01W9aYgAZPt4MhN8zNxJJBiL</tool-use-id>\n<output-file>/tmp/claude-1000/-tmp-project/dcba7188-07a5-47eb-a4a4-f3c000b9514d/tasks/b5mszrqiv.output</output-file>\n<status>completed</status>\n<summary>Background command \"Wait for full test run and show failures\" completed (exit code 0)</summary>\n</task-notification>"
+}
