@@ -415,11 +415,19 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    waits in the mailbox for the next watch. First restart any member
    whose `handoff` and `finished` lines you've already read and that is
    yours to restart, so the herd doesn't wait on the next shepherd.
-2. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd/handoff.md`
+2. Read `loopherd reports --all --since <your last watch wake, or your
+   session start>` and note every `question` or `done` report you haven't
+   acted on, gate requests included, and who is waiting on what. Do this
+   whether or not a watch is armed: a report that arrived while none was
+   never woke you, and the next shepherd's watch may not print it for
+   hours. `reports --all` marks nothing read, so it takes nothing from
+   the next watch.
+3. Write your handoff to `$XDG_STATE_HOME/loopherd/handoffs/shepherd/handoff.md`
    (`~/.local/state` when it's unset; no member may be named `shepherd`), in the outline above: what each
    member is doing and what you owe it (verifications running, PRs to
-   check after merge), then next steps, then gotchas.
-3. Tell the human, with the path spelled out in full:
+   check after merge), with each report from step 2 listed under State,
+   then next steps, then gotchas.
+4. Tell the human, with the path spelled out in full:
    > I'm past my context limit and wrote my handoff.
    > Run `/clear`, then send any message (e.g. `go`), and I resume from it.
    >
