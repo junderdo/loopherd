@@ -128,6 +128,8 @@ pub struct Spawned {
     pub blocked: bool,
     /// Why the mailbox has no `start` entry for it, if it hasn't.
     pub unmarked: Option<String>,
+    /// Why its pasted prompt isn't known to be submitted, if it isn't.
+    pub unsubmitted: Option<String>,
 }
 
 impl Spawned {
@@ -158,6 +160,10 @@ impl Spawned {
             self.session_id.as_deref().unwrap_or("unknown")
         ));
         lines.extend(self.warnings().iter().map(|w| format!("warning: {w}")));
+        if let Some(why) = &self.unsubmitted {
+            lines.push(format!("unsubmitted: {why}"));
+            return (lines.join("\n"), 1);
+        }
         if !self.blocked {
             return (lines.join("\n"), 0);
         }
@@ -255,6 +261,7 @@ pub fn spawn(
                 no_session: None,
                 blocked: true,
                 unmarked,
+                unsubmitted: None,
             });
         }
         Readiness::Ready(agent, no_session) => (agent, no_session),
@@ -267,9 +274,13 @@ pub fn spawn(
     record.prompt_sent = sent.is_ok() && prompt.is_some();
     let unmarked = record_started(ledger, record)?;
     sent?;
-    if prompt.is_some() {
-        ensure_submitted(herdr, &req.name, &tab.pane_id).context("prompt")?;
-    }
+    // The member is recorded and running, so a failed check is reported, not
+    // returned, letting callers finish their bookkeeping for it.
+    let unsubmitted = prompt.as_ref().and_then(|_| {
+        ensure_submitted(herdr, &req.name, &tab.pane_id)
+            .err()
+            .map(|e| format!("{e:#}"))
+    });
     Ok(Spawned {
         tab_id: tab.tab_id,
         pane_id: tab.pane_id,
@@ -278,6 +289,7 @@ pub fn spawn(
         no_session,
         blocked: false,
         unmarked,
+        unsubmitted,
     })
 }
 
@@ -828,17 +840,21 @@ mod tests {
     }
 
     #[test]
-    fn a_prompt_still_unsubmitted_after_three_more_enters_fails_naming_the_member() {
+    fn a_prompt_still_unsubmitted_after_three_more_enters_exits_1_naming_the_member() {
         let herdr = herdr();
         herdr.swallow_enters(4);
         let mut ledger = MemLedger::default();
 
-        let err = run(&herdr, &mut ledger, &request("a")).unwrap_err();
+        let spawned = run(&herdr, &mut ledger, &request("a")).unwrap();
 
         assert_eq!(
-            format!("{err:#}"),
-            "prompt: a's prompt is still unsubmitted in its input box after 3 more Enters: \
-             press Enter in pane w1:p1"
+            spawned.report("a"),
+            (
+                "tab w1:t1\npane w1:p1\nsession session-a\nunsubmitted: a's prompt is still \
+                 unsubmitted in its input box after 3 more Enters: press Enter in pane w1:p1"
+                    .into(),
+                1
+            )
         );
         assert_eq!(herdr.prompts().len(), 1);
         assert_eq!(herdr.submits().len(), 3);
