@@ -8637,6 +8637,47 @@ fn on_a_terminal_init_asks_for_a_grill_batch_template_and_enter_adds_it() {
 }
 
 #[test]
+fn on_a_terminal_an_existing_grill_batch_prompt_is_asked_again() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.herds()).unwrap();
+    fs::write(fixture.herds().join("widgets-grill-batch.md"), "mine\n").unwrap();
+    let typed = [
+        "", "",  // repo, herd name
+        "",  // tracker
+        "",  // owner/name
+        "",  // max
+        "",  // lead
+        "",  // merge_guard
+        "",  // context_limit
+        "",  // gh account
+        "",  // default branch
+        "",  // groom
+        "",  // wayfinding
+        "",  // grill-batch, refused
+        "n", // grill-batch, asked again
+        "",  // confirm
+    ];
+
+    let out = fixture.on_terminal(&["--check", "cargo test"], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains(
+            "widgets-grill-batch.md already exists; init never replaces a grill-batch prompt; \
+             answer n or remove it"
+        ),
+        "{shown}"
+    );
+    assert!(shown.contains("  grill-batch no\r\n"), "{shown}");
+    assert!(herd_toml(&fixture)["template"].get("grill-batch").is_none());
+    assert_eq!(
+        fs::read_to_string(fixture.herds().join("widgets-grill-batch.md")).unwrap(),
+        "mine\n"
+    );
+}
+
+#[test]
 fn on_a_terminal_answering_no_to_grill_batch_writes_none() {
     let fixture = Fixture::new(&["acme"]);
     let typed = [

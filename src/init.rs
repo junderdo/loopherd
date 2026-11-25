@@ -768,16 +768,23 @@ fn settle(
         eprintln!("No grill-batch template: {no_batch_room}.");
     }
     let grill_batch = batch_name_fits
-        && ask.yes(
-            "Add a grill-batch template, so grilling tasks marked for batch mode run unattended?",
-            explain::GRILL_BATCH,
-            with_grill_batch.then_some(true),
-            ask.terminal || recorded.as_ref().is_some_and(|r| r.grill_batch),
-        )?;
-    // `--with` refused it before any question.
-    if grill_batch && mode == Mode::Write && !with_grill_batch {
-        refuse_grill_batch_prompt(&batch_file)?;
-    }
+        && loop {
+            let grill_batch = ask.yes(
+                "Add a grill-batch template, so grilling tasks marked for batch mode run unattended?",
+                explain::GRILL_BATCH,
+                with_grill_batch.then_some(true),
+                ask.terminal || recorded.as_ref().is_some_and(|r| r.grill_batch),
+            )?;
+            // `--with` refused it before any question.
+            if !grill_batch || mode == Mode::Diff || with_grill_batch {
+                break grill_batch;
+            }
+            match refuse_grill_batch_prompt(&batch_file) {
+                Ok(()) => break grill_batch,
+                Err(refusal) if ask.terminal => eprintln!("{refusal}; answer n or remove it"),
+                Err(refusal) => return Err(refusal),
+            }
+        };
     let sections = sections(
         tracker.kind,
         wayfinding,
