@@ -2163,7 +2163,30 @@ pub fn confine_credentials(
         json!(format!("Read(/{}{under})", path.display()))
     }));
     settings["env"] = Value::Object(confined.env);
+    settings["hooks"] = proc_guard()?;
+    // Above the user's and the project's settings, so neither can turn the guard off.
+    settings["disableAllHooks"] = json!(false);
     Ok(())
+}
+
+/// The PreToolUse hook keeping the file tools out of `/proc`, which no `Read`
+/// deny can do without also hiding it from the sandbox. It refuses the call
+/// when loopherd can't run, unlike the hooks install-hook adds.
+fn proc_guard() -> Result<Value> {
+    let exe = crate::broker::runnable_exe()?;
+    let exe = exe
+        .to_str()
+        .with_context(|| format!("{} is not UTF-8", exe.display()))?;
+    let command = format!(
+        "'{}' file-hook || {{ echo 'loopherd file-hook failed, so the call is refused' >&2; \
+         exit 2; }}",
+        exe.replace('\'', r"'\''")
+    );
+    Ok(json!({"PreToolUse": [{
+        "matcher": "Read|Grep",
+        // Without onFailure, a hook that times out lets the call run.
+        "hooks": [{"type": "command", "command": command, "timeout": 10, "onFailure": "block"}],
+    }]}))
 }
 
 /// What in `<state>/broker/` isn't lead `name`'s `requests/`, each named, as
@@ -2230,6 +2253,20 @@ fn switch_settings(settings: &Value, paths: &Paths) -> Value {
     }
     if let Some(deny_read) = settings["sandbox"]["filesystem"]["denyRead"].as_array_mut() {
         deny_read.retain(|path| !path.as_str().is_some_and(copy));
+    }
+    // Which loopherd wrote the hook's command isn't a switch.
+    for group in settings["hooks"]["PreToolUse"]
+        .as_array_mut()
+        .into_iter()
+        .flatten()
+    {
+        for hook in group["hooks"].as_array_mut().into_iter().flatten() {
+            if let Some(command) = hook["command"].as_str()
+                && let Some(at) = command.find("' file-hook ")
+            {
+                hook["command"] = json!(command[at + 2..].to_string());
+            }
+        }
     }
     settings
 }
@@ -2692,6 +2729,56 @@ mod tests {
         assert!(deny_read.contains(&json!("/mnt/zz")), "{deny_read:?}");
         let deny = settings["permissions"]["deny"].as_array().unwrap();
         assert!(deny.contains(&json!("Read(//mnt/zz/**)")), "{deny:?}");
+    }
+
+    #[test]
+    fn a_credentials_leads_file_tools_go_through_the_proc_guard_it_cant_turn_off() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = credentials_lead(root.path());
+
+        let settings = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+
+        let groups = settings["hooks"]["PreToolUse"].as_array().unwrap();
+        assert_eq!(groups.len(), 1, "{groups:?}");
+        assert_eq!(groups[0]["matcher"], "Read|Grep");
+        let command = groups[0]["hooks"][0]["command"].as_str().unwrap();
+        let exe = std::env::current_exe().unwrap();
+        assert!(
+            command.starts_with(&format!("'{}' file-hook || ", exe.display())),
+            "{command}"
+        );
+        assert!(command.ends_with("exit 2; }"), "{command}");
+        assert_eq!(settings["disableAllHooks"], false);
+    }
+
+    #[test]
+    fn the_loopherd_that_wrote_the_proc_guard_isnt_a_switch_change() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = credentials_lead(root.path());
+        let built = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+        let mut elsewhere = built.clone();
+        let hook = &mut elsewhere["hooks"]["PreToolUse"][0]["hooks"][0]["command"];
+        let command = hook.as_str().unwrap().to_string();
+        let (_, run) = command.split_once("' ").unwrap();
+        *hook = json!(format!("'/other/bin/loopherd' {run}"));
+
+        assert_eq!(
+            switch_settings(&built, &paths),
+            switch_settings(&elsewhere, &paths)
+        );
+    }
+
+    #[test]
+    fn a_hook_guarded_leads_settings_carry_no_proc_guard() {
+        let root = tempfile::tempdir().unwrap();
+        let paths = credentials_lead(root.path());
+        let herd = paths.herds.join("h.toml");
+        let text = std::fs::read_to_string(&herd).unwrap();
+        std::fs::write(&herd, text.replace("\"credentials\"", "\"hook\"")).unwrap();
+
+        let settings = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+
+        assert!(settings.get("hooks").is_none(), "{settings}");
     }
 
     #[test]

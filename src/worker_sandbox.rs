@@ -2120,6 +2120,7 @@ mod tests {
         )
         .unwrap();
         let settings = read_json(&settings_file(&h.paths, "w1"));
+        assert_eq!(settings["hooks"]["PreToolUse"][0]["matcher"], "Read|Grep");
         let env = settings["env"].as_object().unwrap();
         let remotes = h.repo.parent().unwrap().join("remotes");
         let bare = remotes.join("acme/widgets.git");
