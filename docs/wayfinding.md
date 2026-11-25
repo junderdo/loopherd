@@ -186,7 +186,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D177](decisions/D177.md) | A lane whose read of the ledger fails just before it carries a request out leaves the request queued for a later round to decide, rather than refusing or running it. |
 | [D178](decisions/D178.md) | Amends D137. The model window table lists each known model explicitly (Mythos 5.x at 1M; Opus and Sonnet 4.6 at 200K) and any other id is unknown; `[context_windows] "<model>" = n` sets one model's window over `context_window`, and the unknown-model note names it. |
 | [D179](decisions/D179.md) | `loopherd init` offers a `grill-batch` template (default yes on a terminal, else `--with grill-batch`) and routes the queue's `grilling` + `grill:batch` tasks to it, ready or not, as type `docs` with the `grilling` skill; a `grilling` task without `grill:batch` waits in the backlog for a live grill. Its prompt posts one batch, marks the task `needs-info` and stops; `done` passes then, so feed reaps it, and `loopherd release` after the human's answer starts a fresh member to write the decision. `herd upgrade` offers it to an existing herd whose `[queue]` is init's own. GitHub and other trackers only; local is deferred to LH-605. Applies D132. |
-| [D180](decisions/D180.md) | A reused detached worktree is moved to origin's default branch after a fetch, keeping untracked files; one with tracked changes or commits not on that branch is refused, untouched (LH-450). |
+| [D182](decisions/D182.md) | A reused detached worktree is moved to origin's default branch after a fetch, keeping untracked files; one with tracked changes or commits not on that branch is refused, untouched (LH-450). |
 
 ## Emerging model
 
