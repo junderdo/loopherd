@@ -1024,12 +1024,13 @@ fn a_pull_that_fails_is_a_failure_saying_the_tree_may_be_changed_not_a_refusal()
     assert_eq!(source.log(), "");
 }
 
-/// A led herd lacking `follow_ups_ready`, and with `merged`, a merged check
-/// not naming its repo: one pending migration, or two.
+/// A led herd, with a grill, lacking `follow_ups_ready`, and with `merged`, a
+/// merged check not naming its repo: one pending migration, or two.
 fn led(merged: &str) -> String {
     format!(
         "[queue]\ntemplate = \"issue\"\nsource = \"list\"\nmax = 2\n\
          [template.issue]\nparams = [\"number\"]\nprompt = \"work {{number}}\"\ndone = \"exit 0\"\n{merged}\
+         [template.grill]\nparams = []\nattended = true\nprompt = \"grill\"\n\
          [lead]\nprompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n"
     )
 }

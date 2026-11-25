@@ -10,6 +10,9 @@ use std::process::{Command, Output};
 
 const LOOPHERD: &str = env!("CARGO_BIN_EXE_loopherd");
 
+/// A grill template, so `herd upgrade` doesn't offer the herd one.
+const GRILL: &str = "[template.grill]\nparams = []\nattended = true\nprompt = \"grill\"\n";
+
 struct Sandbox {
     dir: tempfile::TempDir,
     bin: PathBuf,
@@ -499,7 +502,7 @@ fn a_herd_narrows_the_herd_checks_and_an_unknown_one_exits_2() {
     fs::create_dir_all(&herds).unwrap();
     fs::write(
         herds.join("h.toml"),
-        format!("repo = {:?}\n", repo.to_str().unwrap()),
+        format!("repo = {:?}\n{GRILL}", repo.to_str().unwrap()),
     )
     .unwrap();
     fs::write(herds.join("broken.toml"), "colour = 1\n").unwrap();
@@ -667,7 +670,7 @@ fn herd_pending_one_upgrade(s: &Sandbox, declined: &str) {
         s.dir.path().join("config/herds/h.toml"),
         format!(
             "repo = {repo:?}\n{declined}[template.t]\nparams = [\"n\"]\nprompt = \"go\"\n\
-             [lead]\nprompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n"
+             {GRILL}[lead]\nprompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n"
         ),
     )
     .unwrap();

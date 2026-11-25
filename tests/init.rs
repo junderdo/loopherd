@@ -6680,3 +6680,100 @@ fn an_other_trackers_grill_prompt_marks_each_tracker_command_to_fill_in() {
         ],
     );
 }
+
+impl Fixture {
+    /// `loopherd <args>` on a terminal, typing `input`; None where util-linux
+    /// `script` isn't available.
+    fn loopherd_on_terminal(&self, args: &[&str], input: &str) -> Option<Output> {
+        let util_linux = Command::new("script")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| text(&out.stdout).contains("util-linux"));
+        if !util_linux {
+            eprintln!("skipped: needs util-linux script");
+            return None;
+        }
+        let typed = self.root.path().join("typed");
+        fs::write(&typed, input).unwrap();
+        let mut line = format!("'{}'", env!("CARGO_BIN_EXE_loopherd"));
+        for arg in args {
+            line.push_str(&format!(" '{arg}'"));
+        }
+        Some(
+            self.run(
+                Command::new("script")
+                    .args(["-qec", &line, "/dev/null"])
+                    .env("SHELL", "/bin/sh")
+                    .stdin(fs::File::open(typed).unwrap()),
+            ),
+        )
+    }
+
+    /// Takes the grill template and its prompt back out of an init'ed herd.
+    fn remove_grill(&self) {
+        let herd_file = self.herds().join("widgets.toml");
+        let herd = fs::read_to_string(&herd_file).unwrap();
+        let at = herd.find("# A grill").unwrap();
+        let end = herd[at..].find("\n\n").unwrap() + at + 2;
+        fs::write(&herd_file, format!("{}{}", &herd[..at], &herd[end..])).unwrap();
+        fs::remove_file(self.herds().join("widgets-grill.md")).unwrap();
+        assert!(herd_toml(self)["template"].get("grill").is_none());
+    }
+}
+
+#[test]
+fn herd_upgrade_gives_a_herd_without_a_grill_the_one_init_writes_today() {
+    for (logins, extra, account) in [
+        (&["acme"][..], &[][..], "acme"),
+        (&["acme", "jeff"][..], &["--gh-account", "jeff"][..], "jeff"),
+    ] {
+        let fixture = Fixture::new(logins);
+        assert_ok(&fixture.init(extra));
+        let grill = grill_template(&fixture);
+        let prompt = grill_prompt(&fixture);
+        fixture.remove_grill();
+        fs::write(
+            fixture.herds().join("old.toml"),
+            "repo = \"/r\"\nbogus = 1\n",
+        )
+        .unwrap();
+
+        let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n\n\n\n")
+        else {
+            return;
+        };
+
+        assert_ok(&out);
+        let shown = text(&out.stdout);
+        assert!(shown.contains("grill — Adds [template.grill]"), "{shown}");
+        assert_eq!(grill_template(&fixture), grill, "{shown}");
+        assert!(
+            grill["done"]
+                .as_str()
+                .unwrap()
+                .contains(&format!("--user {account})")),
+            "{grill:?}"
+        );
+        assert_eq!(grill_prompt(&fixture), prompt);
+        fs::remove_file(fixture.herds().join("old.toml")).unwrap();
+        assert_ok(&fixture.loopherd(&["herds"]));
+    }
+}
+
+#[test]
+fn herd_upgrade_without_a_terminal_lists_a_missing_grill_and_writes_nothing() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    assert_ok(&fixture.loopherd(&["herd", "unset", "widgets", "template.grill"]));
+    let before = fixture.config_listing();
+
+    let out = fixture.loopherd(&["herd", "upgrade", "widgets"]);
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("widgets: 1 new feature: grill\n"),
+        "{}",
+        text(&out.stdout)
+    );
+    assert_eq!(fixture.config_listing(), before);
+}
