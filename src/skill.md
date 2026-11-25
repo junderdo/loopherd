@@ -211,7 +211,8 @@ Init never launches an agent.
    with `reports --all`. For a member that left no report, read its screen
    with `loopherd read <name>` (its last 40 lines; `--lines <n>` up to 1000).
 4. **Verify** a finished member's output with a read-only reviewer
-   subagent against the task's acceptance criteria. Ask for it by role:
+   subagent against the task's acceptance criteria (a groomer's `done` is
+   relayed instead, see Triage). Ask for it by role:
    the `reviewer` agent type, else `loopherd-reviewer`, else a
    general-purpose subagent told to stay read-only. A first review uses
    the reviewer as defined; later rounds pass `model: sonnet` to the
@@ -937,6 +938,7 @@ Shepherd section has the detail):
    member that left none, `loopherd read <name>` shows its screen, not raw
    `herdr agent read`.
 4. **Verify** a `done` member's output with a read-only reviewer subagent
+   (a groomer's `done` is relayed instead, see Running low)
    against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
    `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. Tell it every
    wait it runs has a timeout, and it stops every background shell it
