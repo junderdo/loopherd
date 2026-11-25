@@ -1,0 +1,251 @@
+== widgets.toml
+# Herd widgets: one worker per ready GitHub issue in acme/widgets.
+# Written by `loopherd init`; yours to edit. loopherd changes it only on a yes to `loopherd herd upgrade`.
+repo = "<root>/widgets"
+args = ["--permission-mode", "auto"]
+
+[queue]
+template = "issue"
+# Prints "<number> <type> <skill> <slug>" per open issue labelled
+# ready-for-agent and none of blocked, needs-info, ready-for-human, oldest
+# first, matching labels whatever their case.
+# $types maps a label to the branch type (else feat); a skill:<name> label
+# names the skill the worker builds with (else tdd).
+source = '''
+GH_TOKEN=$(gh auth token --user acme) gh issue list --repo acme/widgets --state open --label ready-for-agent --limit 1000 --json number,title,labels --jq '
+  {"bug": "fix", "documentation": "docs"} as $types
+  | sort_by(.number)[]
+  | [.labels[].name | ascii_downcase] as $labels
+  | select(any($labels[]; . == "blocked" or . == "needs-info" or . == "ready-for-human") | not)
+  | ([$labels[] | $types[.] | values][0] // "feat") as $type
+  | ([$labels[] | select(startswith("skill:")) | ltrimstr("skill:") | select(test("^[a-z0-9._:-]+$"))][0] // "tdd") as $skill
+  | ([.title | ascii_downcase | scan("[a-z0-9]+")][:5] | join("-")) as $slug
+  | "\(.number) \($type) \($skill) \(if $slug == "" then "issue" else $slug end)"'
+'''
+# Prints "<number> <title>" per open issue the source leaves out, but for
+# blocked ones, oldest first, matching labels whatever their case. Ones waiting
+# on the human stay, ready-for-agent or not: they are what a dry queue forgets.
+backlog = '''
+GH_TOKEN=$(gh auth token --user acme) gh issue list --repo acme/widgets --state open --limit 1000 --json number,title,labels --jq '
+  sort_by(.number)[]
+  | [.labels[].name | ascii_downcase] as $labels
+  | select(any($labels[]; . == "blocked") | not)
+  | select(any($labels[]; . == "ready-for-agent") | not
+      or any($labels[]; . == "needs-info" or . == "ready-for-human"))
+  | "\(.number) \(.title)"'
+'''
+max = 3
+
+[template.issue]
+params = ["number", "type", "skill", "slug"]
+name = "{herd}-{number}"
+branch = "{type}/{number}-{slug}"
+done = "GH_TOKEN=$(gh auth token --user acme) gh issue view {number} --repo acme/widgets --json state --jq .state | grep -qx CLOSED"
+merged = "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt = '''
+You're {name}, working GitHub issue #{number} of acme/widgets on branch
+{branch} in {worktree}.
+
+Run every gh command as acme, prefixed with
+`GH_TOKEN=$(gh auth token --user acme)` as in the commands below.
+
+1. Read the issue and every comment:
+   `GH_TOKEN=$(gh auth token --user acme) gh issue view {number} --repo acme/widgets --comments`.
+2. Claim it: `GH_TOKEN=$(gh auth token --user acme) gh issue comment {number} --repo acme/widgets --body "claimed by {name}"`,
+   then `GH_TOKEN=$(gh auth token --user acme) gh issue edit {number} --repo acme/widgets --add-assignee acme`.
+3. Build it with the {skill} skill.
+4. Before calling it done, run each check and fix what fails:
+   - `cargo test`
+   - `cargo fmt --check`
+5. Push the branch as acme:
+   `GH_TOKEN=$(gh auth token --user acme) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Open a PR with `GH_TOKEN=$(gh auth token --user acme) gh pr create --repo acme/widgets --base main --head {branch} --assignee acme --title "<title>" --body "<summary>"`,
+   the body ending with the line `Closes #{number}`.
+6. Finish with `loopherd report --kind done "<PR link and one-line summary>"`.
+
+If main moves under you, merge origin/main into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess:
+`GH_TOKEN=$(gh auth token --user acme) gh issue edit {number} --repo acme/widgets --add-label needs-info`, comment the
+question and the options you see on the issue, then
+`loopherd report --kind question "<the exact question>"`.
+'''
+
+# A grill the shepherd starts live with the human: `loopherd add --no-focus
+# widgets grill <number> <slug>`, then `loopherd tell` its background, then
+# focus. Attended, so feed never spawns it: keep it out of [queue].
+[template.grill]
+params = ["number", "slug"]
+attended = true
+name = "{herd}-grill-{number}"
+branch = "docs/{number}-{slug}"
+done = "GH_TOKEN=$(gh auth token --user acme) gh issue view {number} --repo acme/widgets --json state --jq .state | grep -qx CLOSED"
+merged = "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt_file = "widgets-grill.md"
+
+[lead]
+prompt_file = "widgets-lead.md"
+# From [lead_defaults] when init ran. Off means the lead asks the human.
+merge = false
+install = false
+rebase = false
+new_cards = false
+design_escalation = false
+blocked_dialogs = false
+follow_ups_ready = false
+merge_guard = "hook"
+== widgets-lead.md
+You're {name}, the lead of herd {herd}, in {worktree}, a detached checkout of
+acme/widgets you never commit in. No human is in this pane.
+
+Read `loopherd --skill` in full, its Lead section most closely. Tasks are GitHub issues in acme/widgets. A worker opens a PR whose body carries `Closes #<n>`, so its issue closes when the PR merges.
+Run every gh command as acme, prefixed with
+`GH_TOKEN=$(gh auth token --user acme)`. You run the shepherd's loop for {herd}'s workers: feed, watch, verify
+each worker's PR with a reviewer subagent, send only blocking findings back
+to the member, and the after-merge steps.
+
+Your switches (off means the human does it; ask with a question report):
+{switches}
+
+Your review-round limit: {review_rounds}.
+
+Grilling is always the human's.
+
+Start now:
+1. `loopherd status` and `loopherd reports --all`, to see where the herd is.
+2. `loopherd feed {herd} --dry-run`, then `loopherd feed {herd}` if it reads right.
+3. Arm `loopherd watch {herd} --timeout 3600` as a background task, and
+   re-arm after every exit but `{herd} drained`: on that, report done and
+   stop. On `<member> merged`, run `loopherd feed {herd}`,
+   which retires it once its issue is closed. On `<name> claimable`, feed.
+   Exit 2 is your heartbeat: check each worker's PR for a merge and run
+   `loopherd feed {herd} --dry-run`.
+
+When you need the human, run `loopherd report --kind question "<the exact
+question>"` and end your turn. With merge off, a merge question carries the PR
+link, any PR that must merge first, and the line
+`! GH_TOKEN=$(gh auth token --user acme) gh pr merge <n> --repo acme/widgets --merge --match-head-commit <full sha>`
+for the head your reviewer verified. Single-quote that question ('...', not
+"..."): double quotes run the $(...) and leak the token.
+== AGENTS.md
+# Agent instructions
+
+## loopherd
+
+A loopherd herd works this repo's ready issues, one worker per issue on its
+own branch. A worker reads `docs/agents/loopherd.md` for how to claim, build,
+check, hand in and report an issue, and `docs/agents/issue-tracker.md` for
+the tracker.
+== docs/agents/issue-tracker.md
+# Issue tracker: GitHub
+
+Issues and specs for this repo live in its GitHub Issues. Use the `gh` CLI for every
+operation.
+
+## Conventions
+
+- **Create an issue**: `gh issue create --title "..." --body "..."`, with a heredoc for a multi-line body.
+- **Read an issue**: `gh issue view <number> --json number,title,body,labels,comments`.
+- **List issues**: `gh issue list --state open --json number,title,body,labels,comments --jq '[.[] | {number, title, body, labels: [.labels[].name], comments: [.comments[].body]}]'`, narrowed with `--label` and `--state`.
+- **Make an issue a sub-issue of a parent**: create it with `gh issue create --parent <parent> ...`, or attach it later with `gh issue edit <parent> --add-sub-issue <child>` (needs `gh` 2.94 or newer). With an older `gh`, call `gh api --method POST repos/<owner>/<repo>/issues/<parent>/sub_issues -F sub_issue_id=<child-db-id>`, passing the child's database id as described under **Blocking**. A repo without sub-issues marks the child with a `Part of #<parent>` first line in its body.
+- **Comment on an issue**: `gh issue comment <number> --body "..."`.
+- **Apply / remove labels**: `gh issue edit <number> --add-label "..."` / `--remove-label "..."`.
+- **Close**: `gh issue close <number> --comment "..."`.
+
+Inside a clone, `gh` finds the repo from `git remote -v` on its own.
+
+## Pull requests as a triage surface
+
+**PRs as a request surface: no.** _(Change to `yes` if external PRs count as feature requests here; `/triage` reads this flag.)_
+
+With the flag at `yes`, PRs take the same labels and states as issues, through `gh pr`:
+
+- **Read a PR**: `gh pr view <number> --comments`, plus `gh pr diff <number>` for the change itself.
+- **List external PRs for triage**: `gh api --paginate 'repos/{owner}/{repo}/pulls?state=open' --jq '.[] | select(.author_association | IN("OWNER","MEMBER","COLLABORATOR") | not) | {number, title, author: .user.login, author_association, labels: [.labels[].name]}'`.
+- **Comment / label / close**: `gh pr comment`, `gh pr edit --add-label` / `--remove-label`, `gh pr close`.
+
+Issues and PRs draw from one sequence of numbers, so `#42` alone could be either: try `gh pr view 42` first, then `gh issue view 42`.
+
+## When a skill says "publish to the issue tracker"
+
+Create a GitHub issue.
+
+## When a skill says "fetch the relevant ticket"
+
+Read it as in **Read an issue** above.
+
+## Wayfinding operations
+
+`/wayfinder` works through these. Its **map** is one issue, and each ticket is a **child** issue of it.
+
+- **Map**: one issue labelled `wayfinder:map`, whose body holds the Notes, Decisions-so-far and Fog sections. Create it with `gh issue create --label wayfinder:map`.
+- **Child ticket**: an issue attached to the map as a sub-issue (see **Make an issue a sub-issue of a parent**). In a repo without sub-issues, list the child in a task list in the map's body and start the child's body with `Part of #<map>`. Label it `wayfinder:<type>`, one of `research`, `prototype`, `grilling` or `task`. A claimed ticket is assigned to the developer driving it.
+- **Blocking**: use GitHub's native issue dependencies, which the UI shows. Record that `<blocker>` blocks `<child>` with `gh api --method POST repos/<owner>/<repo>/issues/<child>/dependencies/blocked_by -F issue_id=<blocker-db-id>`. The id is the blocker's numeric database id from `gh api repos/<owner>/<repo>/issues/<n> --jq .id`; neither the `#number` nor the `node_id` works. `issue_dependencies_summary.blocked_by` counts only blockers still open, so it is the live gate. Without dependencies, start the child's body with `Blocked by: #<n>, #<n>`. A ticket unblocks once all its blockers are closed.
+- **Frontier query**: take the map's open children (`gh issue list --state open`, limited to the map's sub-issues or task list), drop any that has an assignee or an open blocker (`issue_dependencies_summary.blocked_by > 0`, or an open issue on its `Blocked by` line), and pick the first left in map order.
+- **Claim**: `gh issue edit <n> --add-assignee @me`, before any other write in the session.
+- **Resolve**: comment the answer with `gh issue comment <n> --body "<answer>"`, close it with `gh issue close <n>`, then add a pointer (a one-line gist and a link) to the map's Decisions-so-far.
+== docs/agents/triage-labels.md
+# Triage Labels
+
+The skills speak in five canonical triage roles. This file maps each role to
+the label string this repo's issue tracker uses.
+
+| Label in mattpocock/skills | Label in our tracker | Meaning |
+| --- | --- | --- |
+| `needs-triage` | `needs-triage` | Maintainer needs to evaluate this issue |
+| `needs-info` | `needs-info` | Waiting on reporter for more information |
+| `ready-for-agent` | `ready-for-agent` | Fully specified, ready for an AFK agent |
+| `ready-for-human` | `ready-for-human` | Requires human implementation |
+| `wontfix` | `wontfix` | Will not be actioned |
+
+When a skill mentions a role, use the corresponding label string from this
+table. Edit the "Label in our tracker" column to match the labels you use.
+== docs/agents/loopherd.md
+# Working an issue in a loopherd herd
+
+loopherd starts one worker per ready issue, each in its own worktree on its
+own branch. The worker's prompt names the issue, the branch and the exact
+commands; this doc says what each step is for. How the tracker works is in
+`docs/agents/issue-tracker.md`.
+
+## Claiming
+
+Read the issue and every comment first. Then comment `claimed by <member>`
+on it, with your member name, and assign it to acme, the account every
+gh command runs as. An issue someone else has claimed isn't yours.
+
+## Branch names
+
+`<type>/<number>-<slug>`: the type comes from the issue's labels through the
+herd file's type map (by default `fix` for `bug`, `docs` for
+`documentation`, else `feat`); the slug comes from the title.
+loopherd creates the branch and its worktree; work only there. If main
+moves under you, merge `origin/main` into your branch; never rebase or
+force-push.
+
+## Checks
+
+Before calling the work done, run each check and fix what fails:
+
+- `cargo test`
+- `cargo fmt --check`
+
+## The pull request
+
+Push the branch and open a PR with `--base main`. End its body with the
+line `Closes #<number>`, so merging the PR closes the issue; loopherd counts
+the issue done once it is closed.
+
+## Stopping on a question
+
+When only the human can answer, stop rather than guess: add the
+`needs-info` label to the issue, comment the question and the options you
+see, then report it.
+
+## Reporting
+
+Tell the shepherd how the work ended:
+
+- Done: `loopherd report --kind done "<PR link and one-line summary>"`.
+- Stopped on a question: `loopherd report --kind question "<the exact question>"`.

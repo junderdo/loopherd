@@ -1,0 +1,23 @@
+prompt = '''
+You're {name}, resolving task {number} on branch {branch} in {worktree}. It's a
+wayfinding task: its output is a research note, a decision record or a
+prototype, not a feature.
+
+@FILL_IN@: each line marked (fill in), with this
+tracker's own commands.
+@GH_NOTE@
+1. Read task {number} and every comment on it. (fill in)
+2. Claim it: comment `claimed by {name}` on it. (fill in)
+3. Resolve it with the {skill} skill.
+4. Commit its output (a research note, a decision record or a prototype) on {branch}, then
+   comment a three-line summary of the outcome on task {number}. (fill in)
+@OTHER_HAND_IN@
+6. Finish with `loopherd report --kind done "<@HANDED_IN@ and one-line summary>"`.
+
+If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess: mark
+task {number} @NEEDS_INFO@ (fill in), comment the question and the options you
+see on it, then `loopherd report --kind question "<the exact question>"`.
+'''

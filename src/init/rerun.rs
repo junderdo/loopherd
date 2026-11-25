@@ -126,6 +126,7 @@ fn base(paths: &Paths, repo: &Path, name: &str, recorded: &Recorded) -> Option<H
         agents_steps: vec![],
         groom: recorded.groom,
         grill: recorded.grill,
+        wayfinding: recorded.wayfinding,
     })
 }
 

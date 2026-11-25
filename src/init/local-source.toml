@@ -1,4 +1,4 @@
-# Prints "<id> <type> <skill> <slug> <path>" per issue file on @REF@ under
+# Prints "@SOURCE_PRINTS@" per issue file on @REF@ under
 # .scratch/<feature>/issues/<NN>-<slug>.md whose Status: line has
 # @READY_FOR_AGENT@ and none of blocked, @NEEDS_INFO@, @READY_FOR_HUMAN@,
 # resolved, closed or done, and whose Blocked by: line names only resolved
@@ -7,7 +7,7 @@
 # lowercase letters, digits and - or doesn't fit the member name is cut and
 # takes a 3-character hash, as <cut>_<hash>-<NN>, rehashed when another
 # feature holds it. The Status: words act as labels: types maps one to the branch
-# type (else feat), and skill:<name> names the worker's skill (else tdd).
+# type (else feat), and skill:<name> names the worker's skill (else tdd).@ROUTING_NOTE@
 source = '''
 @LOCAL_READY@'''
 # Prints "<path> <title>" per open issue file the source leaves out, but for

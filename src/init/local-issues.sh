@@ -158,6 +158,6 @@ done | awk -v room=@ID_ROOM@ -v list=@LIST@ '
         continue
       }
       id = id "-" num[f]
-      print id, type, skill, slug, f
+@LOCAL_PRINT@
     }
   }'

@@ -86,6 +86,7 @@ pub struct Herd<'a> {
     pub checks: &'a [String],
     pub needs_info: &'a str,
     pub tracker: Kind,
+    pub wayfinding: bool,
 }
 
 /// What init writes into the repo, and the steps left to the human where
@@ -197,7 +198,7 @@ fn loopherd_doc(herd: &Herd) -> Doc {
             "branch",
         ),
     };
-    let text = super::fill(
+    let mut text = super::fill(
         template,
         &[
             ("ACCOUNT", herd.account.unwrap_or_default()),
@@ -210,6 +211,9 @@ fn loopherd_doc(herd: &Herd) -> Doc {
             ("FILL_IN", super::FILL_IN),
         ],
     );
+    if herd.wayfinding {
+        text.push_str(super::wayfinding_section(herd.tracker));
+    }
     Doc::new(LOOPHERD_DOC, text)
 }
 
