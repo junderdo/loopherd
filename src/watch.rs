@@ -1739,6 +1739,8 @@ fn stop_wakes(mailbox: &Mailbox) -> Vec<String> {
                 None
             }
             Body::Note { .. }
+            | Body::Gate { .. }
+            | Body::Answered {}
             | Body::Blocked {}
             | Body::Gone { .. }
             | Body::Moved {}
@@ -2941,6 +2943,31 @@ mod tests {
             run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {})).unwrap(),
             ["lead-cards question 2026-11-01 09:00 UTC Merge #1?"]
         );
+    }
+
+    #[test]
+    fn a_leads_gate_request_prints_once_and_sends_no_notification() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = quiet_led_world();
+        send(
+            &ledger,
+            dir.path(),
+            "lead-cards",
+            Kind::Gate,
+            "Gate request: #424 at abc123",
+        );
+        let notifier = Notifier::new(dir.path());
+
+        notifier.lead(&herdr, &ledger, &mut steps(|_| {}));
+        let printed = notifier.shepherd(&herdr, &ledger, &mut steps(|_| {}));
+        let again = run(&herdr, &ledger, dir.path(), &ONCE, &mut steps(|_| {}));
+
+        assert_eq!(
+            printed,
+            ["lead-cards gate 2026-11-01 09:00 UTC Gate request: #424 at abc123"]
+        );
+        assert_eq!(again.unwrap_or_default(), Vec::<String>::new());
+        assert!(notifier.sent().is_empty());
     }
 
     #[test]

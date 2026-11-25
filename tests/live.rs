@@ -508,6 +508,17 @@ fn sandbox_can_start(state: &Path, config: &Path, herd: &str) -> bool {
 /// Doctor's failing `sandbox settings` findings for `herd`'s lead, joined, or
 /// `None` when nothing in the human's settings would refuse it.
 fn sandbox_settings_refusal(state: &Path, config: &Path, herd: &str) -> Option<String> {
+    doctor_findings(state, config, herd, "sandbox settings", "failure")
+}
+
+/// The details doctor gives with `status` on its `herd {herd} {what}` check, joined.
+fn doctor_findings(
+    state: &Path,
+    config: &Path,
+    herd: &str,
+    what: &str,
+    status: &str,
+) -> Option<String> {
     let doctor = dev(env!("CARGO_BIN_EXE_loopherd"))
         .args(["doctor", "--json", herd])
         .env("XDG_STATE_HOME", state)
@@ -516,12 +527,12 @@ fn sandbox_settings_refusal(state: &Path, config: &Path, herd: &str) -> Option<S
         .unwrap();
     let report: Value = serde_json::from_slice(&doctor.stdout)
         .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&doctor.stderr)));
-    let check = format!("herd {herd} sandbox settings");
+    let check = format!("herd {herd} {what}");
     let findings: Vec<String> = report["checks"]
         .as_array()
         .unwrap()
         .iter()
-        .filter(|c| c["name"] == check.as_str() && c["status"] == "failure")
+        .filter(|c| c["name"] == check.as_str() && c["status"] == status)
         .map(|c| c["detail"].as_str().unwrap_or_default().to_string())
         .collect();
     (!findings.is_empty()).then(|| findings.join("; "))
@@ -895,6 +906,11 @@ fn a_sandboxed_lead_writes_only_its_own_worktree_and_state() {
     )
     .unwrap();
     let before = std::fs::read_to_string(&herd_file).unwrap();
+    if let Some(exposed) = doctor_findings(state.path(), &config, &herd, "sandbox repo", "warning")
+    {
+        eprintln!("skipped: this checkout can't hold a sandboxed lead to its worktree: {exposed}");
+        return;
+    }
     let _cleanup = CloseTab(name.clone());
     // The human's own hooks write the real state dir, so the probe's restart --self would wait
     // forever on a stop. `lead` reuses a worktree that exists, so these hooks come with it.
@@ -1721,6 +1737,12 @@ fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_
         ),
     )
     .unwrap();
+    // A credentials herd's lead refuses an exposed worktree under either mode.
+    if let Some(exposed) = doctor_findings(state.path(), &config, &herd, "sandbox repo", "failure")
+    {
+        eprintln!("skipped: this checkout can't hold a sandboxed lead to its worktree: {exposed}");
+        return;
+    }
     let _cleanup = CloseTab(name.clone());
 
     // A credentials lead takes no --allowedTools, so auto mode lets the sandboxed probe run.

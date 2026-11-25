@@ -46,7 +46,9 @@ branch: your broker runs the herd's full check gate on that head merged
 with its base (main by default), outside your sandbox; run it as a background task, as it
 takes minutes. Merge, or ask, only on its `pass`
 line, and put that line in a merge question; on `failed`, send the failing
-command and its tail back to the member.
+command and its tail back to the member. When the shepherd runs your gates
+instead, ask with `loopherd report --kind gate "Gate request: #<n> <branch> at
+<full sha>"`, not a note, and end your turn; it waits like a question.
 
 When you need the human, run `loopherd report --kind question "<the exact
 question>"` and end your turn. With merge off, a merge question carries the PR
