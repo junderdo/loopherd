@@ -17,7 +17,7 @@ finish. Above the leads is the **shepherd**, the one agent you talk to. It
 starts the leads and brings you only the questions and decisions you've kept
 for yourself. The herds run themselves in between.
 
-![loopherd view of a herd running all 10 slots: the lead and five members working, three done and two idle, with the selected member's detail panel](docs/images/loopherd-view.png)
+![loopherd view of a herd with all 5 slots full: the lead and three members done, two members working, the selected member's detail panel with its PR report, the latest events, and the key row](docs/images/loopherd-view.png)
 
 - **Templates**: declare once how to spawn a member (repo, worktree, prompt),
   then `loopherd add <herd> <template> <params…>`.
