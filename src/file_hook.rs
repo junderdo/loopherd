@@ -2,6 +2,7 @@
 //! Grep. Refuses any path that resolves into `/proc`, where every process's
 //! `environ` keeps the GitHub tokens its settings' `env` blanks.
 
+use std::ffi::OsString;
 use std::path::{Component, Path, PathBuf};
 
 use serde_json::Value;
@@ -32,18 +33,20 @@ pub fn refusal(input: &[u8], home: Option<&Path>) -> Option<String> {
     };
     let cwd = Path::new(input["cwd"].as_str().unwrap_or("/"));
     let absolute = cwd.join(expanded);
-    // Read may take `..` as text or follow a symlink first, so both spellings count.
-    [lexical(&absolute), resolved(&absolute)]
+    let refuse = |why: String| {
+        Some(format!(
+            "{tool} of {given} {why}: a credentials member's file tools can't read /proc, \
+             where processes' environments keep GitHub tokens"
+        ))
+    };
+    let Some(spellings) = spellings(&absolute) else {
+        return refuse("goes through a symlink the hook can't follow".into());
+    };
+    spellings
         .into_iter()
         // Grep from `/` would search `/proc` too.
         .find(|path| path.starts_with("/proc") || path == Path::new("/"))
-        .map(|path| {
-            format!(
-                "{tool} of {given} resolves to {}: a credentials member's file tools can't \
-                 read /proc, where processes' environments keep GitHub tokens",
-                path.display()
-            )
-        })
+        .and_then(|path| refuse(format!("resolves to {}", path.display())))
 }
 
 /// `path` with `.` and `..` taken out as text, without reading the filesystem.
@@ -61,24 +64,52 @@ fn lexical(path: &Path) -> PathBuf {
     out
 }
 
-/// `path` with symlinks followed and `..` taken out, through its longest
-/// existing prefix and lexically past it.
-fn resolved(path: &Path) -> PathBuf {
-    if let Ok(real) = path.canonicalize() {
-        return real;
-    }
-    let (Some(parent), Some(last)) = (path.parent(), path.components().next_back()) else {
-        return path.to_path_buf();
-    };
-    let mut base = resolved(parent);
-    match last {
-        Component::ParentDir => {
-            base.pop();
+/// Every way `path` can be read: as text, with each symlink's target taken
+/// as text, and with every symlink followed. A target counts as written
+/// because `/proc/self` in it names the reader, not this hook. `None` when a
+/// link can't be read or the links loop.
+fn spellings(path: &Path) -> Option<Vec<PathBuf>> {
+    const MAX_LINKS: usize = 40;
+    let mut found = vec![lexical(path)];
+    // The components still to walk, the next one last.
+    let mut rest: Vec<OsString> = names(path);
+    let mut at = PathBuf::from("/");
+    let mut links = 0;
+    while let Some(name) = rest.pop() {
+        if name == ".." {
+            at.pop();
+            continue;
         }
-        Component::Normal(name) => base.push(name),
-        _ => {}
+        let next = at.join(&name);
+        if !std::fs::symlink_metadata(&next).is_ok_and(|meta| meta.file_type().is_symlink()) {
+            at = next;
+            continue;
+        }
+        links += 1;
+        if links > MAX_LINKS {
+            return None;
+        }
+        let target = at.join(std::fs::read_link(&next).ok()?);
+        let mut whole = target.clone();
+        whole.extend(rest.iter().rev());
+        found.extend([lexical(&target), lexical(&whole)]);
+        rest = names(&whole);
+        at = PathBuf::from("/");
     }
-    base
+    found.push(at);
+    Some(found)
+}
+
+/// The names in absolute `path`, `..` kept and `.` dropped, the first last.
+fn names(path: &Path) -> Vec<OsString> {
+    path.components()
+        .rev()
+        .filter_map(|component| match component {
+            Component::Normal(name) => Some(name.to_os_string()),
+            Component::ParentDir => Some("..".into()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -152,6 +183,40 @@ mod tests {
         let reason = refusal_in(&read(&format!("l/{climb}proc/self/environ"), cwd.path()));
 
         assert!(reason.is_some());
+    }
+
+    #[test]
+    fn a_link_into_proc_that_doesnt_resolve_in_the_hook_is_refused() {
+        let cwd = tempfile::tempdir().unwrap();
+        // In the reading Claude, /proc/self is Claude, whose thread this names.
+        std::os::unix::fs::symlink("/proc/self/task/999999999/environ", cwd.path().join("x"))
+            .unwrap();
+        let hop = cwd.path().join("hop");
+        std::os::unix::fs::symlink("x", &hop).unwrap();
+
+        assert!(refusal_in(&read("x", cwd.path())).is_some());
+        assert!(refusal_in(&read(hop.to_str().unwrap(), cwd.path())).is_some());
+    }
+
+    #[test]
+    fn a_link_loop_is_refused() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink("b", cwd.path().join("a")).unwrap();
+        std::os::unix::fs::symlink("a", cwd.path().join("b")).unwrap();
+
+        assert!(refusal_in(&read("a", cwd.path())).is_some());
+    }
+
+    #[test]
+    fn a_link_within_the_worktree_runs() {
+        let cwd = tempfile::tempdir().unwrap();
+        std::fs::create_dir(cwd.path().join("docs")).unwrap();
+        std::fs::write(cwd.path().join("docs/a.md"), "hi").unwrap();
+        std::os::unix::fs::symlink("docs/a.md", cwd.path().join("a")).unwrap();
+        std::os::unix::fs::symlink("missing", cwd.path().join("dangling")).unwrap();
+
+        assert_eq!(refusal_in(&read("a", cwd.path())), None);
+        assert_eq!(refusal_in(&read("dangling", cwd.path())), None);
     }
 
     #[test]
