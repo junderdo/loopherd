@@ -60,23 +60,54 @@ const GITHUB_ROUTING_NOTE: &str = "
 const GITHUB_ROUTE: &str = r#"  | ([$labels[] | {"wayfinding:research": "research", "wayfinding:domain": "domain-modeling", "wayfinding:prototype": "prototype"}[.] | values][0]) as $wayfinding
 "#;
 const GITHUB_TASK_HEAD: &str = r"\(.number) \($type) \($skill)";
-const GITHUB_ROUTED_TASK_HEAD: &str = r#"\(if $wayfinding then "wayfinding \(.number) docs \($wayfinding)" else "issue \(.number) \($type) \($skill)" end)"#;
+const GITHUB_ROUTED_TASK: &str = r#""issue \(.number) \($type) \($skill)""#;
+const GITHUB_WAYFINDING_TASK: &str = r#""wayfinding \(.number) docs \($wayfinding)""#;
+const GITHUB_GRILL_BATCH_TASK: &str = r#""grill-batch \(.number) docs grilling""#;
+const GITHUB_READY: &str = r#"any($labels[]; . == "@READY_FOR_AGENT_LC@")"#;
+/// A grilling issue is claimable only with grill:batch, ready label or not.
+const GITHUB_GRILL_BATCH_CLAIMABLE: &str = r#"(if any($labels[]; . == "grilling") then any($labels[]; . == "grill:batch") else any($labels[]; . == "@READY_FOR_AGENT_LC@") end)"#;
+const GITHUB_GRILLING: &str = r#"  | select(@GITHUB_CLAIMABLE@)
+  | any($labels[]; . == "grilling") as $grilling
+"#;
+const GITHUB_GRILL_BATCH_NOTE: &str = "
+# An issue labelled grilling and grill:batch goes to the grill-batch template,
+# ready or not, as type docs with the grilling skill; a grilling issue without
+# grill:batch waits for a live grill, so it isn't listed.";
+const LOCAL_GRILL_BATCH_NOTE: &str = "
+# A Status: line with grilling and grill:batch sends the issue to the
+# grill-batch template, ready or not, as type docs with the grilling skill; a
+# grilling issue without grill:batch waits for a live grill, so it isn't listed.";
+const OTHER_GRILL_BATCH_NOTE: &str = "
+# grill-batch, as type docs with the grilling skill, for a task marked grilling
+# and grill:batch, ready or not (a grilling task without grill:batch waits for
+# a live grill, so leave it out)";
+const ANY_OTHER_ISSUE: &str = "\n# Any other issue goes to issue.";
+const BACKLOG_GRILLING_NOTE: &str =
+    "\n# A grilling issue without grill:batch stays too: it waits for a live grill.";
+const LOCAL_READY: &str = r#"has(f, "@READY_FOR_AGENT_LC@")"#;
+const LOCAL_GRILL_BATCH_CLAIMABLE: &str = r#"(has(f, "grilling") ? has(f, "grill:batch") : has(f, "@READY_FOR_AGENT_LC@"))"#;
 const LOCAL_ROUTING_NOTE: &str = "
 # A wayfinding:research, wayfinding:domain or wayfinding:prototype word routes
 # the issue to the wayfinding template, as type docs with the research,
 # domain-modeling or prototype skill; any other issue goes to issue.";
 const LOCAL_PRINT: &str = "      print id, type, skill, slug, f";
-const LOCAL_ROUTED_PRINT: &str = r#"      template = "issue"
-      if (has(f, "wayfinding:research")) { template = "wayfinding"; type = "docs"; skill = "research" }
-      else if (has(f, "wayfinding:domain")) { template = "wayfinding"; type = "docs"; skill = "domain-modeling" }
-      else if (has(f, "wayfinding:prototype")) { template = "wayfinding"; type = "docs"; skill = "prototype" }
-      # A wayfinding member name is "-research" longer, so its id is cut to fit 9 less.
-      if (template == "wayfinding") {
-        room -= 9
+const LOCAL_ROUTE_START: &str = r#"      template = "issue"; word = ""
+      if (0) {}
+"#;
+const LOCAL_GRILL_BATCH_ROUTE: &str = r#"      else if (has(f, "grilling")) { template = "grill-batch"; type = "docs"; skill = "grilling"; word = "grill-batch" }
+"#;
+const LOCAL_WAYFINDING_ROUTE: &str = r#"      else if (has(f, "wayfinding:research")) { template = "wayfinding"; type = "docs"; skill = "research"; word = "research" }
+      else if (has(f, "wayfinding:domain")) { template = "wayfinding"; type = "docs"; skill = "domain-modeling"; word = "research" }
+      else if (has(f, "wayfinding:prototype")) { template = "wayfinding"; type = "docs"; skill = "prototype"; word = "research" }
+"#;
+const LOCAL_ROUTE_END: &str = r#"      # A routed member's name is "-<word>" longer, so its id is cut to fit that much less.
+      if (word != "") {
+        longer = length(word) + 1
+        room -= longer
         id = id_of(f)
-        room += 9
-        if (length(id) + 1 + length(num[f]) > room - 9) {
-          print "skipped " f ": the herd name leaves no room for its research name" > "/dev/stderr"
+        room += longer
+        if (length(id) + 1 + length(num[f]) > room - longer) {
+          print "skipped " f ": the herd name leaves no room for its " word " name" > "/dev/stderr"
           continue
         }
         id = id "-" num[f]
@@ -91,6 +122,31 @@ const LOCAL_DONE: &str = include_str!("init/local-done.toml");
 const OTHER_DONE: &str = include_str!("init/other-done.toml");
 const GRILL: &str = include_str!("init/grill.toml");
 const GRILL_PROMPT: &str = include_str!("init/grill.md");
+const GRILL_BATCH: &str = include_str!("init/grill-batch.toml");
+const GRILL_BATCH_PROMPT: &str = include_str!("init/grill-batch.md");
+const GITHUB_BATCH_DONE: &str = include_str!("init/github-batch-done.toml");
+const LOCAL_BATCH_DONE: &str = include_str!("init/local-batch-done.toml");
+const OTHER_BATCH_DONE: &str = include_str!("init/other-batch-done.toml");
+const GITHUB_BATCH_POST: &str =
+    "`@GH_TOKEN@ gh issue comment {number} --repo @OWNER_REPO@ --body-file <file>`.";
+const GITHUB_BATCH_WAIT: &str =
+    "`@GH_TOKEN@ gh issue edit {number} --repo @OWNER_REPO@ --add-label @NEEDS_INFO@`.";
+const LOCAL_BATCH_POST: &str = "the issue lives on @BRANCH@, so commit it there,
+   leaving {branch} untouched: `git fetch -q origin @BRANCH@ && git switch --detach origin/@BRANCH@`,
+   append the batch under {path}'s `## Comments` (adding the heading if it's
+   missing), commit only {path}, and `git push origin HEAD:@BRANCH@`; if the
+   push is refused, fetch and redo it.";
+const LOCAL_BATCH_WAIT: &str = "on @BRANCH@ the same way, add `@NEEDS_INFO@` to its
+   `Status:` line, commit only {path} and push.";
+const LOCAL_BATCH_POST_EXCEPT: &str = ", but for posting the batch itself on @BRANCH@";
+const OTHER_BATCH_POST: &str = "comment it on task {number}. (fill in)";
+const OTHER_BATCH_WAIT: &str = "mark task {number} @NEEDS_INFO@. (fill in)";
+const LEAD_GRILLING: &str = "Grilling is always the human's.";
+const LEAD_GRILL_BATCH: &str = "Grilling is the human's, but for a batch grill: a grilling task marked
+grill:batch goes to a grill-batch member, which posts its batch, marks the
+task @NEEDS_INFO@ and stops, so feed reaps it. Once the human answers there,
+the shepherd drops @NEEDS_INFO@ and runs `loopherd release <member>`; your next
+feed starts a fresh member, which writes the decision.";
 
 const GRILL_PUSH: &str = "push the branch as @ACCOUNT@:
   `@GH_TOKEN@ git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
@@ -220,6 +276,7 @@ pub struct Request<'a> {
 pub enum Template {
     Groom,
     Wayfinding,
+    GrillBatch,
 }
 
 struct GitHub {
@@ -253,6 +310,8 @@ struct Herd {
     groom: bool,
     /// Routes the queue's wayfinding tasks to their own template.
     wayfinding: bool,
+    /// Routes the queue's batch grills to their own template.
+    grill_batch: bool,
 }
 
 /// Writes the herd file, its lead and grill prompts and creates missing labels,
@@ -371,6 +430,10 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     )?;
     if !ask.terminal && mode == Mode::Write {
         refuse_second_herd(paths, &repo)?;
+    }
+    let batch_file = grill_batch_file(paths, &name);
+    if mode == Mode::Write && req.with.contains(&Template::GrillBatch) {
+        refuse_grill_batch_prompt(&batch_file)?;
     }
     let herd_file = paths.herds.join(format!("{name}.toml"));
     let recorded = match mode {
@@ -705,13 +768,42 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             with_wayfinding.then_some(true),
             ask.terminal || recorded.as_ref().is_some_and(|r| r.wayfinding),
         )?;
-    let tracker_kind = tracker.kind;
+    let batch_name_fits =
+        tracker.kind == tracker::Kind::Local || name.len() + "-grill-batch-".len() + 6 <= 32;
+    let no_batch_room = format!(
+        "the herd name {name} leaves no room for grill-batch members' names, \
+         {name}-grill-batch-<number>, in 32 characters; a herd with grill-batch takes a name \
+         of at most 13"
+    );
+    let with_grill_batch = req.with.contains(&Template::GrillBatch);
+    if with_grill_batch && !batch_name_fits {
+        bail!("{no_batch_room}");
+    }
+    if ask.terminal && !batch_name_fits {
+        eprintln!("No grill-batch template: {no_batch_room}.");
+    }
+    let grill_batch = batch_name_fits
+        && ask.yes(
+            "Add a grill-batch template, so grilling tasks marked for batch mode run unattended?",
+            explain::GRILL_BATCH,
+            with_grill_batch.then_some(true),
+            ask.terminal || recorded.as_ref().is_some_and(|r| r.grill_batch),
+        )?;
+    if grill_batch && mode == Mode::Write {
+        refuse_grill_batch_prompt(&batch_file)?;
+    }
+    let sections = sections(
+        tracker.kind,
+        wayfinding,
+        grill_batch,
+        &tracker.labels.needs_info,
+    );
     let tracker_docs = tracker
         .writes
         .drain(..)
         .map(|(path, mut text)| {
-            if wayfinding && path == tracker::TRACKER_DOC {
-                text.push_str(wayfinding_section(tracker_kind));
+            if path == tracker::TRACKER_DOC {
+                text.push_str(&sections);
             }
             agents::Doc::new(path, text)
         })
@@ -722,7 +814,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         checks: &checks,
         needs_info: &tracker.labels.needs_info,
         tracker: tracker.kind,
-        wayfinding,
+        sections: &sections,
     };
     let plan = agents::missing(&repo, &agents_herd, tracker_docs)?;
     let mut docs = plan.docs;
@@ -736,11 +828,12 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
                 [herd_file]
                     .into_iter()
                     .chain(lead.then(|| lead_file.clone()))
+                    .chain(grill_batch.then(|| batch_file.clone()))
                     .chain(new_docs.map(|doc| repo.join(doc.path))),
             )?;
         }
         Mode::Diff => {
-            docs.extend(tracker::built_in(&repo, wayfinding)?);
+            docs.extend(tracker::built_in(&repo, &sections)?);
             docs.extend(agents::present(&repo, &agents_herd)?);
         }
     }
@@ -761,7 +854,18 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         agents_steps: plan.steps,
         groom,
         wayfinding,
+        grill_batch,
     })
+}
+
+fn refuse_grill_batch_prompt(file: &Path) -> Result<()> {
+    if fs::symlink_metadata(file).is_ok() {
+        bail!(
+            "{} already exists; init never replaces a grill-batch prompt",
+            file.display()
+        );
+    }
+    Ok(())
 }
 
 /// Asks, on a terminal, how a lead with merge off is kept from merging.
@@ -909,7 +1013,7 @@ fn summary(herd: &Herd) -> String {
     if let Some(github) = &herd.github
         && herd.tracker.kind == tracker::Kind::GitHub
     {
-        let names: Vec<&str> = wanted_labels(&herd.tracker.labels, herd.wayfinding)
+        let names: Vec<&str> = wanted_labels(&herd.tracker.labels, herd.wayfinding, herd.grill_batch)
             .into_iter()
             .map(|(name, ..)| name)
             .collect();
@@ -949,7 +1053,8 @@ fn summary(herd: &Herd) -> String {
     format!(
         "\nHerd {name}:\n  repo    {repo}\n  {branch}\n  \
          max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n  \
-         groom   {groom}\n  wayfinding {wayfinding}\n  also    grill (attended)\n{also}{no_merged}",
+         groom   {groom}\n  wayfinding {wayfinding}\n  grill-batch {grill_batch}\n  \
+         also    grill (attended)\n{also}{no_merged}",
         name = herd.name,
         repo = herd.repo.display(),
         max = herd.max,
@@ -961,6 +1066,7 @@ fn summary(herd: &Herd) -> String {
         checks = herd.checks.join("; "),
         groom = if herd.groom { "yes" } else { "no" },
         wayfinding = if herd.wayfinding { "yes" } else { "no" },
+        grill_batch = if herd.grill_batch { "yes" } else { "no" },
     )
 }
 

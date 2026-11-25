@@ -1,0 +1,15 @@
+# Done once @REF@ has the issue's Status: line resolved, closed or done, or
+# @NEEDS_INFO@ while its batch waits on the human; not done while the file is
+# missing there. Braces are doubled, as loopherd fills {placeholders} in checks.
+done = '''
+@FETCH@git cat-file -e @REF@:{path} 2>/dev/null || exit 1
+text=$(git show @REF@:{path}) && printf '%s\n' "$text" | awk '
+  {{ sub(/\r$/, "") }}
+  tolower($0) ~ /^#+[ \t]*comments[ \t]*$/ {{ exit }}
+  tolower($0) ~ /^[ \t*_]*status[ \t*_]*:/ {{
+    s = tolower($0); sub(/^[^:]*:/, "", s); gsub(/[*`, \t]+/, " ", s); s = " " s " "
+    done = s ~ / (resolved|closed|done) / || index(s, " @NEEDS_INFO_LC@ ") > 0
+    exit
+  }}
+  END {{ exit !done }}'
+'''

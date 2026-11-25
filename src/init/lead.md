@@ -11,7 +11,7 @@ Your switches (off means the human does it; ask with a question report):
 
 Your review-round limit: {review_rounds}.
 
-Grilling is always the human's.
+@GRILLING@
 
 Start now:
 1. `loopherd status` and `loopherd reports --all`, to see where the herd is.
