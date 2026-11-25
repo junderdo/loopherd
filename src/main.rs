@@ -306,7 +306,7 @@ enum Command {
     },
     /// The herd view as a live TUI, refreshed every 2s. Read-only except that
     /// Enter focuses the selected agent's pane in herdr, `t` saves the theme it
-    /// switches to as `view.theme` in config.toml, `S` focuses the
+    /// switches to as `view.theme` in config.toml, `s` focuses the
     /// shepherd or, run in a pane, starts one beside the view as `view.layout`
     /// places it, and `v` moves a shepherd in the view's tab to the other
     /// layout, saving it as `view.layout`.
@@ -314,7 +314,7 @@ enum Command {
         /// Start with retired entries shown (toggle with `a`).
         #[arg(long)]
         all: bool,
-        /// Start with strays listed (toggle with `s`).
+        /// Start with strays listed (toggle with `x`).
         #[arg(long)]
         strays: bool,
         /// Open the view in a herdr pane beside the shepherd's, on the side
