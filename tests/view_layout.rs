@@ -11,17 +11,40 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::mpsc;
 
-/// A stub `herdr` for a stacked view split off `w1:p1`, whose tab the human
-/// sees and where they had `w1:p3` focused. Its swap answers `swap_changed`.
-fn stub(bin: &Path, swap_changed: bool) {
+/// How the stub `herdr` answers for a stacked view split off `w1:p1`, in
+/// tab `w1:t1`, where the human had `w1:p3` focused.
+struct Answers {
+    /// The tab the human sees.
+    visible_tab: &'static str,
+    /// `plugin pane open`'s `.result`.
+    opened: &'static str,
+    swap_changed: bool,
+}
+
+impl Default for Answers {
+    fn default() -> Answers {
+        Answers {
+            visible_tab: "w1:t1",
+            opened: r#"{"plugin_pane":{"pane":{"pane_id":"w1:p2"}}}"#,
+            swap_changed: true,
+        }
+    }
+}
+
+fn stub(bin: &Path, answers: &Answers) {
+    let Answers {
+        visible_tab,
+        opened,
+        swap_changed,
+    } = answers;
     let script = format!(
         r#"#!/bin/sh
 echo "$*" >> "$HOME/calls"
 case "$1 $2" in
   "pane get") echo '{{"result":{{"pane":{{"pane_id":"w1:p1","tab_id":"w1:t1","workspace_id":"w1"}}}}}}' ;;
   "pane list") echo '{{"result":{{"panes":[]}}}}' ;;
-  "workspace list") echo '{{"result":{{"workspaces":[{{"focused":true,"active_tab_id":"w1:t1"}}]}}}}' ;;
-  "plugin pane") echo '{{"result":{{"plugin_pane":{{"pane":{{"pane_id":"w1:p2"}}}}}}}}' ;;
+  "workspace list") echo '{{"result":{{"workspaces":[{{"focused":true,"active_tab_id":"{visible_tab}"}}]}}}}' ;;
+  "plugin pane") echo '{{"result":{opened}}}' ;;
   "pane layout") echo '{{"result":{{"layout":{{"focused_pane_id":"w1:p3"}}}}}}' ;;
   "pane swap") echo '{{"result":{{"swap":{{"changed":{swap_changed},"reason":"not_found"}}}}}}' ;;
   *) echo '{{"result":{{}}}}' ;;
@@ -54,11 +77,11 @@ struct Run {
     socket: Vec<String>,
 }
 
-fn view_beside_shepherd(swap_changed: bool) -> Run {
+fn view_beside_shepherd(answers: Answers) -> Run {
     let home = tempfile::tempdir().unwrap();
     let bin = home.path().join("bin");
     std::fs::create_dir(&bin).unwrap();
-    stub(&bin, swap_changed);
+    stub(&bin, &answers);
     let config = home.path().join("config");
     std::fs::create_dir(&config).unwrap();
     std::fs::write(config.join("config.toml"), "[view]\nlayout = \"stacked\"\n").unwrap();
@@ -100,7 +123,7 @@ fn layout_calls(calls: &[String]) -> Vec<&str> {
 
 #[test]
 fn a_stacked_view_splits_down_swaps_up_shrinks_toward_itself_and_refocuses_by_id() {
-    let run = view_beside_shepherd(true);
+    let run = view_beside_shepherd(Answers::default());
 
     let calls = layout_calls(&run.calls);
     assert_eq!(calls.len(), 3, "{calls:#?}");
@@ -130,7 +153,10 @@ fn a_stacked_view_splits_down_swaps_up_shrinks_toward_itself_and_refocuses_by_id
 
 #[test]
 fn a_swap_herdr_answers_unchanged_closes_the_split_and_says_so_in_the_popup() {
-    let run = view_beside_shepherd(false);
+    let run = view_beside_shepherd(Answers {
+        swap_changed: false,
+        ..Answers::default()
+    });
 
     let calls = layout_calls(&run.calls);
     assert_eq!(calls.len(), 4, "{calls:#?}");
@@ -143,6 +169,50 @@ fn a_swap_herdr_answers_unchanged_closes_the_split_and_says_so_in_the_popup() {
     assert!(calls[3].contains("not_found"), "{}", calls[3]);
     assert!(
         run.stdout.starts_with("opened the view in the popup:") && run.stdout.contains("not_found"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_stacked_view_off_screen_swaps_itself_up_so_herdr_focuses_it() {
+    let run = view_beside_shepherd(Answers {
+        visible_tab: "w1:t9",
+        ..Answers::default()
+    });
+
+    let calls = layout_calls(&run.calls);
+    assert_eq!(calls.len(), 3, "{calls:#?}");
+    assert!(
+        calls[0].contains("--direction down --focus"),
+        "{}",
+        calls[0]
+    );
+    assert_eq!(
+        calls[1],
+        "pane swap --source-pane w1:p2 --target-pane w1:p1"
+    );
+    assert_eq!(run.socket, Vec::<String>::new());
+    assert!(
+        run.stdout
+            .starts_with("opened and focused the view beside pane w1:p1"),
+        "{}",
+        run.stdout
+    );
+}
+
+#[test]
+fn a_view_herdr_names_no_pane_for_stays_unswapped_and_says_so() {
+    let run = view_beside_shepherd(Answers {
+        opened: "{}",
+        ..Answers::default()
+    });
+
+    let calls = layout_calls(&run.calls);
+    assert_eq!(calls.len(), 1, "{calls:#?}");
+    assert!(
+        run.stdout
+            .starts_with("opened the view on herdr's side, not the layout's ("),
         "{}",
         run.stdout
     );

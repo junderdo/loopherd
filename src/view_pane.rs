@@ -6,7 +6,7 @@ use std::path::Path;
 
 use anyhow::{Result, bail};
 
-use crate::herdr::{Herdr, Pane, Placement, Side};
+use crate::herdr::{Herdr, Landed, Pane, Placement, Side};
 use crate::ledger::Process;
 use crate::process::{self, Procs};
 use crate::shepherd_resume::{self, Place};
@@ -92,6 +92,9 @@ pub enum How {
     OpenedFocused,
     /// A view already open in the pane's tab, focused instead of stacking another.
     Focused { view: String },
+    /// Split off right of or below the pane, not on the side asked for, for
+    /// the reason given.
+    Unswapped { why: String },
 }
 
 /// Opens the view beside the shepherd's recorded pane in `state`, else
@@ -206,11 +209,13 @@ fn beside(herdr: &dyn Herdr, pane: &str, side: Side, env: &[(&str, &str)]) -> Re
         share: SHARE,
         focus: off_screen,
     };
-    herdr.open_plugin_pane(VIEW, &placement, env)?;
-    Ok(match off_screen {
-        true => How::OpenedFocused,
-        false => How::Opened,
-    })
+    Ok(
+        match (herdr.open_plugin_pane(VIEW, &placement, env)?, off_screen) {
+            (Landed::Unswapped(why), _) => How::Unswapped { why },
+            (Landed::AsPlaced, true) => How::OpenedFocused,
+            (Landed::AsPlaced, false) => How::Opened,
+        },
+    )
 }
 
 fn views_in_tab_of(herdr: &dyn Herdr, target: &Pane) -> Vec<String> {
@@ -923,6 +928,34 @@ mod tests {
                 vec![(NOTE.to_string(), why)]
             )]
         );
+    }
+
+    #[test]
+    fn stacked_a_view_herdr_names_no_pane_for_opens_unswapped_saying_why() {
+        let state = tempfile::tempdir().unwrap();
+        let (mut herdr, shepherd) = herdr_with_tab();
+        herdr.unnamed_plugin_panes = true;
+        record_shepherd(state.path(), &shepherd, FAKE_SOCKET);
+
+        let opened = open(
+            &herdr,
+            &FakeProcs::pane(),
+            state.path(),
+            None,
+            Layout::Stacked,
+        )
+        .unwrap();
+
+        assert_eq!(
+            opened,
+            Opened::BesideShepherd {
+                pane: shepherd,
+                how: How::Unswapped {
+                    why: "herdr named no plugin pane".into()
+                }
+            }
+        );
+        assert_eq!(herdr.plugin_panes().len(), 1);
     }
 
     #[test]

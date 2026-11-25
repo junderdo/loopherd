@@ -184,7 +184,7 @@ pub trait Herdr {
         entrypoint: &str,
         placement: &Placement,
         env: &[(&str, &str)],
-    ) -> Result<()>;
+    ) -> Result<Landed>;
     /// The plugin `id` in the reached herdr's registry; `None` when neither
     /// installed nor linked. Gives up after `timeout`.
     fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>>;
@@ -208,6 +208,15 @@ pub enum Placement {
         share: f64,
         focus: bool,
     },
+}
+
+/// Where an opened plugin pane ended up.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Landed {
+    AsPlaced,
+    /// Split right of or below its target and never swapped left or above,
+    /// herdr naming no new pane to swap, for the reason given.
+    Unswapped(String),
 }
 
 /// The side of its target a split's new pane takes.
@@ -917,7 +926,7 @@ impl Herdr for CliHerdr {
         entrypoint: &str,
         placement: &Placement,
         env: &[(&str, &str)],
-    ) -> Result<()> {
+    ) -> Result<Landed> {
         let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let mut argv = vec![
             "plugin",
@@ -977,7 +986,7 @@ impl Herdr for CliHerdr {
             Some((toward_new, amount)),
         ) = (placement, resize)
         else {
-            return Ok(());
+            return Ok(Landed::AsPlaced);
         };
         if side.swaps() {
             let opened = serde_json::from_slice::<Value>(&out.stdout)
@@ -991,12 +1000,7 @@ impl Herdr for CliHerdr {
             // Unnamed, the pane can't be closed, so a fallback would open a second view.
             let new = match opened {
                 Ok(new) => new,
-                Err(e) => {
-                    eprintln!(
-                        "loopherd: the plugin pane opened beside its target unswapped: {e:#}"
-                    );
-                    return Ok(());
-                }
+                Err(e) => return Ok(Landed::Unswapped(format!("{e:#}"))),
             };
             if let Err(e) = self.swap(pane, &new, *focus) {
                 let _ = self.close_pane(&new);
@@ -1018,7 +1022,7 @@ impl Herdr for CliHerdr {
         if let Err(e) = self.call_ok(&args) {
             eprintln!("loopherd: the plugin pane opened at half the split: {e:#}");
         }
-        Ok(())
+        Ok(Landed::AsPlaced)
     }
 
     fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>> {
