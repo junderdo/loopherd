@@ -50,7 +50,10 @@ curl -fsSL https://junderdo.dev/loopherd/install.sh | LOOPHERD_NO_SPLASH=1 sh
 ```
 
 **Update:** `loopherd update`, from 0.2.1 on (`--check` to only look,
-`--version vX.Y.Z` to pick a release, older ones included).
+`--version vX.Y.Z` to pick a release, older ones included). After it
+installs, or finds nothing new, it runs the installed binary's
+`loopherd herd upgrade`, which offers each herd what newer init writes;
+`--check` counts those instead.
 
 ## From source
 
@@ -72,7 +75,8 @@ installer, `scripts/install` takes flags for working on loopherd:
 without asking (naming an extra skips the other offers and setup), and
 `scripts/install --help` lists the rest.
 
-**Update:** `loopherd update` (`--check` to only look), or
+**Update:** `loopherd update` (`--check` to only look), which then runs
+`loopherd herd upgrade` as a release update does, or
 `git pull && scripts/install --update` by hand.
 
 ## `loopherd setup`

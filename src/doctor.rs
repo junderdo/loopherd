@@ -47,6 +47,8 @@ pub struct Install {
 #[serde(rename_all = "lowercase")]
 pub enum Status {
     Ok,
+    /// Worth knowing, never a problem; shown without `--verbose`, not counted.
+    Info,
     Warning,
     Failure,
 }
@@ -90,6 +92,7 @@ pub fn checks(
         Ok(setup) => {
             checks.extend(config_checks(&setup.paths, install));
             checks.extend(herd_checks(&setup.paths, herd));
+            checks.extend(upgrade_checks(&setup.paths, herd));
             checks.extend(unix_socket_checks(install, &setup.paths, herd));
             checks.extend(state_checks(
                 setup,
@@ -422,6 +425,26 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
         checks.extend(worker_guard_checks(paths, &herd));
     }
     checks
+}
+
+/// One info line per herd with upgrades it hasn't declined.
+fn upgrade_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
+    // An unreadable herd already failed in herd_checks.
+    let pending = crate::herd::pending(paths).unwrap_or_default();
+    pending
+        .into_iter()
+        .filter(|(herd, _)| only.is_none_or(|only| only == herd))
+        .map(|(herd, ids)| Check {
+            name: format!("herd {herd} upgrade"),
+            status: Status::Info,
+            detail: format!(
+                "{}: {}",
+                crate::herd::new_features(ids.len()),
+                ids.join(", ")
+            ),
+            fix: Some(format!("loopherd herd upgrade {herd}")),
+        })
+        .collect()
 }
 
 /// What would refuse or warn a sandboxed worker of `herd` before `feed`
@@ -1649,6 +1672,7 @@ pub fn text(checks: &[Check], verbose: bool) -> String {
     for check in checks.iter().filter(|c| verbose || c.status != Status::Ok) {
         let status = match check.status {
             Status::Ok => "ok",
+            Status::Info => "info",
             Status::Warning => "warning",
             Status::Failure => "failure",
         };
@@ -1734,7 +1758,12 @@ mod tests {
         fn herd(&self, herd: &str) -> PathBuf {
             let repo = self.dir.path().join(format!("repos/{herd}"));
             std::fs::create_dir_all(repo.join(".git")).unwrap();
-            self.herd_file(herd, &format!("repo = {:?}\n", repo.to_str().unwrap()));
+            // With a grill, so `herd upgrade` has nothing to offer it.
+            let grill = "[template.grill]\nparams = []\nattended = true\nprompt = \"grill\"\n";
+            self.herd_file(
+                herd,
+                &format!("repo = {:?}\n{grill}", repo.to_str().unwrap()),
+            );
             repo
         }
 
@@ -2501,7 +2530,7 @@ mod tests {
     fn problems_on(m: &Machine, herd: Option<&str>, herdr: &FakeHerdr) -> Vec<String> {
         let (out, _) = run_on(m, herd, herdr);
         out.lines()
-            .filter(|l| !l.starts_with("doctor: "))
+            .filter(|l| !l.starts_with("doctor: ") && !l.starts_with("info "))
             .map(str::to_string)
             .collect()
     }

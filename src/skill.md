@@ -577,8 +577,10 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   each herd's `source` and `backlog` from its repo (paused herds too, 30s
   each), failing on a nonzero exit or timeout; `--verbose` or `--json`
   shows each command's exit status and task count, never the tasks.
+  A herd with migrations `loopherd herd upgrade` would offer, declined
+  ones left out, gets one `info` line naming them, never a failure.
   `<herd>` limits the herd, repo, state and tracker checks to that herd.
-  It prints only problems, each with its fix, then `doctor: <n> ok, <n>
+  It prints only problems and info lines, each with its fix, then `doctor: <n> ok, <n>
   warnings, <n> failures`; `--verbose` lists every check, `--json` gives
   them as data, `--settings <file>` checks another settings file. Exits 0
   clean or warnings only, 1 on any failure, 2 when it couldn't run or

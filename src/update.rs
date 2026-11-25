@@ -9,6 +9,8 @@ use std::process::Command;
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
 
+use crate::herd::Paths;
+
 const RELEASES: &str = "https://github.com/junderdo/loopherd/releases";
 const RESTART_VIEW: &str = "restart any open `loopherd view`: a running view keeps the old binary";
 
@@ -21,7 +23,8 @@ pub enum Want {
 
 /// Where an update reads and writes, gathered by the caller.
 pub struct Places {
-    pub config_dir: PathBuf,
+    /// The config dir and the herds whose upgrades `--check` counts.
+    pub paths: Paths,
     /// `~/.local/bin/loopherd`, which every install replaces.
     pub installed: PathBuf,
     pub running: PathBuf,
@@ -62,22 +65,57 @@ pub fn record_path(config_dir: &Path) -> PathBuf {
 }
 
 /// Runs the update, returning the exit code: with [`Want::Check`], 0 up to
-/// date, 1 behind and 2 when it couldn't check; otherwise 0 once installed
-/// or up to date. `on_path` says whether a program is on PATH.
+/// date, 1 behind and 2 when it couldn't check, then the herds' pending
+/// upgrades; otherwise 0 once installed or up to date, then the installed
+/// binary's `herd upgrade`. `on_path` says whether a program is on PATH.
 pub fn update(
     places: &Places,
     want: Want,
     on_path: &dyn Fn(&str) -> bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    let checking = matches!(want, Want::Check);
-    match run(places, want, on_path, out) {
-        Err(e) if checking => {
-            eprintln!("loopherd update: {e:#}");
-            Ok(2)
-        }
-        result => result,
+    if !matches!(want, Want::Check) {
+        let code = run(places, want, on_path, out)?;
+        upgrade_herds(&places.installed, out)?;
+        return Ok(code);
     }
+    let code = run(places, want, on_path, out).unwrap_or_else(|e| {
+        eprintln!("loopherd update: {e:#}");
+        2
+    });
+    match crate::herd::pending(&places.paths) {
+        Ok(pending) if pending.is_empty() => {}
+        Ok(pending) => {
+            let features = pending.iter().map(|(_, ids)| ids.len()).sum();
+            let herds = match pending.len() {
+                1 => "1 herd has".to_string(),
+                n => format!("{n} herds have"),
+            };
+            writeln!(
+                out,
+                "{herds} {}; run loopherd herd upgrade",
+                crate::herd::new_features(features)
+            )?;
+        }
+        Err(e) => eprintln!("loopherd update: can't count herd upgrades: {e:#}"),
+    }
+    Ok(code)
+}
+
+/// Runs `installed`'s own `herd upgrade`, which alone knows the migrations
+/// it ships; it offers them on a terminal and lists them otherwise.
+fn upgrade_herds(installed: &Path, out: &mut dyn Write) -> Result<()> {
+    out.flush()?;
+    let failed = match Command::new(installed).args(["herd", "upgrade"]).status() {
+        Ok(status) if status.success() => return Ok(()),
+        Ok(status) => status.to_string(),
+        Err(e) => e.to_string(),
+    };
+    writeln!(
+        out,
+        "herd upgrade failed ({failed}); run loopherd herd upgrade to try again"
+    )?;
+    Ok(())
 }
 
 fn run(
@@ -86,7 +124,7 @@ fn run(
     on_path: &dyn Fn(&str) -> bool,
     out: &mut dyn Write,
 ) -> Result<i32> {
-    match read_record(&places.config_dir)? {
+    match read_record(places.paths.config_dir())? {
         Record::Release { tag } => update_release(places, tag, want, on_path, out),
         Record::Source { checkout, commit } => update_source(places, &checkout, commit, want, out),
     }
@@ -129,7 +167,7 @@ fn update_release(
     say_which_loopherd(places, out)?;
     install(&fetch, base, &target)?;
     // A release whose installer predates the record wouldn't write it.
-    record_release(&places.config_dir, &target)?;
+    record_release(places.paths.config_dir(), &target)?;
     after_install(places, out)?;
     Ok(0)
 }

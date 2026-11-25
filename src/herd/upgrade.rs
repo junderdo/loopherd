@@ -58,7 +58,7 @@ enum State {
     Template(&'static str),
 }
 
-const MIGRATIONS: [Migration; 3] = [
+static MIGRATIONS: [Migration; 3] = [
     Migration {
         id: "lead-follow-ups-ready",
         explanation: "Writes the lead's follow_ups_ready switch as [lead_defaults] sets it, else off.\n\
@@ -196,41 +196,62 @@ pub fn upgrade(
     Ok(())
 }
 
+/// Each valid herd's pending migration ids, declined ones left out, for
+/// the herds that have any.
+pub fn pending(paths: &Paths) -> Result<Vec<(String, Vec<&'static str>)>> {
+    let defaults = lead_defaults(paths)?;
+    let mut pending = vec![];
+    for herd in names(&paths.herds)? {
+        if super::checked(&file_of(&paths.herds, &herd)?, paths).is_err() {
+            continue;
+        }
+        let ids = offered(paths, &herd, &defaults)?;
+        if !ids.is_empty() {
+            pending.push((herd, ids.iter().map(|m| m.id).collect()));
+        }
+    }
+    Ok(pending)
+}
+
+/// `n new feature(s)`.
+pub fn new_features(n: usize) -> String {
+    match n {
+        1 => "1 new feature".to_string(),
+        n => format!("{n} new features"),
+    }
+}
+
+fn offered(paths: &Paths, herd: &str, defaults: &SwitchValues) -> Result<Vec<&'static Migration>> {
+    let declined = load(&paths.herds, herd)?.declined;
+    let doc = read(&file_of(&paths.herds, herd)?)?;
+    Ok(MIGRATIONS
+        .iter()
+        .filter(|m| !declined.iter().any(|id| id == m.id))
+        .filter(|m| !matches!((m.state)(&doc, defaults), State::Current))
+        .collect())
+}
+
 fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Write) -> Result<()> {
     let file = file_of(&paths.herds, herd)?;
-    let declined = load(&paths.herds, herd)?.declined;
     let defaults = lead_defaults(paths)?;
-    let offered = |doc: &DocumentMut| -> Vec<(&Migration, State)> {
-        MIGRATIONS
-            .iter()
-            .filter(|m| !declined.iter().any(|id| id == m.id))
-            .map(|m| (m, (m.state)(doc, &defaults)))
-            .filter(|(_, state)| !matches!(state, State::Current))
-            .collect()
-    };
-    let pending = offered(&read(&file)?);
+    let pending = offered(paths, herd, &defaults)?;
     if pending.is_empty() {
         writeln!(out, "herd {herd} is up to date")?;
         return Ok(());
     }
     let Some(input) = how.terminal.as_deref_mut() else {
-        let ids: Vec<_> = pending.iter().map(|(m, _)| m.id).collect();
-        let features = if ids.len() == 1 {
-            "feature"
-        } else {
-            "features"
-        };
+        let ids: Vec<_> = pending.iter().map(|m| m.id).collect();
         writeln!(
             out,
-            "{herd}: {} new {features}: {}",
-            ids.len(),
+            "{herd}: {}: {}",
+            new_features(ids.len()),
             ids.join(", ")
         )?;
         writeln!(out, "  run: loopherd herd upgrade {herd}")?;
         return Ok(());
     };
     let mut backup = Backup::new(&file, how.now);
-    for migration in pending.iter().map(|(m, _)| *m) {
+    for migration in pending {
         // Read again: an earlier answer may have written the file.
         let doc = read(&file)?;
         let header = format!("{} — {}", migration.id, migration.explanation);
