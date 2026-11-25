@@ -313,7 +313,7 @@ pub fn retire_and_close(
     Ok(())
 }
 
-/// Focuses the live shepherd's pane, as the herd view's `S` finds it in
+/// Focuses the live shepherd's pane, as the herd view's `s` finds it in
 /// `state`, else the attended member's return pane, if the human is looking
 /// at its pane `pane_id`: a reap hours after the merge mustn't pull them off
 /// other work. When neither takes focus, herdr picks the next tab, and the

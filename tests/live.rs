@@ -3503,7 +3503,7 @@ fn visible(pane: &str) -> String {
 }
 
 #[test]
-fn capital_s_in_a_view_pane_starts_the_shepherd_beside_it_then_focuses_it() {
+fn s_in_a_view_pane_starts_the_shepherd_beside_it_then_focuses_it() {
     if !live_enabled() {
         return;
     }
@@ -3512,8 +3512,8 @@ fn capital_s_in_a_view_pane_starts_the_shepherd_beside_it_then_focuses_it() {
     s_starts_the_shepherd_then_focuses_it(Some("stacked"));
 }
 
-/// Presses `S` in a view in a new tab, with `view.layout` set to `layout`,
-/// checks the shepherd starts on its side, that `S` then focuses it, and
+/// Presses `s` in a view in a new tab, with `view.layout` set to `layout`,
+/// checks the shepherd starts on its side, that `s` then focuses it, and
 /// that `v` moves it to the other side with its Claude still running.
 fn s_starts_the_shepherd_then_focuses_it(layout: Option<&str>) {
     let label = assert_dev_session();
@@ -3563,7 +3563,7 @@ fn s_starts_the_shepherd_then_focuses_it(layout: Option<&str>) {
     herdr_quiet(&["pane", "run", &view, &command]);
     poll(15, || visible(&view).contains("q quit").then_some(())).expect("no view drawn");
 
-    herdr_quiet(&["pane", "send-keys", &view, "S"]);
+    herdr_quiet(&["pane", "send-keys", &view, "s"]);
 
     let shepherd = poll(90, || {
         let out = dev("herdr")
@@ -3598,7 +3598,7 @@ fn s_starts_the_shepherd_then_focuses_it(layout: Option<&str>) {
     })
     .unwrap_or_else(|| panic!("{}", visible(&view)));
 
-    herdr_quiet(&["pane", "send-keys", &view, "S"]);
+    herdr_quiet(&["pane", "send-keys", &view, "s"]);
 
     poll(15, || {
         visible(&view)

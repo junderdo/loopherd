@@ -1,14 +1,12 @@
 #!/bin/sh
 # curl -fsSL https://github.com/junderdo/loopherd/releases/latest/download/install.sh | sh
-# curl -fsSL .../install.sh | sh -s -- [--no-splash] [--with-agents] [--with-skills]
-#                                      [--with-herdr-plugin] [--with-herdr-keys] [--no-extras]
 #
-# Installs a released loopherd as ~/.local/bin/loopherd, its Claude hooks and
-# skill, then, like scripts/install, offers the agent types, the
-# mattpocock-skills plugin, the herdr plugin and its key bindings, asking on
-# /dev/tty, runs `loopherd setup` and, last, `loopherd doctor`. The flags
-# mean what they mean to scripts/install; LOOPHERD_NO_SPLASH=1 is --no-splash.
-# LOOPHERD_VERSION=vX.Y.Z pins a release; LOOPHERD_RELEASE_BASE replaces
+# Takes no options. Installs a released loopherd as ~/.local/bin/loopherd, its
+# Claude hooks and skill, then, like scripts/install, offers the agent types,
+# the mattpocock-skills plugin, the herdr plugin and its key bindings, asking
+# on /dev/tty, runs `loopherd setup` and, last, `loopherd doctor`.
+# LOOPHERD_NO_SPLASH=1 skips the splash. LOOPHERD_VERSION=vX.Y.Z pins a
+# release; LOOPHERD_RELEASE_BASE replaces
 # https://github.com/junderdo/loopherd/releases. Unless it does, the installed
 # tag is recorded in <config dir>/install.toml for `loopherd update`.
 set -eu
@@ -100,42 +98,11 @@ warn_missing() {
   esac
 }
 
-# Sets splash and the ask/yes/no of each offer and of setup, as scripts/install does.
-parse_args() {
-  splash=1 agents=ask skills=ask herdr_plugin=ask herdr_keys=ask no_extras=
-  for arg in "$@"; do
-    case "$arg" in
-      --no-splash) splash= ;;
-      --with-agents) agents=yes ;;
-      --with-skills) skills=yes ;;
-      --with-herdr-plugin) herdr_plugin=yes ;;
-      --with-herdr-keys) herdr_keys=yes ;;
-      --no-extras) no_extras=1 ;;
-      *) die "unknown argument $arg; takes --no-splash, --with-agents, --with-skills, --with-herdr-plugin, --with-herdr-keys or --no-extras" ;;
-    esac
-  done
-  [ "${LOOPHERD_NO_SPLASH:-}" != 1 ] || splash=
-  setup=ask
-  if [ -n "$no_extras" ]; then
-    [ "$agents$skills$herdr_plugin$herdr_keys" = askaskaskask ] ||
-      die "--no-extras can't go with --with-agents, --with-skills, --with-herdr-plugin or --with-herdr-keys"
-    agents=no skills=no herdr_plugin=no herdr_keys=no setup=no
-  elif [ "$agents$skills$herdr_plugin$herdr_keys" != askaskaskask ]; then
-    # Naming one extra means just those, with no questions.
-    [ "$agents" = yes ] || agents=no
-    [ "$skills" = yes ] || skills=no
-    [ "$herdr_plugin" = yes ] || herdr_plugin=no
-    [ "$herdr_keys" = yes ] || herdr_keys=no
-    setup=no
-  fi
-}
-
 # Usage: run_extras splash|offers. Reads answers from the terminal: under
 # `curl | sh` stdin is this script.
 run_extras() {
   case "$1" in
-    splash) [ -n "$splash" ] || return 0 ;;
-    offers) [ "$agents$skills$herdr_plugin$herdr_keys" != nononono ] || return 0 ;;
+    splash) [ "${LOOPHERD_NO_SPLASH:-}" != 1 ] || return 0 ;;
   esac
   extras="$work/scripts/install-extras"
   if [ ! -f "$extras" ]; then
@@ -157,14 +124,15 @@ run_extras() {
   if [ "$1" = splash ]; then
     bash "$extras" splash <"$tty"
   else
-    bash "$extras" offers "$agents" "$skills" "$herdr_plugin" "$herdr_keys" "$bin_dir/loopherd" <"$tty" ||
+    LOOPHERD_EXTRAS_NO_TERMINAL="run this installer again in a terminal to be asked" \
+      bash "$extras" offers ask ask ask ask "$bin_dir/loopherd" <"$tty" ||
       say "an extra failed to install (said above); the rest of the install is unaffected"
   fi
 }
 
 # Called on the last line, so `curl | sh` runs nothing from a cut-off download.
 main() {
-  parse_args "$@"
+  [ "$#" -eq 0 ] || die "takes no options; it asks about each extra as it installs"
   need_tools
   target=$(target)
   base=${LOOPHERD_RELEASE_BASE:-https://github.com/junderdo/loopherd/releases}
@@ -203,7 +171,7 @@ main() {
   # </dev/null: under `curl | sh` stdin is this script. Setup reads /dev/tty.
   "$bin_dir/loopherd" install-hook </dev/null
   run_extras offers
-  [ "$setup" = no ] || "$bin_dir/loopherd" setup </dev/null || say "setup failed; run loopherd setup once config.toml is fixed"
+  "$bin_dir/loopherd" setup </dev/null || say "setup failed; run loopherd setup once config.toml is fixed"
 
   warn_missing
   say "next: loopherd herds"

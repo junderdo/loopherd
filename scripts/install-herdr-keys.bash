@@ -11,7 +11,7 @@ offer_herdr_keys() {
     return 0
   fi
   if [[ "$want" == ask && ! -t 0 ]]; then
-    echo "skipped herdr key bindings (no terminal); add --with-herdr-keys to add them"
+    echo "skipped herdr key bindings (no terminal); ${LOOPHERD_EXTRAS_NO_TERMINAL:-add --with-herdr-keys to add them}"
     return 0
   fi
   if ! command -v herdr >/dev/null; then

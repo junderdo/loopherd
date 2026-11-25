@@ -90,7 +90,7 @@ pub struct Dirs {
     pub config: PathBuf,
     /// loopherd's state, where the shepherd's handoff and record are.
     pub state: PathBuf,
-    /// The pane `S` splits a shepherd off; `None` in a popup, which has no pane.
+    /// The pane `s` splits a shepherd off; `None` in a popup, which has no pane.
     pub view_pane: Option<ViewPane>,
 }
 
@@ -209,7 +209,7 @@ pub struct App {
     invalidated: bool,
     /// herdr's events are subscribed, so the poll slows.
     live: bool,
-    /// An `S` is being served, which holds up the reads queued behind it.
+    /// An `s` is being served, which holds up the reads queued behind it.
     summoning: bool,
     /// A quit pressed while summoning, held until the start settles so a
     /// split it made is either running the shepherd or closed; a second
@@ -420,7 +420,7 @@ impl App {
                     Some("quitting once the shepherd is up; press again to quit now".into());
             }
             KeyCode::Char('q') | KeyCode::Esc => self.quit = true,
-            KeyCode::Char('s') => {
+            KeyCode::Char('x') => {
                 self.options.strays = !self.options.strays;
                 return Some(self.request_read(now));
             }
@@ -432,8 +432,8 @@ impl App {
                 self.theme = self.theme.with_palette(self.theme.palette().next());
                 return Some(Request::SaveTheme(self.theme.palette()));
             }
-            KeyCode::Char('S') if self.summoning => {}
-            KeyCode::Char('S') => {
+            KeyCode::Char('s') if self.summoning => {}
+            KeyCode::Char('s') => {
                 self.summoning = true;
                 return Some(Request::Shepherd);
             }
@@ -738,7 +738,7 @@ impl App {
         key(&mut spans, "enter", "focus");
         key(&mut spans, "t", "theme");
         for (k, label, on) in [
-            ("s", "strays:", self.options.strays),
+            ("x", "strays:", self.options.strays),
             ("a", "all:", self.options.all),
         ] {
             key(&mut spans, k, label);
@@ -747,7 +747,7 @@ impl App {
         }
         // Last, so a narrow view cuts them before the toggles' state.
         key(&mut spans, "v", "layout");
-        key(&mut spans, "S", "shepherd");
+        key(&mut spans, "s", "shepherd");
         Line::from(spans)
     }
 
@@ -2082,7 +2082,7 @@ max = 3
                 "││                                                                    ││",
                 "││                                                                    ││",
                 "│╰────────────────────────────────────────────────────────────────────╯│",
-                "│ q quit  ↑↓/jk select  enter focus  t theme  s strays: off  a all: off│",
+                "│ q quit  ↑↓/jk select  enter focus  t theme  x strays: off  a all: off│",
                 "╰──────────────────────────────────────────────────────────────────────╯",
             ]
         );
@@ -2216,7 +2216,7 @@ max = 3
         let busy = render(&app(&herdr, &ledger, now), now);
         assert!(!text(&busy).iter().any(|l| l.contains("the herd is quiet")));
         let (herdr, ledger) = quiet();
-        for key in ['a', 's'] {
+        for key in ['a', 'x'] {
             let mut app = app(&herdr, &ledger, now);
             press(&mut app, &[KeyCode::Char(key)], &herdr, &ledger);
             let shown = text(&render(&app, now));
@@ -2248,7 +2248,7 @@ max = 3
         let mut app = app(&herdr, &ledger, now);
         press(
             &mut app,
-            &[KeyCode::Char('s'), KeyCode::Char('a')],
+            &[KeyCode::Char('x'), KeyCode::Char('a')],
             &herdr,
             &ledger,
         );
@@ -2334,9 +2334,9 @@ max = 3
     fn the_footer_shows_keys_in_light_orange_labels_in_grey_violet_and_on_off() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
-        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        press(&mut app, &[KeyCode::Char('x')], &herdr, &ledger);
         let terminal = render(&app, now);
-        for key in ["q quit", "↑↓/jk select", "enter focus", "s strays", "a all"] {
+        for key in ["q quit", "↑↓/jk select", "enter focus", "x strays", "a all"] {
             assert_eq!(at(&terminal, key).fg, LIGHT_ORANGE, "{key}");
         }
         for label in ["quit", "select", "focus", "strays:", "all:"] {
@@ -2446,7 +2446,7 @@ max = 3
         let terminal = render(&app(&herdr, &ledger, now), now);
         assert_eq!(at(&terminal, "t theme").fg, LIGHT_ORANGE);
         assert_eq!(at(&terminal, "theme").fg, GREY_VIOLET);
-        assert!(pos(&terminal, "t theme").0 < pos(&terminal, "s strays").0);
+        assert!(pos(&terminal, "t theme").0 < pos(&terminal, "x strays").0);
     }
 
     #[test]
@@ -2532,12 +2532,12 @@ max = 3
     }
 
     #[test]
-    fn s_lists_strays_and_a_shows_retired_entries_each_toggling_back() {
+    fn x_lists_strays_and_a_shows_retired_entries_each_toggling_back() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
         press(
             &mut app,
-            &[KeyCode::Char('s'), KeyCode::Char('a')],
+            &[KeyCode::Char('x'), KeyCode::Char('a')],
             &herdr,
             &ledger,
         );
@@ -2578,11 +2578,11 @@ max = 3
         );
         assert_eq!(
             text(&terminal)[34],
-            "q quit  ↑↓/jk select  enter focus  t theme  s strays: on  a all: on"
+            "q quit  ↑↓/jk select  enter focus  t theme  x strays: on  a all: on"
         );
         press(
             &mut app,
-            &[KeyCode::Char('s'), KeyCode::Char('a')],
+            &[KeyCode::Char('x'), KeyCode::Char('a')],
             &herdr,
             &ledger,
         );
@@ -2802,7 +2802,7 @@ max = 3
     fn a_short_window_scrolls_to_keep_the_selection_in_view() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
-        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        press(&mut app, &[KeyCode::Char('x')], &herdr, &ledger);
         press(&mut app, &[KeyCode::Down; 9], &herdr, &ledger);
         let mut terminal = Terminal::new(TestBackend::new(72, 8)).unwrap();
         terminal.draw(|f| app.draw(f, now)).unwrap();
@@ -2824,7 +2824,7 @@ max = 3
     fn enter_on_a_listed_stray_focuses_its_pane() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
-        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        press(&mut app, &[KeyCode::Char('x')], &herdr, &ledger);
         press(&mut app, &[KeyCode::Down; 9], &herdr, &ledger);
         press(&mut app, &[KeyCode::Enter], &herdr, &ledger);
         assert_eq!(herdr.focused(), ["w2:p7"]);
@@ -2836,7 +2836,7 @@ max = 3
         let before = ledger.0.clone();
         let mut app = app(&herdr, &ledger, now);
         let every_key = [
-            KeyCode::Char('s'),
+            KeyCode::Char('x'),
             KeyCode::Char('a'),
             KeyCode::Enter,
             KeyCode::Down,
@@ -2933,7 +2933,7 @@ max = 3
         herdr.agents_gate = Some(gate.into());
         let keys = vec![
             None,
-            Some(key(KeyCode::Char('s'))),
+            Some(key(KeyCode::Char('x'))),
             Some(key(KeyCode::Char('j'))),
             Some(key(KeyCode::Enter)),
             Some(key(KeyCode::Char('q'))),
@@ -2996,7 +2996,7 @@ max = 3
             let (release, gate) = mpsc::channel::<()>();
             let mut herdr = herdr();
             herdr.agents_gate = Some(gate.into());
-            let mut keys = vec![None, Some(key(KeyCode::Char('S')))];
+            let mut keys = vec![None, Some(key(KeyCode::Char('s')))];
             keys.extend(std::iter::repeat_n(ctrl_c, presses));
             let code = run_scripted_within(herdr, keys, 0, Duration::from_millis(500));
             drop(release);
@@ -3053,7 +3053,7 @@ max = 3
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
         let stale = serve_quiet(Request::Read(app.options), &herdr, &ledger);
-        let toggled = app.press(KeyCode::Char('s'), now).unwrap();
+        let toggled = app.press(KeyCode::Char('x'), now).unwrap();
         app.apply(stale, now).unwrap();
         assert!(
             !text(&render_tall(&app, now))
@@ -3125,7 +3125,7 @@ max = 3
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
         assert_eq!(app.panes(), ["w1:pb", "w1:pa", "w1:pc"]);
-        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        press(&mut app, &[KeyCode::Char('x')], &herdr, &ledger);
         assert_eq!(app.panes(), ["w1:pb", "w1:pa", "w1:pc", "w2:p7"]);
     }
 
@@ -3664,7 +3664,7 @@ max = 3
     fn a_selected_stray_shows_its_pane_tab_cwd_and_title() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, now);
-        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        press(&mut app, &[KeyCode::Char('x')], &herdr, &ledger);
         for _ in 0..4 {
             assert!(app.press(KeyCode::Down, now).is_none());
         }
@@ -3909,7 +3909,7 @@ max = 3
         stray.title = Some("build\tlogs".into());
         herdr = herdr.with_raw_agent(stray);
         let mut app = app(&herdr, &ledger, now);
-        press(&mut app, &[KeyCode::Char('s')], &herdr, &ledger);
+        press(&mut app, &[KeyCode::Char('x')], &herdr, &ledger);
         for _ in 0..5 {
             app.press(KeyCode::Down, now);
         }
@@ -4365,7 +4365,7 @@ max = 3
 
     fn press_shepherd(app: &mut App, herdr: &FakeHerdr, ledger: &MemLedger, dirs: &Dirs) -> String {
         let now = Instant::now();
-        let request = app.press(KeyCode::Char('S'), now).unwrap();
+        let request = app.press(KeyCode::Char('s'), now).unwrap();
         app.apply(serve(request, herdr, ledger, dirs), now).unwrap();
         lines(&render_tall(app, now)).concat()
     }
@@ -4461,11 +4461,11 @@ max = 3
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render_at(&app(&herdr, &ledger, now), now, 100, 14);
         assert_eq!(at(&terminal, "v layout").fg, LIGHT_ORANGE);
-        assert!(pos(&terminal, "v layout").0 < pos(&terminal, "S shepherd").0);
+        assert!(pos(&terminal, "v layout").0 < pos(&terminal, "s shepherd").0);
     }
 
     #[test]
-    fn capital_s_focuses_a_live_shepherd_and_starts_nothing() {
+    fn s_focuses_a_live_shepherd_and_starts_nothing() {
         let (ledger, now) = (ledger(), Instant::now());
         let herdr = herdr().with_live_agent(Some("shepherd"), None, "w1:ps");
         let state = tempfile::tempdir().unwrap();
@@ -4484,7 +4484,7 @@ max = 3
     }
 
     #[test]
-    fn capital_s_with_no_shepherd_starts_one_left_of_the_view_then_focuses_it() {
+    fn s_with_no_shepherd_starts_one_left_of_the_view_then_focuses_it() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let view = herdr.add_tab("w1", "view", std::path::Path::new("/repo"), true);
         let state = tempfile::tempdir().unwrap();
@@ -4509,7 +4509,7 @@ max = 3
     }
 
     #[test]
-    fn capital_s_with_the_layout_stacked_starts_the_shepherd_below_the_view() {
+    fn s_with_the_layout_stacked_starts_the_shepherd_below_the_view() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let view = herdr.add_tab("w1", "view", std::path::Path::new("/repo"), true);
         let state = tempfile::tempdir().unwrap();
@@ -4531,7 +4531,7 @@ max = 3
     }
 
     #[test]
-    fn capital_s_in_a_popup_focuses_a_live_shepherd() {
+    fn s_in_a_popup_focuses_a_live_shepherd() {
         let (ledger, now) = (ledger(), Instant::now());
         let herdr = herdr().with_live_agent(Some("shepherd"), None, "w1:ps");
         let state = tempfile::tempdir().unwrap();
@@ -4556,9 +4556,9 @@ max = 3
         let state = tempfile::tempdir().unwrap();
         let dirs = shepherd_dirs(state.path(), Some(&view));
         let mut app = app(&herdr, &ledger, now);
-        let request = app.press(KeyCode::Char('S'), now).unwrap();
+        let request = app.press(KeyCode::Char('s'), now).unwrap();
 
-        assert!(app.press(KeyCode::Char('S'), now).is_none());
+        assert!(app.press(KeyCode::Char('s'), now).is_none());
         app.press(KeyCode::Char('q'), now);
         assert!(!app.quit());
         let shown = text(&render_tall(&app, now)).concat();
@@ -4574,7 +4574,21 @@ max = 3
     }
 
     #[test]
-    fn capital_s_in_a_popup_with_no_shepherd_says_to_open_the_view_as_a_pane() {
+    fn capital_s_does_nothing() {
+        let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
+        let mut app = app(&herdr, &ledger, now);
+        let before = app.options;
+
+        assert!(app.press(KeyCode::Char('S'), now).is_none());
+
+        assert_eq!(app.options, before);
+        assert!(!app.quit());
+        let shown = text(&render_tall(&app, now)).concat();
+        assert!(!shown.contains("bringing up the shepherd"), "{shown}");
+    }
+
+    #[test]
+    fn s_in_a_popup_with_no_shepherd_says_to_open_the_view_as_a_pane() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let state = tempfile::tempdir().unwrap();
         let mut app = app(&herdr, &ledger, now);
@@ -4594,18 +4608,18 @@ max = 3
     }
 
     #[test]
-    fn the_footer_lists_capital_s_for_the_shepherd_after_the_toggles() {
+    fn the_footer_lists_s_for_the_shepherd_after_the_toggles() {
         let (herdr, ledger, now) = (herdr(), ledger(), Instant::now());
         let terminal = render_at(&app(&herdr, &ledger, now), now, 100, 14);
-        assert_eq!(at(&terminal, "S shepherd").fg, LIGHT_ORANGE);
-        assert!(pos(&terminal, "a all").0 < pos(&terminal, "S shepherd").0);
+        assert_eq!(at(&terminal, "s shepherd").fg, LIGHT_ORANGE);
+        assert!(pos(&terminal, "a all").0 < pos(&terminal, "s shepherd").0);
     }
 
     #[test]
     fn while_the_shepherd_comes_up_the_view_says_so_not_that_herdr_is_slow() {
         let (herdr, ledger, t0) = (herdr(), ledger(), Instant::now());
         let mut app = app(&herdr, &ledger, t0);
-        app.press(KeyCode::Char('S'), t0);
+        app.press(KeyCode::Char('s'), t0);
         app.tick(t0 + POLL);
 
         let shown = text(&render_tall(&app, t0 + POLL * 5)).concat();
