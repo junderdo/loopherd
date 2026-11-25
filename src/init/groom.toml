@@ -13,7 +13,8 @@ You're {name}, in a detached worktree at {worktree}, grooming the {herd} herd's 
 
 Run `loopherd --skill --section groom` and follow it: it gives your rights, your limits and the
 report to send. Read docs/agents/issue-tracker.md and AGENTS.md first. List the unready tasks by
-running the command `loopherd herd get {herd} queue.backlog` prints, and read each @GROOM_READ@.
+running the shell command held in the TOML string `loopherd herd get {herd} queue.backlog` prints
+(the text inside its quotes, not the output as is), and read each @GROOM_READ@.
 
 Write each batch line's command in one of these forms, text escaped as the Groom section says:
 @GROOM_FORMS@

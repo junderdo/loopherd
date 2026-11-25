@@ -106,7 +106,8 @@ You're {name}, in a detached worktree at {worktree}, grooming the {herd} herd's 
 
 Run `loopherd --skill --section groom` and follow it: it gives your rights, your limits and the
 report to send. Read docs/agents/issue-tracker.md and AGENTS.md first. List the unready cards by
-running the command `loopherd herd get {herd} queue.backlog` prints, and read each with
+running the shell command held in the TOML string `loopherd herd get {herd} queue.backlog` prints
+(the text inside its quotes, not the output as is), and read each with
 `scripts/trello show LH-<n>`.
 
 Write each batch line's command in one of these forms, text escaped as the Groom section says:

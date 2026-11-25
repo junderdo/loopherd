@@ -6650,7 +6650,7 @@ fn the_github_groom_prompt_defers_to_the_skill_and_writes_batch_lines_as_gh_comm
     for expected in [
         "Run `loopherd --skill --section groom` and follow it".to_string(),
         "Read docs/agents/issue-tracker.md and AGENTS.md first.".into(),
-        "`loopherd herd get {herd} queue.backlog` prints".into(),
+        "running the shell command held in the TOML string `loopherd herd get {herd} queue.backlog` prints\n(the text inside its quotes, not the output as is)".into(),
         format!("`{gh} issue view <n> --repo acme/widgets --comments`"),
         format!("- mark ready: `{gh} issue edit <n> --repo acme/widgets --add-label ready-for-agent`"),
         format!("- needs spec: `{gh} issue comment <n> --repo acme/widgets --body \"<what's missing>\"`"),
@@ -6675,7 +6675,7 @@ fn the_local_groom_prompt_writes_batch_lines_that_edit_and_push_the_issue_file()
     let repo = fixture.repo().display().to_string();
     for expected in [
         "Run `loopherd --skill --section groom` and follow it".to_string(),
-        "`loopherd herd get {herd} queue.backlog` prints".into(),
+        "running the shell command held in the TOML string `loopherd herd get {herd} queue.backlog` prints\n(the text inside its quotes, not the output as is)".into(),
         format!(
             "Start each command with `cd '{repo}' && ([ \"$(git branch --show-current)\" = main ] \
              && git pull -q --ff-only origin main && [ -z \"$(git rev-list origin/main..HEAD)\" ] \
