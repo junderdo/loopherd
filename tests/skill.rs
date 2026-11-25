@@ -638,7 +638,7 @@ fn the_shepherd_tells_the_human_to_clear_and_send_any_message_with_the_paste_lin
 }
 
 #[test]
-fn with_self_restart_on_the_shepherd_arms_its_own_restart_and_warns_the_human() {
+fn unless_self_restart_is_set_off_the_shepherd_arms_its_own_restart_and_warns_the_human() {
     let home = tempfile::tempdir().unwrap();
     let printed = String::from_utf8(skill(home.path())).unwrap();
     let own = flat_section(
@@ -647,7 +647,7 @@ fn with_self_restart_on_the_shepherd_arms_its_own_restart_and_warns_the_human() 
         "\n### Notifying the human\n",
     );
     for part in [
-        "With `[shepherd] self_restart = true`",
+        "Self-restart is on unless `config.toml` sets `[shepherd] self_restart = false`",
         "first run `loopherd restart --self` in this turn",
         "you restart yourself in this pane in 5 minutes, and any prompt here stops that",
         "When it refuses, give the human its reason",
@@ -761,5 +761,19 @@ fn the_shepherd_starts_an_unled_herds_groomer_and_runs_only_the_approved_batch_l
         "run the command of each batch line the human approved, as written after its number, and no others",
     ] {
         assert!(triage.contains(rule), "Triage misses {rule:?}: {triage}");
+    }
+}
+
+#[test]
+fn a_lead_getting_ready_for_a_revive_keeps_its_watch_and_reports_every_handoff() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let lead = flat_section(&printed, "\n## Lead\n", "\n## Groom\n");
+    for rule in [
+        "**Getting ready for a revive.** Keep your watch armed and keep working until the human quits your Claude",
+        "Stopping background shells and Monitors applies only before `restart --self`",
+        "Any handoff you write, for any reason, is followed by `loopherd report --kind handoff`, never a plain `note`",
+    ] {
+        assert!(lead.contains(rule), "{rule}: {lead}");
     }
 }

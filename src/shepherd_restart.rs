@@ -1,5 +1,5 @@
-//! The shepherd restarting itself after its handoff, with `[shepherd]
-//! self_restart` on: `restart --self` from its pane arms a detached waiter,
+//! The shepherd restarting itself after its handoff, unless `[shepherd]
+//! self_restart = false`: `restart --self` from its pane arms a detached waiter,
 //! which sends `/clear` and then `go` into that pane once the turn has ended
 //! and the human has left it alone for [`WARNING`]. Any prompt from the human
 //! there cancels it; a restart that can't happen safely gives up and says so.

@@ -121,7 +121,8 @@ fn restart_wait_refuses_without_the_claim_self_restart_hands_it() {
 }
 
 /// The shepherd's handoff record naming pane w1:p1 and this test process as
-/// its Claude, a handoff written after it, the switch on and the hooks in.
+/// its Claude, a handoff written after it, the hooks in, and a config.toml
+/// with no `self_restart` key, so the switch is on by default.
 fn write_shepherd(state: &Path) {
     let me = std::process::id();
     let stat = fs::read_to_string(format!("/proc/{me}/stat")).unwrap();
@@ -148,11 +149,7 @@ fn write_shepherd(state: &Path) {
     )
     .unwrap();
     fs::create_dir_all(state.join("config")).unwrap();
-    fs::write(
-        state.join("config/config.toml"),
-        "[shepherd]\nself_restart = true\n",
-    )
-    .unwrap();
+    fs::write(state.join("config/config.toml"), "").unwrap();
     let settings = state.join("claude/settings.json");
     let out = run(
         state,
@@ -259,10 +256,14 @@ fn a_shepherd_wait_without_the_claim_leaves_the_running_waiters_restart_pending(
 }
 
 #[test]
-fn the_shepherds_restart_is_refused_with_the_switch_off() {
+fn the_shepherds_restart_is_refused_with_the_switch_set_off() {
     let state = tempfile::tempdir().unwrap();
     write_shepherd(state.path());
-    fs::write(state.path().join("config/config.toml"), "").unwrap();
+    fs::write(
+        state.path().join("config/config.toml"),
+        "[shepherd]\nself_restart = false\n",
+    )
+    .unwrap();
 
     let out = as_shepherd(state.path(), &["restart", "--self"], "");
 

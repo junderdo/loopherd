@@ -519,6 +519,26 @@ mod tests {
     }
 
     #[test]
+    fn the_shepherds_handoff_lists_reports_waiting_on_it_even_unwatched_ones() {
+        let own = section("\n### Your own handoff\n", "\n### Notifying the human\n");
+        for rule in [
+            "`loopherd reports --all --since <your last watch wake, or your session start>`",
+            "every `question` or `done` report you haven't acted on, gate requests included",
+            "who is waiting on what",
+            "whether or not a watch is armed",
+            "`reports --all` marks nothing read",
+        ] {
+            assert!(
+                own.contains(rule),
+                "Your own handoff misses {rule:?}: {own}"
+            );
+        }
+        let read = own.find("reports --all --since").unwrap();
+        let write = own.find("Write your handoff to").unwrap();
+        assert!(read < write, "reading reports comes after writing: {own}");
+    }
+
+    #[test]
     fn a_leads_handoff_stops_every_background_shell_not_only_its_watch() {
         let handoffs = section("\n### Handoffs\n", "\n### Your own handoff\n");
         let own = section("- **Your own handoff.**", "- **Your checkout**");
