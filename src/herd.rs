@@ -287,6 +287,9 @@ const FEED_LOCK_GRACE: Duration = Duration::from_secs(1);
 /// the paused herds' files.
 #[derive(Debug, Clone)]
 pub struct Paths {
+    /// Looks up the environment variables that move the human's credentials;
+    /// this process's own under [`Paths::from_env`]; tests supply their own.
+    pub env: fn(&str) -> Option<std::ffi::OsString>,
     pub herds: PathBuf,
     pub home: PathBuf,
     pub feed_lock: PathBuf,
@@ -315,6 +318,7 @@ impl Paths {
     pub fn from_env() -> Result<Paths> {
         let home = PathBuf::from(env_var("HOME").context("HOME is not set")?);
         Ok(Paths {
+            env: |name| std::env::var_os(name),
             herds: herds_dir().context("HOME is not set")?,
             home,
             feed_lock: FileLedger::default_path()?.with_file_name("feed.lock"),
@@ -354,6 +358,7 @@ impl Paths {
     /// Herd files, the feed lock and pauses under `root`; home is `/home/me`.
     pub fn under(root: &Path) -> Paths {
         Paths {
+            env: |_| None,
             herds: root.join("herds"),
             home: PathBuf::from("/home/me"),
             feed_lock: root.join("feed.lock"),
@@ -1751,6 +1756,7 @@ args = ["--model", "opus"]
 
         fn paths(&self) -> Paths {
             Paths {
+                env: |_| None,
                 herds: self.dir.path().join("herds"),
                 home: PathBuf::from("/home/me"),
                 feed_lock: self.dir.path().join("feed.lock"),
@@ -1783,6 +1789,17 @@ args = ["--model", "opus"]
 
     fn herdr() -> FakeHerdr {
         FakeHerdr::new(&[("w1", "loopherd"), ("w2", "my-app")])
+    }
+
+    #[test]
+    fn paths_from_the_env_look_up_this_processs_environment() {
+        // from_env needs a home to build its paths.
+        if env_var("HOME").is_none() {
+            return;
+        }
+        let paths = Paths::from_env().unwrap();
+
+        assert_eq!((paths.env)("HOME"), std::env::var_os("HOME"));
     }
 
     #[test]
