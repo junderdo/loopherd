@@ -185,7 +185,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D176](decisions/D176.md) | Builds D157's init re-run: `max` and `context_limit` change as TOML keys; checks, gh account, default branch and a switch to `merge_guard = "credentials"` are re-rendered and carried only where their lines read as init wrote them, probed before asking; a re-run refuses new-herd flags, `--no-lead` and an invalid herd. |
 | [D177](decisions/D177.md) | A lane whose read of the ledger fails just before it carries a request out leaves the request queued for a later round to decide, rather than refusing or running it. |
 | [D178](decisions/D178.md) | Amends D137. The model window table lists each known model explicitly (Mythos 5.x at 1M; Opus and Sonnet 4.6 at 200K) and any other id is unknown; `[context_windows] "<model>" = n` sets one model's window over `context_window`, and the unknown-model note names it. |
-| [D179](decisions/D179.md) | Amends D138. A left or above split counts only when herdr reports `swap.changed`; a view pane whose swap fails is closed and the view falls back to the popup with a note, and refocus uses the socket's `pane.focus` by ID. |
+| [D180](decisions/D180.md) | Amends D138. A left or above split counts only when herdr reports `swap.changed`; a view pane whose swap fails is closed and the view falls back to the popup with a note, and refocus uses the socket's `pane.focus` by ID. |
 
 ## Emerging model
 
