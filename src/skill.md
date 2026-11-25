@@ -761,7 +761,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   [<herd>]`, run by the human on a terminal: it offers each missing change
   with a diff and `Apply? [Y/n]`, and a no lands in the herd file's
   `declined`. Without a terminal it changes nothing and lists each herd's
-  pending ids.
+  pending ids. `loopherd init` re-run in the herd's repo asks the herd's
+  settings again, Enter keeping each, then makes the same offers.
 - **Remove a finished herd** with `loopherd herd remove <herd>` once the
   human says so: it deletes the herd file, its pause, its `[lead]`
   `prompt_file` (when that lies in the herds dir and no other herd file
