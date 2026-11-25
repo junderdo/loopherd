@@ -376,6 +376,7 @@ fn run_hook(command: &str, state: &Path, pane: Option<&str>, input: &str) -> Out
         .env("XDG_STATE_HOME", state)
         .env("HERDR_SOCKET_PATH", "/run/herdr/herdr.sock")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -441,6 +442,7 @@ fn run_tool_hook(command: &str, dir: &Path, pane: Option<&str>, bash: &str) -> O
         .env("LOOPHERD_CONFIG_DIR", dir.join("config"))
         .env("HERDR_SOCKET_PATH", "/run/herdr/herdr.sock")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());

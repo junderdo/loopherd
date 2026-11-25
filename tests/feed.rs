@@ -34,6 +34,7 @@ fn dry_run_needs_no_herdr_and_leaves_state_untouched() {
         .env("LOOPHERD_CONFIG_DIR", config.path())
         .env("PATH", bin.path())
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .env_remove("HERDR_WORKSPACE_ID")
         .output()
         .unwrap();

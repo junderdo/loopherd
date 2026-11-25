@@ -1450,6 +1450,7 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         .env("LOOPHERD_CONFIG_DIR", &config)
         .env("HERDR_SOCKET_PATH", &server.socket)
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .output()
         .unwrap();
     // Under another lead's Claude the watch refuses before it checks the hooks, so only
@@ -1477,6 +1478,7 @@ fn a_leads_running_watch_leaves_git_config_writable_in_other_worktrees() {
         .env("LOOPHERD_CONFIG_DIR", &config)
         .env("HERDR_SOCKET_PATH", &server.socket)
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .args(["lead", &herd, "--", "--permission-mode", "auto"])
         .output()
         .unwrap();

@@ -48,6 +48,7 @@ fn loopherd_in(state: &Path, pane: Option<(&str, &str)>, args: &[&str]) -> Comma
         // Printed times are UTC whatever the local zone.
         .env("TZ", "America/New_York")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .env_remove("HERDR_SOCKET_PATH");
     if let Some((pane, socket)) = pane {
         cmd.env("HERDR_PANE_ID", pane)

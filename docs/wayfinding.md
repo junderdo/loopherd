@@ -167,6 +167,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D152](decisions/D152.md) | A watch says `<member> stalled  paused <n>m: <in flight>`, once per streak keyed by the stop, when a member's last stop was paused, nothing came since, and herdr has shown it idle past its herd's top-level `stalled_after` (minutes, default 30, at least 1). A lead's watch covers its workers; the shepherd's, leads and members of unled herds. `status` shows `stalled <n>m`. |
 | [D153](decisions/D153.md) | Supersedes the key choice in D88 and D146. In `loopherd view`, `s` starts or focuses the shepherd (as `S` did), `x` toggles strays (as `s` did), and `S` is unbound. |
 | [D154](decisions/D154.md) | `install.sh` takes no options, superseding D135's flags: any argument exits nonzero saying it asks as it installs; every offer is asked on `/dev/tty`, and without one each is skipped saying to run the installer again in a terminal. `LOOPHERD_NO_SPLASH` and `LOOPHERD_VERSION` keep working. |
+| [D157](decisions/D157.md) | Amends D149. `loopherd gate` runs its commands without `LOOPHERD_BROKER_OF`, keeping the broker's `PATH` and credentials; after-merge commands keep it. Every test helper that spawns `loopherd` removes it, so `cargo test` behaves the same inside a broker. |
 
 ## Emerging model
 

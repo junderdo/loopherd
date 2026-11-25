@@ -38,6 +38,7 @@ fn retire(state: &Path) -> Output {
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("PATH", "")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .output()
         .unwrap()
 }
@@ -152,6 +153,7 @@ fn shell_in(state: &Path, pane: Option<&str>, script: &str) -> Output {
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("PATH", format!("{}:/usr/bin:/bin", bin_dir.display()))
         .env("HERDR_SOCKET_PATH", SOCKET);
+    cmd.env_remove("LOOPHERD_BROKER_OF");
     match pane {
         Some(pane) => cmd.env("HERDR_PANE_ID", pane),
         None => cmd.env_remove("HERDR_PANE_ID"),
@@ -304,6 +306,7 @@ esac
         .env("CLAUDE_CONFIG_DIR", state.join("claude"))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .env_remove("HERDR_SOCKET_PATH")
         .output()
         .unwrap()
@@ -625,6 +628,7 @@ fn a_credentials_herds_broker_without_its_token_fails_to_start_naming_the_fix() 
         .env("XDG_STATE_HOME", state.path())
         .env("LOOPHERD_CONFIG_DIR", state.path().join("config"))
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .output()
         .unwrap();
 
