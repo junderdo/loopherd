@@ -79,7 +79,7 @@ Init never launches an agent.
    `references/herd-file.md` explains each key of the herd file and the
    lead prompt.
 5. Edit only what init wrote: the herd file (with `loopherd herd set`), the
-   lead's prompt file beside it, and the repo files init listed. Leave the
+   lead's and grill's prompt files beside it, and the repo files init listed. Leave the
    rest of the repo and other herds alone.
 6. You're done when `loopherd herds` calls the herd valid and
    `loopherd feed <herd> --dry-run` lists the tasks you expect from the

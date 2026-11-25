@@ -33,6 +33,44 @@ const PLACEHOLDER_SOURCE: &str = include_str!("init/placeholder-source.toml");
 const MERGED_GITHUB: &str = include_str!("init/merged-github.toml");
 const LEAD: &str = include_str!("init/lead.md");
 const GROOM: &str = include_str!("init/groom.toml");
+const GITHUB_DONE: &str = include_str!("init/github-done.toml");
+const LOCAL_DONE: &str = include_str!("init/local-done.toml");
+const OTHER_DONE: &str = include_str!("init/other-done.toml");
+const GRILL: &str = include_str!("init/grill.toml");
+const GRILL_PROMPT: &str = include_str!("init/grill.md");
+
+const GRILL_PUSH: &str = "push the branch as @ACCOUNT@:
+  `@GH_TOKEN@ git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+  Open a PR with `@GH_TOKEN@ gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title \"<title>\" --body \"<summary>\"`";
+const GITHUB_GRILL_READ: &str = "the issue and every comment:
+`@GH_TOKEN@ gh issue view {number} --repo @OWNER_REPO@ --comments`.";
+const GITHUB_GRILL_CLAIM: &str =
+    "`@GH_TOKEN@ gh issue comment {number} --repo @OWNER_REPO@ --body \"claimed by {name}\"`,
+then `@GH_TOKEN@ gh issue edit {number} --repo @OWNER_REPO@ --add-assignee @ACCOUNT@`.";
+const GITHUB_GRILL_HAND_IN: &str = "When the human agrees the outcome, @GRILL_PUSH@,
+  the body ending with the line `Closes #{number}`.";
+const LOCAL_GRILL_READ: &str = "{path} in full, comments
+included. The issue is a markdown file in the repo; its `Status:` line near
+the top holds its triage state, and comments go under a `## Comments`
+heading at the bottom.";
+const LOCAL_GRILL_CLAIM: &str = "set its `Status:` line to
+`claimed`, append `claimed by {name}` under `## Comments` (adding the heading
+if it's missing), and commit.";
+const LOCAL_GRILL_RESOLVE: &str =
+    "When the human agrees the outcome, set {path}'s `Status:` line to
+  `resolved`, append a one-line summary under `## Comments` and commit, so
+  the issue closes when your branch merges. Then";
+const LOCAL_GRILL_PR: &str = "@GRILL_PUSH@.";
+const LOCAL_GRILL_PUSH: &str = "push the branch with
+  `git push -u origin HEAD`. Open no pull request; the human merges the
+  branch into @BRANCH@.";
+const OTHER_GRILL_READ: &str = "task {number} and every comment on it. (fill in)";
+const OTHER_GRILL_CLAIM: &str = "comment `claimed by {name}` on task {number}. (fill in)";
+const OTHER_GRILL_PR: &str = "When the human agrees the outcome, @GRILL_PUSH@.
+  Link it on task {number}, so the task closes when the PR merges. (fill in)";
+const OTHER_GRILL_PUSH: &str = "When the human agrees the outcome, push the branch with
+  `git push -u origin HEAD`, open no pull request, and hand it in on task
+  {number}, so the task closes when the human merges it into @BRANCH@. (fill in)";
 
 const GITHUB_GROOM_READ: &str =
     "with `@GH_TOKEN@ gh issue view <n> --repo @OWNER_REPO@ --comments`";
@@ -165,9 +203,9 @@ struct Herd {
     groom: bool,
 }
 
-/// Writes the herd file and its lead prompt and creates missing labels,
+/// Writes the herd file, its lead and grill prompts and creates missing labels,
 /// returning what it did and the next steps. Refuses, changing nothing,
-/// when either file exists. On a terminal it asks for each value, showing
+/// when any of them exists. On a terminal it asks for each value, showing
 /// what it inferred, and confirms before writing.
 pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
     let ask = ask::Asker {
@@ -884,7 +922,7 @@ fn summary(herd: &Herd) -> String {
     format!(
         "\nHerd {name}:\n  repo    {repo}\n  {branch}\n  \
          max     {max} workers at once\n  lead    {lead}\n  limit   {limit}\n  checks  {checks}\n  \
-         groom   {groom}\n{also}{no_merged}",
+         groom   {groom}\n  also    grill (attended)\n{also}{no_merged}",
         name = herd.name,
         repo = herd.repo.display(),
         max = herd.max,
@@ -898,7 +936,7 @@ fn summary(herd: &Herd) -> String {
     )
 }
 
-/// The lead prompt, when the herd has a lead, then the herd file, each with its text.
+/// The lead prompt, when the herd has a lead, the grill prompt, then the herd file, each with its text.
 fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     let Herd {
         repo,
@@ -1079,7 +1117,15 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
     };
     let lead_tasks = fill(&lead_tasks, &values);
     values.push(("MERGED", merged.trim_end()));
+    let done = match tracker.kind {
+        tracker::Kind::GitHub => GITHUB_DONE,
+        tracker::Kind::Local => LOCAL_DONE,
+        tracker::Kind::Other => OTHER_DONE,
+    };
+    let issue_done = fill(done, &values);
+    values.push(("DONE", issue_done.trim_end()));
     let template = fill(template, &values);
+    let (grill, grill_prompt) = grill(herd, &values, done);
     let lead_table = match herd.lead {
         true => format!("\n{}", fill(LEAD_TABLE, &values)),
         false => String::new(),
@@ -1093,11 +1139,95 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Vec<(PathBuf, String)>> {
         false => String::new(),
     };
     values.push(("GROOM", &groom));
+    values.push(("GRILL", &grill));
     let lead = herd.lead.then(|| (lead_file, fill(LEAD, &values)));
     Ok(lead
         .into_iter()
-        .chain([(herd_file, fill(HERD, &values))])
+        .chain([
+            (grill_file(paths, name), grill_prompt),
+            (herd_file, fill(HERD, &values)),
+        ])
         .collect())
+}
+
+fn grill_file(paths: &Paths, herd: &str) -> PathBuf {
+    paths.herds.join(format!("{herd}-grill.md"))
+}
+
+/// The `[template.grill]`, led by a blank line, and its prompt, for the herd's tracker.
+fn grill(herd: &Herd, values: &[(&str, &str)], done: &str) -> (String, String) {
+    let github = herd.github.is_some();
+    let pick = |with: &'static str, without: &'static str| if github { with } else { without };
+    let (key, params, usage, issue, read, claim, hand_in) = match herd.tracker.kind {
+        tracker::Kind::GitHub => (
+            "number",
+            r#"["number", "slug"]"#,
+            "<number> <slug>",
+            "GitHub issue #{number} of @OWNER_REPO@",
+            GITHUB_GRILL_READ,
+            GITHUB_GRILL_CLAIM,
+            GITHUB_GRILL_HAND_IN.to_string(),
+        ),
+        tracker::Kind::Local => (
+            "id",
+            r#"["id", "slug", "path"]"#,
+            "<id> <slug> <path>",
+            "the local issue {path}",
+            LOCAL_GRILL_READ,
+            LOCAL_GRILL_CLAIM,
+            format!(
+                "{LOCAL_GRILL_RESOLVE} {}",
+                pick(LOCAL_GRILL_PR, LOCAL_GRILL_PUSH)
+            ),
+        ),
+        tracker::Kind::Other => (
+            "number",
+            r#"["number", "slug"]"#,
+            "<number> <slug>",
+            "task {number}",
+            OTHER_GRILL_READ,
+            OTHER_GRILL_CLAIM,
+            pick(OTHER_GRILL_PR, OTHER_GRILL_PUSH).to_string(),
+        ),
+    };
+    let push = fill(GRILL_PUSH, values);
+    let values = [values, &[("GRILL_PUSH", push.as_str())]].concat();
+    // A grill takes the worker's context limit from the herd's default, not the issue's.
+    let done = fill(
+        done,
+        &[&[("CONTEXT_LIMIT", "")], values.as_slice()].concat(),
+    );
+    let merged = values
+        .iter()
+        .find(|(k, _)| *k == "MERGED")
+        .map_or("", |(_, v)| *v);
+    let checks = [done.trim_end(), merged]
+        .into_iter()
+        .filter(|check| !check.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let prompt_file = toml_string(&format!("{}-grill.md", herd.name));
+    let snippets = [issue, read, claim, &hand_in].map(|text| fill(text, &values));
+    let values = [
+        values.as_slice(),
+        &[
+            ("GRILL_KEY", key),
+            ("GRILL_PARAMS", params),
+            ("GRILL_USAGE", usage),
+            ("GRILL_CHECKS", &checks),
+            ("GRILL_PROMPT", &prompt_file),
+            ("GRILL_ISSUE", &snippets[0]),
+            ("GRILL_READ", &snippets[1]),
+            ("GRILL_CLAIM", &snippets[2]),
+            ("GRILL_HAND_IN", &snippets[3]),
+            ("TRACKER_DOC", tracker::TRACKER_DOC),
+        ],
+    ]
+    .concat();
+    (
+        format!("\n{}", fill(GRILL, &values)),
+        fill(GRILL_PROMPT, &values),
+    )
 }
 
 /// The `[template.groom]` for the herd's tracker.
@@ -1161,6 +1291,7 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
     if herd.lead {
         lines.push(format!("wrote {}", lead_file.display()));
     }
+    lines.push(format!("wrote {}", grill_file(paths, name).display()));
     lines.extend(herd.docs.iter().map(agents::Doc::done));
     let mut steps = vec![format!(
         "Open Claude in {} once and accept its trust dialog; members can't start past \
@@ -1184,6 +1315,11 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
                 lead_file.display()
             ));
         }
+        steps.push(format!(
+            "{FILL_IN}, in {}: [template.grill] done, and in {} each line marked (fill in).",
+            herd_file.display(),
+            grill_file(paths, name).display()
+        ));
         steps.push(
             "Fill in each section of docs/agents/loopherd.md marked (fill in), or adapt the \
              doc to the same tracker if it was already there."
@@ -1315,6 +1451,13 @@ fn refuse_taken_name(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
         bail!(
             "{} already exists; init never replaces a herd file",
             herd_file.display()
+        );
+    }
+    let grill_file = grill_file(paths, herd);
+    if fs::symlink_metadata(&grill_file).is_ok() {
+        bail!(
+            "{} already exists; init never replaces a grill prompt",
+            grill_file.display()
         );
     }
     Ok(())

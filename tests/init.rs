@@ -123,21 +123,26 @@ impl Fixture {
         self.run(Command::new(env!("CARGO_BIN_EXE_loopherd")).args(args))
     }
 
-    /// `loopherd init` under a file-size limit that `file`, the lead prompt or
-    /// the herd file, outgrows; the limit comes from what init writes here.
+    /// `loopherd init` under a file-size limit that `file` outgrows but every
+    /// file init writes before it fits; the limit comes from what init writes here.
     fn init_failing_to_write(&self, file: &str) -> Output {
         assert_ok(&self.init(&[]));
-        let size = |name: &str| fs::metadata(self.herds().join(name)).unwrap().len();
-        let (lead, herd) = (size("widgets-lead.md"), size("widgets.toml"));
+        let order = ["widgets-lead.md", "widgets-grill.md", "widgets.toml"];
+        let sizes: Vec<u64> = order
+            .iter()
+            .map(|name| fs::metadata(self.herds().join(name)).unwrap().len())
+            .collect();
+        let at = order.iter().position(|name| *name == file).unwrap();
         fs::remove_dir_all(self.herds()).unwrap();
         // ulimit -f counts 512-byte blocks.
-        let blocks = match file {
-            "widgets-lead.md" => (lead - 1) / 512,
-            _ => lead.div_ceil(512),
+        let blocks = match sizes[..at].iter().max() {
+            None => (sizes[at] - 1) / 512,
+            Some(earlier) => earlier.div_ceil(512),
         };
         assert!(
-            file == "widgets-lead.md" || herd > blocks * 512,
-            "the herd file ({herd} bytes) fits in the lead prompt's {blocks} blocks"
+            sizes[at] > blocks * 512,
+            "{file} ({} bytes) fits in the {blocks} blocks the files before it need",
+            sizes[at]
         );
         let mut command = Command::new("sh");
         command
@@ -429,6 +434,10 @@ fn init_prints_the_files_it_wrote_and_the_next_steps() {
             "wrote {}",
             fixture.herds().join("widgets-lead.md").display()
         ),
+        format!(
+            "wrote {}",
+            fixture.herds().join("widgets-grill.md").display()
+        ),
         "trust dialog".into(),
         "init never accepts it for you".into(),
         "\"Setting up a project\" in `loopherd --skill`".into(),
@@ -639,6 +648,20 @@ fn a_rerun_naming_a_herd_that_runs_another_repo_is_refused() {
          pass --herd <name> to name this repo's herd\n"
     );
     assert_eq!(fixture.config_listing(), before);
+}
+
+#[test]
+fn init_recreates_a_herd_after_herd_remove() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    assert_ok(&fixture.loopherd(&["herd", "remove", "widgets"]));
+
+    let out = fixture.init(&[]);
+
+    assert_ok(&out);
+    for file in ["widgets.toml", "widgets-lead.md", "widgets-grill.md"] {
+        assert!(fixture.herds().join(file).is_file(), "{file}");
+    }
 }
 
 #[test]
@@ -1114,6 +1137,45 @@ fn a_failed_lead_prompt_write_leaves_no_file() {
         text(&out.stderr)
     );
     assert!(!fixture.herds().exists());
+}
+
+#[test]
+fn a_failed_grill_prompt_write_leaves_no_file() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_failing_to_write("widgets-grill.md");
+
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        text(&out.stderr).starts_with(&format!(
+            "loopherd init: write {}",
+            fixture.herds().join("widgets-grill.md").display()
+        )),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!fixture.herds().exists());
+}
+
+#[test]
+fn init_refuses_changing_nothing_when_the_grill_prompt_exists() {
+    let fixture = Fixture::new(&["acme"]);
+    fs::create_dir_all(fixture.herds()).unwrap();
+    fs::write(fixture.herds().join("widgets-grill.md"), "mine").unwrap();
+    let before = fixture.config_listing();
+
+    let out = fixture.init(&[]);
+
+    assert_eq!(out.status.code(), Some(1));
+    assert_eq!(
+        text(&out.stderr),
+        format!(
+            "loopherd init: {} already exists; init never replaces a grill prompt\n",
+            fixture.herds().join("widgets-grill.md").display()
+        )
+    );
+    assert_eq!(fixture.config_listing(), before);
+    assert_eq!(fixture.gh_calls(), "");
 }
 
 #[test]
@@ -1814,14 +1876,23 @@ fn with_a_placeholder_source_the_next_steps_fill_it_before_feeding() {
         "{next}"
     );
     assert!(
-        next.contains("  6. Tailor the herd to the repo per \"Setting up a project\""),
+        next.contains(&format!(
+            "  4. Fill in from docs/agents/issue-tracker.md, in {}: [template.grill] done, \
+             and in {} each line marked (fill in).",
+            fixture.herds().join("widgets.toml").display(),
+            fixture.herds().join("widgets-grill.md").display()
+        )),
         "{next}"
     );
     assert!(
-        next.contains("  7. Review and commit what init wrote in the repo"),
+        next.contains("  7. Tailor the herd to the repo per \"Setting up a project\""),
         "{next}"
     );
-    assert!(next.contains(" 10. loopherd lead widgets"), "{next}");
+    assert!(
+        next.contains("  8. Review and commit what init wrote in the repo"),
+        "{next}"
+    );
+    assert!(next.contains("  11. loopherd lead widgets"), "{next}");
 }
 
 #[test]
@@ -5019,6 +5090,28 @@ fn diff_shows_a_missing_lead_prompt_and_repo_doc_as_whole_new_files() {
 }
 
 #[test]
+fn diff_shows_a_missing_grill_prompt_as_a_whole_new_file() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    let grill_file = fixture.herds().join("widgets-grill.md");
+    let grill = fs::read_to_string(&grill_file).unwrap();
+    fs::remove_file(&grill_file).unwrap();
+
+    let out = fixture.init(&["--diff"]);
+
+    assert_eq!(out.status.code(), Some(1), "{}", text(&out.stderr));
+    let added: String = grill.lines().map(|line| format!("+{line}\n")).collect();
+    assert_eq!(
+        text(&out.stdout),
+        format!(
+            "--- /dev/null\n+++ {} (init now)\n@@ -0,0 +1,{} @@\n{added}",
+            grill_file.display(),
+            grill.lines().count()
+        )
+    );
+}
+
+#[test]
 fn diff_shows_drift_in_a_repo_doc_init_wrote() {
     let fixture = Fixture::new(&["acme"]);
     assert_ok(&fixture.init(&[]));
@@ -5321,9 +5414,10 @@ fn diff_reads_back_the_repo_from_a_merged_that_starts_with_gh() {
     let init = fixture.init(&["--repo", "acme/widgets", "--merge-guard", "credentials"]);
     assert_ok(&init);
     let herd_file = fixture.herds().join("widgets.toml");
-    let bare = fs::read_to_string(&herd_file).unwrap().replace(
+    let bare = fs::read_to_string(&herd_file).unwrap().replacen(
         "merged = \"GH_TOKEN=${{GH_TOKEN:-$(gh auth token --user acme)}} gh pr list",
         "merged = \"gh pr list",
+        1,
     );
     fs::write(&herd_file, &bare).unwrap();
 
@@ -5577,7 +5671,13 @@ fn an_other_tracker_names_no_github_issue_and_marks_what_to_fill() {
                 "  3. Fill in from docs/agents/issue-tracker.md, in {}: the line marked (fill in).",
                 lead_file.display()
             ),
-            "  4. Fill in each section of docs/agents/loopherd.md marked (fill in), or adapt the \
+            format!(
+                "  4. Fill in from docs/agents/issue-tracker.md, in {}: [template.grill] done, \
+                 and in {} each line marked (fill in).",
+                herd_file.display(),
+                fixture.herds().join("widgets-grill.md").display()
+            ),
+            "  5. Fill in each section of docs/agents/loopherd.md marked (fill in), or adapt the \
                  doc to the same tracker if it was already there."
                 .to_string(),
         ] {
@@ -6644,4 +6744,228 @@ fn without_a_terminal_init_explains_nothing() {
 
     assert_ok(&out);
     assert_eq!(text(&out.stderr), "");
+}
+
+fn grill_template(fixture: &Fixture) -> toml::Table {
+    herd_toml(fixture)["template"]["grill"]
+        .as_table()
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn every_tracker_gets_an_attended_grill_with_the_issue_templates_done_and_merged() {
+    let desc = "Issues live in Linear, team WID.";
+    for (args, params, name, branch) in [
+        (
+            &["--tracker", "github"][..],
+            &["number", "slug"][..],
+            "{herd}-grill-{number}",
+            "docs/{number}-{slug}",
+        ),
+        (
+            &["--tracker", "local"][..],
+            &["id", "slug", "path"][..],
+            "{herd}-grill-{id}",
+            "docs/{id}-{slug}",
+        ),
+        (
+            &["--tracker", "local", "--no-github"][..],
+            &["id", "slug", "path"][..],
+            "{herd}-grill-{id}",
+            "docs/{id}-{slug}",
+        ),
+        (
+            &["--tracker", "other", "--tracker-desc", desc][..],
+            &["number", "slug"][..],
+            "{herd}-grill-{number}",
+            "docs/{number}-{slug}",
+        ),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        match args {
+            [.., "--no-github"] => fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES),
+            [_, "local"] => drop(fixture.push_local_issues(LOCAL_ISSUES)),
+            _ => {}
+        }
+        assert_ok(&fixture.init(args));
+
+        let grill = grill_template(&fixture);
+        let issue = herd_toml(&fixture)["template"]["issue"].clone();
+        let params: Vec<toml::Value> = params.iter().map(|p| (*p).into()).collect();
+        assert_eq!(grill["params"], toml::Value::Array(params), "{args:?}");
+        assert_eq!(grill["attended"], true.into(), "{args:?}");
+        assert_eq!(grill["name"], name.into(), "{args:?}");
+        assert_eq!(grill["branch"], branch.into(), "{args:?}");
+        assert_eq!(grill["prompt_file"], "widgets-grill.md".into(), "{args:?}");
+        assert_eq!(grill.get("done"), issue.get("done"), "{args:?}");
+        assert_eq!(grill.get("merged"), issue.get("merged"), "{args:?}");
+        assert_eq!(
+            grill.contains_key("merged"),
+            !args.contains(&"--no-github"),
+            "{args:?}"
+        );
+        assert_eq!(
+            grill.contains_key("done"),
+            !args.contains(&"other"),
+            "{args:?}"
+        );
+        if !args.contains(&"other") {
+            assert_ok(&fixture.loopherd(&["herds"]));
+        }
+    }
+}
+
+#[test]
+fn on_a_terminal_the_summary_lists_the_attended_grill() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("  groom   yes\r\n  also    grill (attended)\r\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn herds_shows_the_grill_attended_outside_the_queue_and_the_herd_valid() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+
+    let herds = fixture.loopherd(&["herds"]);
+
+    assert_ok(&herds);
+    let shown = text(&herds.stdout);
+    assert!(
+        shown.contains("  loopherd add widgets grill <number> <slug>  (attended)\n"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains("  loopherd feed widgets  (template issue, max 3)\n"),
+        "{shown}"
+    );
+    assert!(!shown.contains("warning"), "{shown}");
+}
+
+fn grill_prompt(fixture: &Fixture) -> String {
+    fs::read_to_string(fixture.herds().join("widgets-grill.md")).unwrap()
+}
+
+fn assert_has(text: &str, expected: &[&str]) {
+    for expected in expected {
+        assert!(text.contains(expected), "missing {expected:?} in\n{text}");
+    }
+}
+
+#[test]
+fn the_grill_prompt_claims_waits_grills_records_hands_in_and_focuses_the_shepherd() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+
+    let prompt = grill_prompt(&fixture);
+
+    assert_has(
+        &prompt,
+        &[
+            "You're {name}, grilling GitHub issue #{number} of acme/widgets\n\
+             live with the human in this pane, on branch {branch} in {worktree}.",
+            "`GH_TOKEN=$(gh auth token --user acme) gh issue view {number} --repo acme/widgets --comments`",
+            "Claim it first",
+            "`GH_TOKEN=$(gh auth token --user acme) gh issue comment {number} --repo acme/widgets \
+             --body \"claimed by {name}\"`",
+            "--add-assignee acme`",
+            "Once claimed, end your turn without asking anything: the shepherd sends\n\
+             background next with `loopherd tell`",
+            "invoke the `grilling` skill",
+            "If it isn't\ninstalled: ask one question at a time, each with your recommended answer;",
+            "(\"batch the rest\")",
+            "(\"discuss 3\")",
+            "where AGENTS.md or the repo's docs say decisions go",
+            "`docs/adr/<NNNN>-<slug>.md`",
+            "Show the human each implementation issue you'd file, in full, before\n  filing it",
+            "suggest `/wayfinder`\n(mattpocock-skills)",
+            "push -u origin HEAD`",
+            "gh pr create --repo acme/widgets --base main --head {branch} --assignee acme",
+            "the body ending with the line `Closes #{number}`.",
+            "`herdr agent focus {shepherd_pane}`",
+            "Do no close-out after the merge",
+        ],
+    );
+    let claim = prompt.find("Claim it first").unwrap();
+    let wait = prompt.find("Once claimed, end your turn").unwrap();
+    let grill = prompt.find("invoke the `grilling` skill").unwrap();
+    assert!(claim < wait && wait < grill, "{prompt}");
+}
+
+#[test]
+fn the_grill_fallback_is_at_most_four_lines() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+
+    let prompt = grill_prompt(&fixture);
+
+    let fallback = prompt
+        .split("\n\n")
+        .find(|paragraph| paragraph.contains("If it isn't\ninstalled"))
+        .unwrap();
+    assert!(fallback.lines().count() <= 4, "{fallback}");
+}
+
+#[test]
+fn a_local_grill_resolves_its_issue_on_the_branch_and_hands_it_in_as_the_herd_does() {
+    for (no_github, hand_in) in [
+        (
+            false,
+            "gh pr create --repo acme/widgets --base main --head {branch} --assignee acme",
+        ),
+        (
+            true,
+            "push the branch with\n  `git push -u origin HEAD`. Open no pull request",
+        ),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+        let mut args = vec!["--tracker", "local"];
+        match no_github {
+            true => {
+                fixture.push_local_issues_to_plain_origin(LOCAL_ISSUES);
+                args.push("--no-github");
+            }
+            false => drop(fixture.push_local_issues(LOCAL_ISSUES)),
+        }
+        assert_ok(&fixture.init(&args));
+
+        let prompt = grill_prompt(&fixture);
+
+        assert_has(
+            &prompt,
+            &[
+                "grilling the local issue {path}",
+                "then {path} in full, comments\nincluded.",
+                "set its `Status:` line to\n`claimed`, append `claimed by {name}`",
+                "set {path}'s `Status:` line to\n  `resolved`",
+                hand_in,
+            ],
+        );
+        assert_eq!(prompt.contains("gh "), !no_github, "{prompt}");
+    }
+}
+
+#[test]
+fn an_other_trackers_grill_prompt_marks_each_tracker_command_to_fill_in() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--tracker", "other", "--tracker-desc", "Linear"]));
+
+    let prompt = grill_prompt(&fixture);
+
+    assert_has(
+        &prompt,
+        &[
+            "then task {number} and every comment on it. (fill in)",
+            "comment `claimed by {name}` on task {number}. (fill in)",
+            "Link it on task {number}, so the task closes when the PR merges. (fill in)",
+        ],
+    );
 }
