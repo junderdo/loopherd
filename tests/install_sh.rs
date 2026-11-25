@@ -709,6 +709,23 @@ impl Release {
         );
     }
 
+    /// A `herdr` on PATH that logs its arguments and lists no loopherd plugin;
+    /// its `plugin install --help` names `--ref` when `takes_ref`.
+    fn herdr_without_plugin(&self, takes_ref: bool) {
+        let help = if takes_ref {
+            "      --ref <REF>"
+        } else {
+            "  -y, --yes"
+        };
+        executable(
+            &self.fake_bin.join("herdr"),
+            format!(
+                "#!/bin/sh\necho \"herdr $*\" >> '{log}'\ncase \"$*\" in\n  --version) echo 'herdr 0.9.5' ;;\n  'plugin install --help') echo '{help}' ;;\n  'plugin list'*) echo '{{\"result\":{{\"plugins\":[]}}}}' ;;\nesac\n",
+                log = self.herdr_log().display(),
+            ),
+        );
+    }
+
     fn herdr_log(&self) -> PathBuf {
         self.dir.path().join("herdr-log")
     }
@@ -717,7 +734,11 @@ impl Release {
         fs::read_to_string(self.herdr_log())
             .unwrap_or_default()
             .lines()
-            .filter(|call| !call.starts_with("herdr plugin list") && *call != "herdr --version")
+            .filter(|call| {
+                !call.starts_with("herdr plugin list")
+                    && *call != "herdr --version"
+                    && *call != "herdr plugin install --help"
+            })
             .map(String::from)
             .collect()
     }
@@ -755,7 +776,7 @@ fn on_a_terminal_yes_updates_an_older_herdr_plugin() {
     let ours = shipped_plugin_version();
     assert!(
         said.contains(&format!(
-            "Update loopherd's herdr plugin (installed 0.1.1, this checkout {ours})? [y/N]"
+            "Update loopherd's herdr plugin (installed 0.1.1, this release {ours})? [y/N]"
         )),
         "{said}"
     );
@@ -794,7 +815,7 @@ fn on_a_terminal_a_current_newer_or_linked_herdr_plugin_is_left_as_is() {
             "999.0.0",
             "github",
             format!(
-                "loopherd's herdr plugin 999.0.0 is newer than this checkout's {ours}; left as is"
+                "loopherd's herdr plugin 999.0.0 is newer than this release's {ours}; left as is"
             ),
         ),
         (
@@ -872,4 +893,42 @@ fn an_update_refreshes_the_agent_types_loopherd_installed_and_names_the_skills_u
         "{said}"
     );
     assert!(!said.contains("[y/N]"), "{said}");
+}
+
+#[test]
+fn on_a_terminal_yes_installs_the_herdr_plugin_at_the_installed_release() {
+    let release = Release::new("Linux", "x86_64");
+    release.herdr_without_plugin(true);
+
+    let Some(said) = release.install_on_terminal(&[NO_SPLASH], "n\ny\nn\n") else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    assert_eq!(
+        release.herdr_changes(),
+        vec!["herdr plugin install junderdo/loopherd/herdr-plugin --ref v0.2.0".to_string()],
+        "{said}"
+    );
+}
+
+#[test]
+fn a_herdr_that_cant_install_at_a_ref_installs_the_default_branch_and_says_so() {
+    let release = Release::new("Linux", "x86_64");
+    release.herdr_without_plugin(false);
+
+    let Some(said) = release.install_on_terminal(&[NO_SPLASH], "n\ny\nn\n") else {
+        eprintln!("skipped: needs util-linux script");
+        return;
+    };
+
+    assert!(
+        said.contains("herdr 0.9.5 can't install a plugin at a ref, so loopherd's herdr plugin comes from GitHub's default branch, not v0.2.0"),
+        "{said}"
+    );
+    assert_eq!(
+        release.herdr_changes(),
+        vec!["herdr plugin install junderdo/loopherd/herdr-plugin".to_string()],
+        "{said}"
+    );
 }

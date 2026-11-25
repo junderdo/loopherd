@@ -75,16 +75,23 @@ verify() {
     die "checksum mismatch for $2 (expected $expected, got $actual); installed nothing"
 }
 
-# Usage: record_install <tag or empty for the latest>.
+# Usage: installed_tag <tag or empty for the latest>. Prints the installed
+# release's tag, empty when the binary doesn't say.
+installed_tag() {
+  tag=$1
+  [ -n "$tag" ] || tag=$("$bin_dir/loopherd" --version </dev/null | awk '{ print $2 }')
+  case "$tag" in
+    "" | v*) ;;
+    *) tag=v$tag ;;
+  esac
+  echo "$tag"
+}
+
+# Usage: record_install <tag>.
 record_install() {
   [ -z "${LOOPHERD_RELEASE_BASE:-}" ] || return 0
   tag=$1
-  [ -n "$tag" ] || tag=$("$bin_dir/loopherd" --version </dev/null | awk '{ print $2 }')
   [ -n "$tag" ] || return 0
-  case "$tag" in
-    v*) ;;
-    *) tag=v$tag ;;
-  esac
   config=${LOOPHERD_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/loopherd}
   mkdir -p "$config"
   printf 'kind = "release"\ntag = "%s"\n' "$tag" >"$config/install.toml.tmp"
@@ -128,7 +135,7 @@ run_extras() {
       say "an extra failed to update (said above); the rest of the install is unaffected"
   else
     LOOPHERD_EXTRAS_NO_TERMINAL="run this installer again in a terminal to be asked" \
-      bash "$extras" offers ask ask ask ask "$bin_dir/loopherd" <"$tty" ||
+      LOOPHERD_EXTRAS_RELEASE=$tag bash "$extras" offers ask ask ask ask "$bin_dir/loopherd" <"$tty" ||
       say "an extra failed to install (said above); the rest of the install is unaffected"
   fi
 }
@@ -169,7 +176,8 @@ main() {
   # A rename, so a running loopherd or a hook mid-call never sees a half-copied file.
   mv -f "$tmp" "$bin_dir/loopherd"
   say "installed $bin_dir/loopherd"
-  record_install "$version"
+  tag=$(installed_tag "$version")
+  record_install "$tag"
 
   # </dev/null: under `curl | sh` stdin is this script. Setup reads /dev/tty.
   "$bin_dir/loopherd" install-hook </dev/null

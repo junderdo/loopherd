@@ -9,6 +9,7 @@
 # terminal, ask skips, naming the scripts/install flag that adds the extra, or
 # printing the text of LOOPHERD_EXTRAS_NO_TERMINAL when it's set. Agents and skills also take
 # update, which refreshes only what is already installed.
+# LOOPHERD_EXTRAS_RELEASE, set by install.sh, names the release tag whose herdr plugin to install.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

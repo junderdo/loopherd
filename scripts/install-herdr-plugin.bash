@@ -2,15 +2,18 @@
 # registers without touching the human's herdr config (docs/decisions/D126.md).
 
 herdr_plugin_source=junderdo/loopherd/herdr-plugin
-herdr_plugin_reinstall="herdr plugin uninstall loopherd && herdr plugin install $herdr_plugin_source"
 # Long enough for herdr to clone the plugin from GitHub.
 herdr_plugin_timeout=300
 
 # Usage: offer_herdr_plugin <ask|yes|no> <the checkout's herdr-plugin.toml> <--settings file, or empty>
 # Never fails: the plugin is optional, so a failed install is only reported.
+# LOOPHERD_EXTRAS_RELEASE names the release tag being installed, whose plugin it installs.
 offer_herdr_plugin() {
   local want=$1 manifest=$2 settings=$3 ours listed version kind root answer
+  local release=${LOOPHERD_EXTRAS_RELEASE:-} from="this checkout"
   [[ "$want" != no ]] || return 0
+  [[ -z "$release" ]] || from="this release"
+  herdr_plugin_reinstall="herdr plugin uninstall loopherd && herdr plugin install $herdr_plugin_source${release:+ --ref $release}"
   if [[ -n "$settings" ]]; then
     # herdr plugins are global to the user, so a test or manual run must not install one.
     echo "skipped loopherd's herdr plugin: a --settings run never installs it"
@@ -44,13 +47,13 @@ offer_herdr_plugin() {
     return 0
   fi
   if [[ -n "$version" && "$(printf '%s\n' "$version" "$ours" | sort -V | tail -n 1)" == "$version" ]]; then
-    echo "loopherd's herdr plugin $version is newer than this checkout's $ours; left as is"
+    echo "loopherd's herdr plugin $version is newer than $from's $ours; left as is"
     return 0
   fi
   if [[ -n "$version" ]] && ! herdr_has_plugin_update; then
     local herdr_says
     herdr_says=$(herdr --version 2>/dev/null | head -n 1) || herdr_says=
-    echo "loopherd's herdr plugin $version is older than this checkout's $ours, and ${herdr_says:-this herdr} has no plugin update (0.9.4 or later); reinstall it by hand: $herdr_plugin_reinstall"
+    echo "loopherd's herdr plugin $version is older than $from's $ours, and ${herdr_says:-this herdr} has no plugin update (0.9.4 or later); reinstall it by hand: $herdr_plugin_reinstall"
     return 0
   fi
   if [[ -n "$herdr_plugin_no_terminal" ]]; then
@@ -65,8 +68,18 @@ offer_herdr_plugin() {
   local run=(herdr plugin install "$herdr_plugin_source")
   if [[ -n "$version" ]]; then
     # herdr updates from the ref it installed, which may not be this checkout's version.
-    verb=update question="Update loopherd's herdr plugin (installed $version, this checkout $ours)?"
+    verb=update question="Update loopherd's herdr plugin (installed $version, $from $ours)?"
     run=(herdr plugin update loopherd)
+  elif [[ -n "$release" ]]; then
+    local install_help
+    install_help=$(herdr plugin install --help 2>/dev/null) || install_help=
+    if [[ "$install_help" == *--ref* ]]; then
+      run+=(--ref "$release")
+    else
+      local herdr_says
+      herdr_says=$(herdr --version 2>/dev/null | head -n 1) || herdr_says=
+      echo "${herdr_says:-this herdr} can't install a plugin at a ref, so loopherd's herdr plugin comes from GitHub's default branch, not $release"
+    fi
   fi
   if [[ "$want" == ask ]]; then
     read -r -p "$question [y/N] " answer || answer=
