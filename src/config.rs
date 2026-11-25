@@ -33,7 +33,7 @@ pub struct ConfigFile {
 #[serde(deny_unknown_fields)]
 pub struct ShepherdConfig {
     pub context_limit: Option<Limit>,
-    /// The shepherd restarts itself after its handoff; off unless set.
+    /// The shepherd restarts itself after its handoff; on unless set false.
     pub self_restart: Option<bool>,
 }
 
@@ -62,12 +62,12 @@ pub fn lead_defaults(config: &Path) -> Result<Option<SwitchValues>> {
     Ok(read(config)?.lead_defaults)
 }
 
-/// Whether the shepherd restarts itself after its handoff; off unless set.
+/// Whether the shepherd restarts itself after its handoff; on unless set false.
 pub fn self_restart(config: &Path) -> Result<bool> {
     Ok(read(config)?
         .shepherd
         .and_then(|s| s.self_restart)
-        .unwrap_or(false))
+        .unwrap_or(true))
 }
 
 /// Whether the herdr plugin's startup hook runs revive; off unless set.
@@ -775,10 +775,17 @@ mod key_tests {
     }
 
     #[test]
-    fn self_restart_round_trips_through_set_get_and_unset_and_is_off_unless_set() {
+    fn self_restart_round_trips_through_set_get_and_unset_and_is_on_unless_set_false() {
         let (_dir, path) = config_with("[shepherd]\ncontext_limit = 300000\n");
-        assert!(!self_restart(&path).unwrap());
+        assert!(self_restart(&path).unwrap());
         assert_eq!(get(&path, "shepherd.self_restart").unwrap(), None);
+
+        set(&path, "shepherd.self_restart", "false").unwrap();
+        assert!(!self_restart(&path).unwrap());
+        assert_eq!(
+            get(&path, "shepherd.self_restart").unwrap().as_deref(),
+            Some("false")
+        );
 
         set(&path, "shepherd.self_restart", "true").unwrap();
         assert!(self_restart(&path).unwrap());
@@ -793,7 +800,7 @@ mod key_tests {
 
         assert!(unset(&path, "shepherd.self_restart").unwrap());
         assert_eq!(get(&path, "shepherd.self_restart").unwrap(), None);
-        assert!(!self_restart(&path).unwrap());
+        assert!(self_restart(&path).unwrap());
     }
 
     #[test]

@@ -201,7 +201,15 @@ fn missing_hooks_in_the_given_settings_fail_naming_install_hook_and_exit_1() {
         "{text}"
     );
     assert!(
-        text.ends_with("doctor: 11 ok, 4 warnings, 4 failures\n"),
+        text.contains(&format!(
+            "warning self_restart: [shepherd] self_restart is on, but loopherd's UserPromptSubmit \
+             hook isn't in {}, so restart --self refuses; {fix}\n",
+            s.settings.display()
+        )),
+        "{text}"
+    );
+    assert!(
+        text.ends_with("doctor: 11 ok, 5 warnings, 4 failures\n"),
         "{text}"
     );
     assert_eq!(out.status.code(), Some(1));
