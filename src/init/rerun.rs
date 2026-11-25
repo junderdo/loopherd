@@ -65,6 +65,7 @@ pub(super) fn rerun(
         running_leads: req.running_leads,
         now: SystemTime::now(),
         terminal: ask.terminal.then_some(&mut input as &mut dyn BufRead),
+        render: &|herd, template| super::template(paths, herd, template),
     };
     let mut out: Box<dyn Write> = match ask.terminal {
         true => Box::new(std::io::stderr()),
@@ -283,7 +284,10 @@ impl Rerun<'_> {
             merge_guard: guard.map(|_| MergeGuard::Hook),
             ..base.clone()
         };
-        let (with_lead, without_lead) = (rendered(self.paths, &led)?, rendered(self.paths, &base)?);
+        let (with_lead, without_lead) = (
+            rendered(self.paths, &led)?.files,
+            rendered(self.paths, &base)?.files,
+        );
         let text_of = |files: &[(PathBuf, String)], path: &Path| {
             files
                 .iter()
@@ -475,8 +479,9 @@ impl Rerun<'_> {
     fn carried(&self, from: &Herd, to: &Herd) -> Result<Option<Vec<Edit>>> {
         let mut edits = vec![];
         for ((path, was), (_, now)) in rendered(self.paths, from)?
+            .files
             .iter()
-            .zip(rendered(self.paths, to)?.iter())
+            .zip(rendered(self.paths, to)?.files.iter())
         {
             if was == now {
                 continue;
