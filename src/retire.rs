@@ -183,7 +183,7 @@ fn retired_since(record: &AgentRecord) -> String {
 
 /// Retires `name` as `outcome` unless it already is, records its tokens from
 /// `claude_dir`'s transcripts unless its mailbox in `mailboxes` has them,
-/// removes its notify marks there, then closes its tab and removes its
+/// removes its notify and awaiting marks there, then closes its tab and removes its
 /// worktree when safe, so a failed or deferred close can be re-run. `own_pane` is the pane running
 /// loopherd, whose tab is never closed, and `guard` keeps a worktree its
 /// ledger entry misplaces. Pushes one line per action to `out`,
@@ -225,6 +225,7 @@ pub fn retire_and_close(
         }
     };
     out.extend(forget_marks(mailboxes, name));
+    out.extend(crate::awaiting::unmark(mailboxes, &record.pane_id, name));
     let tab_open = match agent_tab(herdr, &record, &others, own_pane)? {
         TabFate::Gone => {
             out.push("tab already gone".into());
@@ -2214,6 +2215,36 @@ mod tests {
                 "b.notified"
             ]
         );
+    }
+
+    #[test]
+    fn close_removes_the_awaiting_mark_on_the_member_s_pane_and_leaves_others() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mailboxes = cwd.path().join("reports");
+        let herdr = two_workspaces();
+        let pane = herdr.add_tab("w1", "a", cwd.path(), true);
+        let mut ledger = plain(cwd.path(), &pane);
+        std::fs::create_dir_all(&mailboxes).unwrap();
+        std::fs::write(mailboxes.join(format!(".awaiting-{pane}")), "a").unwrap();
+        std::fs::write(mailboxes.join(".awaiting-p-other"), "b").unwrap();
+        let mut out = vec![];
+
+        retire_and_close(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &open_guard(),
+            "a",
+            halloween_noon(),
+            Outcome::Retired,
+            &mailboxes,
+            None,
+            None,
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(files_in(&mailboxes), [".awaiting-p-other"]);
     }
 
     #[test]

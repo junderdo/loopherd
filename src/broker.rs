@@ -365,8 +365,9 @@ fn status(ctx: &mut Ctx, all: bool, json: bool, color: bool, sink: &mut dyn Sink
     Ok(out.code)
 }
 
-/// Writes the lead's report to its own mailbox, then labels its pane for a
-/// question, from the lead's own record; a label that fails only warns.
+/// Writes the lead's report to its own mailbox, marks its pane awaiting an
+/// answer for a question or gate request, then labels its pane for a
+/// question, from the lead's own record; a mark or label that fails only warns.
 fn report(ctx: &mut Ctx, kind: Kind, text: &str, sink: &mut dyn Sink) -> Result<i32> {
     let lead = ctx
         .caller
@@ -376,6 +377,13 @@ fn report(ctx: &mut Ctx, kind: Kind, text: &str, sink: &mut dyn Sink) -> Result<
     let mailboxes = ctx.paths.state_dir().join("reports");
     let entry = crate::report::Entry::new(SystemTime::now(), Body::report(kind, text));
     crate::report::append(&mailboxes, &lead.name, &entry)?;
+    if matches!(kind, Kind::Question | Kind::Gate)
+        && let Err(e) = mark_awaiting(&*ctx.ledger, &mailboxes, &lead.name)
+    {
+        sink.err(&format!(
+            "loopherd report: warning: the report went out, but nothing will time its wait: {e:#}"
+        ));
+    }
     if kind != Kind::Question || !crate::notify::labels_panes(&crate::herd::config_file(ctx.paths))
     {
         return Ok(0);
@@ -396,6 +404,15 @@ fn report(ctx: &mut Ctx, kind: Kind, text: &str, sink: &mut dyn Sink) -> Result<
         sink.err(&format!("loopherd report: warning: {e:#}"));
     }
     Ok(0)
+}
+
+fn mark_awaiting(ledger: &dyn Ledger, mailboxes: &Path, lead: &str) -> Result<()> {
+    let record = ledger
+        .entries()?
+        .remove(lead)
+        .filter(|r| !r.retired)
+        .ok_or_else(|| anyhow!("{lead} has no unretired record in the ledger"))?;
+    crate::awaiting::mark(mailboxes, &record.pane_id, lead)
 }
 
 /// How long each of a gate's commands may run.
@@ -3680,6 +3697,32 @@ mod tests {
         let mailbox = world.paths.state_dir().join("reports/lead-h/mailbox.jsonl");
         let mailbox = std::fs::read_to_string(mailbox).unwrap();
         assert!(mailbox.contains("at step 3"), "{mailbox}");
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_lead_s_question_or_gate_request_marks_its_pane_awaiting_and_a_note_does_not() {
+        let world = World::new();
+        let client = world.route_from("p-lead-h").unwrap();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        let reports = world.paths.state_dir().join("reports");
+        let mark = reports.join(".awaiting-p-lead-h");
+        let report = |kind, text: &str| Op::Report {
+            kind,
+            text: text.into(),
+        };
+
+        client.call(&report(Kind::Note, "starting")).unwrap();
+        assert!(!mark.exists());
+        client
+            .call(&report(Kind::Gate, "Gate request: #9 at abc123"))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&mark).unwrap(), "lead-h");
+        std::fs::remove_file(&mark).unwrap();
+        client.call(&report(Kind::Question, "which DB?")).unwrap();
+        assert_eq!(std::fs::read_to_string(&mark).unwrap(), "lead-h");
+
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
     }

@@ -166,6 +166,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D151](decisions/D151.md) | Amends D107 and D128. In a `credentials` herd a sandboxed worker whose settings (user or worktree) or args loosen its sandbox is refused under `prefer` as under `require`, naming each file and key or arg and the `merge_guard = "hook"` fix; non-credentials herds still warn under `prefer`. Worker confinement reads `[lead_defaults]` as `loopherd herds` does: a broken `config.toml` counts as `merge` off, so `feed` and `revive` no longer stop on it. |
 | [D152](decisions/D152.md) | A watch says `<member> stalled  paused <n>m: <in flight>`, once per streak keyed by the stop, when a member's last stop was paused, nothing came since, and herdr has shown it idle past its herd's top-level `stalled_after` (minutes, default 30, at least 1). A lead's watch covers its workers; the shepherd's, leads and members of unled herds. `status` shows `stalled <n>m`. |
 | [D153](decisions/D153.md) | Supersedes the key choice in D88 and D146. In `loopherd view`, `s` starts or focuses the shepherd (as `S` did), `x` toggles strays (as `s` did), and `S` is unbound. |
+| [D156](decisions/D156.md) | Amends D143. `loopherd report --kind gate` files a lead's gate request: printed once by `watch` and `reports` like a note, with no notification or label, but it starts D143's wait. `status` and the view show `gate waiting <age>`, or `question waiting <age>` when the oldest waiting entry is a question. |
 
 ## Emerging model
 

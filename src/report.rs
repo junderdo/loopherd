@@ -27,6 +27,8 @@ pub enum Kind {
     Note,
     /// The member wrote its handoff and waits for `loopherd restart`.
     Handoff,
+    /// A lead's gate request, waiting like a question without being one.
+    Gate,
 }
 
 impl Kind {
@@ -36,6 +38,7 @@ impl Kind {
             Kind::Question => "question",
             Kind::Note => "note",
             Kind::Handoff => "handoff",
+            Kind::Gate => "gate",
         }
     }
 }
@@ -74,14 +77,16 @@ impl Entry {
     }
 
     /// Its kind and text, unless it's a `stop`, `start`, `blocked`, `gone` or
-    /// `moved`.
+    /// `moved`, or another entry loopherd wrote.
     pub fn report(&self) -> Option<(Kind, &str)> {
         match &self.body {
             Body::Done { text } => Some((Kind::Done, text)),
             Body::Question { text } => Some((Kind::Question, text)),
             Body::Note { text } => Some((Kind::Note, text)),
             Body::Handoff { text } => Some((Kind::Handoff, text)),
+            Body::Gate { text } => Some((Kind::Gate, text)),
             Body::Stop(_)
+            | Body::Answered {}
             | Body::Start { .. }
             | Body::Blocked {}
             | Body::Gone { .. }
@@ -108,6 +113,11 @@ pub enum Body {
     Handoff {
         text: String,
     },
+    Gate {
+        text: String,
+    },
+    /// A prompt in a lead's pane answered what it waited on.
+    Answered {},
     /// Claude ended a turn; written only by the Stop hook.
     Stop(Stop),
     /// spawn, restart or revive started the member's Claude. A revive
@@ -151,6 +161,7 @@ impl Body {
             Kind::Question => Body::Question { text },
             Kind::Note => Body::Note { text },
             Kind::Handoff => Body::Handoff { text },
+            Kind::Gate => Body::Gate { text },
         }
     }
 }
@@ -775,6 +786,7 @@ fn render(name: &str, entry: &Entry) -> Vec<String> {
         Body::Blocked {} => return vec![format!("{name} blocked {when}")],
         Body::Gone { .. } => return vec![format!("{name} gone {when}")],
         Body::Moved {} => return vec![format!("{name} moved {when}")],
+        Body::Answered {} => return vec![format!("{name} answered {when}")],
         Body::SubagentStart(subagent) => ("subagent-start", subagent.label()),
         Body::SubagentStop(subagent) => ("subagent-stop", subagent.label()),
         Body::Usage { models } => {
@@ -2243,6 +2255,36 @@ mod tests {
         assert_eq!(
             reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
             [] as [&str; 0]
+        );
+    }
+
+    #[test]
+    fn all_shows_an_answered_lead_and_plain_reports_shows_only_its_gate_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = ledger(vec![member("lead-h", "w1:p1", None, false)]);
+        put(
+            dir.path(),
+            "lead-h",
+            "2026-11-01T09:00:00Z",
+            Body::report(Kind::Gate, "Gate request: #9"),
+        );
+        put(
+            dir.path(),
+            "lead-h",
+            "2026-11-01T09:20:00Z",
+            Body::Answered {},
+        );
+
+        assert_eq!(
+            reports(&ledger, dir.path(), &ALL).unwrap().lines,
+            [
+                "lead-h gate 2026-11-01 09:00 UTC Gate request: #9",
+                "lead-h answered 2026-11-01 09:20 UTC",
+            ]
+        );
+        assert_eq!(
+            reports(&ledger, dir.path(), &UNREAD).unwrap().lines,
+            ["lead-h gate 2026-11-01 09:00 UTC Gate request: #9"]
         );
     }
 
