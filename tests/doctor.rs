@@ -5,7 +5,7 @@ mod fakes;
 
 use fakes::executable;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 const LOOPHERD: &str = env!("CARGO_BIN_EXE_loopherd");
@@ -113,7 +113,11 @@ impl Sandbox {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut command = Command::new(self.bin.join("loopherd"));
+        self.command_for(&self.bin.join("loopherd"), args)
+    }
+
+    fn command_for(&self, binary: &Path, args: &[&str]) -> Command {
+        let mut command = Command::new(binary);
         command
             .args(args)
             .env("HOME", self.dir.path())
@@ -121,6 +125,7 @@ impl Sandbox {
             .env("LOOPHERD_CONFIG_DIR", self.dir.path().join("config"))
             .env("CLAUDE_CONFIG_DIR", self.dir.path().join("claude"))
             .env_remove("HERDR_SOCKET_PATH")
+            .env_remove("LOOPHERD_BROKER_OF")
             .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()));
         command
     }
@@ -352,14 +357,9 @@ fn running_a_binary_other_than_paths_warns_and_exits_0() {
     let other = s.dir.path().join("other");
     fs::create_dir_all(other.join(".git")).unwrap();
     executable(&other.join("loopherd"), fs::read(LOOPHERD).unwrap());
-    let out = Command::new(other.join("loopherd"))
-        .args(["doctor", "--settings", s.settings.to_str().unwrap()])
-        .env("HOME", s.dir.path())
-        .env("XDG_STATE_HOME", s.dir.path().join("state"))
-        .env("LOOPHERD_CONFIG_DIR", s.dir.path().join("config"))
-        .env("CLAUDE_CONFIG_DIR", s.dir.path().join("claude"))
-        .env_remove("HERDR_SOCKET_PATH")
-        .env("PATH", format!("{}:/usr/bin:/bin", s.bin.display()))
+    let settings = s.settings.to_str().unwrap();
+    let out = s
+        .command_for(&other.join("loopherd"), &["doctor", "--settings", settings])
         .output()
         .unwrap();
     assert!(
