@@ -1188,7 +1188,16 @@ fn claude_temp_root() -> Option<PathBuf> {
         .map(PathBuf::from)
         .unwrap_or_else(std::env::temp_dir);
     // SAFETY: getuid can't fail and touches no memory.
-    Some(base.join(format!("claude-{}", unsafe { libc::getuid() })))
+    Some(temp_root_in(base, unsafe { libc::getuid() }))
+}
+
+/// A sandboxed Claude Code command gets the resolved root itself as its base.
+fn temp_root_in(base: PathBuf, uid: u32) -> PathBuf {
+    let dir = format!("claude-{uid}");
+    match base.ends_with(&dir) {
+        true => base,
+        false => base.join(dir),
+    }
 }
 
 fn temp_dir_exposure(worktree: &Path, root: Option<&Path>) -> Option<String> {
@@ -2831,6 +2840,23 @@ mod tests {
         );
         assert!(claude_new_enough("").is_err());
     }
+    #[test]
+    fn claudes_temp_root_is_claude_uid_in_its_base_unless_the_base_already_is_it() {
+        assert_eq!(
+            temp_root_in(PathBuf::from("/tmp"), 1000),
+            Path::new("/tmp/claude-1000")
+        );
+        // What a sandboxed Claude Code command gets as CLAUDE_CODE_TMPDIR and TMPDIR.
+        assert_eq!(
+            temp_root_in(PathBuf::from("/tmp/claude-1000"), 1000),
+            Path::new("/tmp/claude-1000")
+        );
+        assert_eq!(
+            temp_root_in(PathBuf::from("/srv/claude-1001"), 1000),
+            Path::new("/srv/claude-1001/claude-1000")
+        );
+    }
+
     #[test]
     fn a_worktree_inside_claudes_temp_dir_is_exposed_to_its_siblings() {
         let root = Path::new("/tmp/claude-1000");

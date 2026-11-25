@@ -1735,6 +1735,12 @@ fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_
         ),
     )
     .unwrap();
+    // A credentials herd's lead refuses an exposed worktree under either mode.
+    if let Some(exposed) = doctor_findings(state.path(), &config, &herd, "sandbox repo", "failure")
+    {
+        eprintln!("skipped: this checkout can't hold a sandboxed lead to its worktree: {exposed}");
+        return;
+    }
     let _cleanup = CloseTab(name.clone());
 
     // A credentials lead takes no --allowedTools, so auto mode lets the sandboxed probe run.
