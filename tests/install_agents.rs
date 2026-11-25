@@ -800,3 +800,13 @@ fn a_file_edited_since_install_answered_loopherd_name_keeps_the_edit() {
             .contains("\nname: loopherd-builder\n")
     );
 }
+
+#[test]
+fn the_reviewer_bounds_its_waits_and_stops_its_shells() {
+    let text = fs::read_to_string(format!("{REPO}/agents/reviewer.md")).unwrap();
+    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        flat.contains("Every wait you run has a timeout, and you stop every background shell you started before you return"),
+        "{flat}"
+    );
+}
