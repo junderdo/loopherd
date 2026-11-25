@@ -355,6 +355,7 @@ mod tests {
             let herd = "repo = \"/repo\"\n[lead]\nprompt = \"go\"\n";
             fs::write(herds.join("cards.toml"), herd).unwrap();
             let paths = Paths {
+                env: |_| None,
                 herds,
                 home: PathBuf::from("/home/me"),
                 feed_lock: dir.path().join("feed.lock"),

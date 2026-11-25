@@ -1982,19 +1982,22 @@ fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 /// Lead `name`'s settings, from its herd file alone: its worktree is where
 /// `lead` puts it in the herd's repo, whatever the ledger says.
 fn settings(paths: &Paths, name: &str, herd: &str) -> Result<Value> {
-    settings_on(paths, name, herd, &THIS_MACHINE)
+    settings_on(paths, name, herd, &this_machine(paths))
 }
 
-/// The machine a credentials member is confined on. Unit tests run under a
-/// fake home, so the runner's real XDG dirs and git config stay out.
-pub const THIS_MACHINE: crate::credentials::Machine<'static> = crate::credentials::Machine {
-    env: &|name| (!cfg!(test)).then(|| std::env::var_os(name)).flatten(),
-    mounts: &|| std::fs::read("/proc/mounts"),
-    credential_helpers: &|home| match cfg!(test) {
-        true => String::new(),
-        false => crate::credentials::git_credential_helpers(home),
-    },
-};
+/// The machine a credentials member is confined on, its environment read
+/// through `paths`. Unit tests run under a fake home, so the runner's real git
+/// config stays out.
+pub fn this_machine(paths: &Paths) -> crate::credentials::Machine<'_> {
+    crate::credentials::Machine {
+        env: &paths.env,
+        mounts: &|| std::fs::read("/proc/mounts"),
+        credential_helpers: &|home| match cfg!(test) {
+            true => String::new(),
+            false => crate::credentials::git_credential_helpers(home),
+        },
+    }
+}
 
 fn settings_on(
     paths: &Paths,
@@ -2692,6 +2695,23 @@ mod tests {
     }
 
     #[test]
+    fn a_credentials_leads_settings_hide_the_gh_dir_its_env_moves() {
+        let root = tempfile::tempdir().unwrap();
+        let mut paths = credentials_lead(root.path());
+        paths.env = |name| (name == "XDG_CONFIG_HOME").then(|| "/home/me/.xdg".into());
+
+        let settings = settings(&paths, "lead-h", "h").unwrap();
+
+        let deny_read = settings["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap();
+        assert!(
+            deny_read.contains(&json!("/home/me/.xdg/gh")),
+            "{deny_read:?}"
+        );
+    }
+
+    #[test]
     fn a_credentials_leads_settings_hide_the_windows_drives_its_machine_mounts() {
         let root = tempfile::tempdir().unwrap();
         let paths = credentials_lead(root.path());
@@ -2716,7 +2736,7 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let paths = credentials_lead(root.path());
 
-        let settings = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+        let settings = settings(&paths, "lead-h", "h").unwrap();
 
         let groups = settings["hooks"]["PreToolUse"].as_array().unwrap();
         assert_eq!(groups.len(), 1, "{groups:?}");
@@ -2735,7 +2755,7 @@ mod tests {
     fn the_loopherd_that_wrote_the_proc_guard_isnt_a_switch_change() {
         let root = tempfile::tempdir().unwrap();
         let paths = credentials_lead(root.path());
-        let built = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+        let built = settings(&paths, "lead-h", "h").unwrap();
         let mut elsewhere = built.clone();
         let hook = &mut elsewhere["hooks"]["PreToolUse"][0]["hooks"][0]["command"];
         let command = hook.as_str().unwrap().to_string();
@@ -2756,7 +2776,7 @@ mod tests {
         let text = std::fs::read_to_string(&herd).unwrap();
         std::fs::write(&herd, text.replace("\"credentials\"", "\"hook\"")).unwrap();
 
-        let settings = settings_on(&paths, "lead-h", "h", &THIS_MACHINE).unwrap();
+        let settings = settings(&paths, "lead-h", "h").unwrap();
 
         assert!(settings.get("hooks").is_none(), "{settings}");
     }
@@ -2788,7 +2808,7 @@ mod tests {
         let read = |m: &crate::credentials::Machine| (m.mounts)().map_err(|e| e.kind());
 
         assert_eq!(
-            read(&THIS_MACHINE),
+            read(&this_machine(&Paths::under(Path::new("/")))),
             std::fs::read("/proc/mounts").map_err(|e| e.kind())
         );
     }

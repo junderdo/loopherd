@@ -1307,10 +1307,15 @@ impl Broker<'_> {
             op,
         } = job;
         // Read now, not the round's: a request written after a retirement is always refused.
-        if !unretired(ledger, self.lead) {
-            write_reply(replies, id, &Reply::Refused(self.retired()));
-            requests.remove(name);
-            return;
+        match retirement(ledger, self.lead) {
+            Some(true) => {
+                write_reply(replies, id, &Reply::Refused(self.retired()));
+                requests.remove(name);
+                return;
+            }
+            // Left queued: a later round reads the ledger again and decides it.
+            None => return,
+            Some(false) => {}
         }
         // Left in the queue for the broker a restart starts next.
         if stopping.load(Ordering::SeqCst) {
@@ -4683,6 +4688,68 @@ mod tests {
         assert_eq!(fed.join().unwrap().unwrap().2, 0);
         world.retire("lead-h");
         assert_eq!(serving.join().unwrap().0.unwrap(), Served::Retired);
+    }
+
+    #[test]
+    fn a_retire_whose_rereads_both_fail_still_keeps_the_request_from_running() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+        hand_over(&world, "0-001", &tell("lh-1", "hi"));
+        let ledger = Scripted::new(
+            &world,
+            vec![
+                Box::new(|file| file.entries()),
+                Box::new(|file| {
+                    file.clone()
+                        .update("lead-h", &mut |r| {
+                            r.retired = true;
+                            Ok(())
+                        })
+                        .unwrap();
+                    Err(anyhow!("ledger unreadable"))
+                }),
+                Box::new(|_| Err(anyhow!("ledger unreadable"))),
+            ],
+        );
+
+        let (served, herdr) = world
+            .serve_on(telling_herdr(), POLL, ledger)
+            .join()
+            .unwrap();
+
+        assert_eq!(served.unwrap(), Served::Retired);
+        let answer = answer_to(&world, "0-001");
+        assert!(
+            matches!(&answer, Reply::Refused(why) if why == "lead-h is retired, so its broker takes no new requests"),
+            "{answer:?}"
+        );
+        assert!(herdr.prompts().is_empty());
+    }
+
+    #[test]
+    fn a_request_whose_rereads_fail_runs_once_the_ledger_reads_unretired() {
+        let world = World::new();
+        world.add(member("lh-1", Some("h")));
+        std::fs::create_dir_all(requests_dir(&world.paths, "lead-h")).unwrap();
+        hand_over(&world, "0-001", &tell("lh-1", "hi"));
+        let ledger = Scripted::new(
+            &world,
+            vec![
+                Box::new(|file| file.entries()),
+                Box::new(|_| Err(anyhow!("ledger unreadable"))),
+                Box::new(|_| Err(anyhow!("ledger unreadable"))),
+            ],
+        );
+        let serving = world.serve_on(telling_herdr(), POLL, ledger);
+
+        let answer = answer_to(&world, "0-001");
+
+        assert!(matches!(&answer, Reply::Done { code: 0, .. }), "{answer:?}");
+        world.retire("lead-h");
+        let (served, herdr) = serving.join().unwrap();
+        assert_eq!(served.unwrap(), Served::Retired);
+        assert_eq!(herdr.prompts().len(), 1);
     }
 
     #[test]

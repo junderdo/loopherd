@@ -1144,6 +1144,7 @@ mod tests {
         )
         .unwrap();
         let paths = crate::herd::Paths {
+            env: |_| None,
             herds,
             home: PathBuf::from("/home/me"),
             feed_lock: s.root.path().join("feed.lock"),
