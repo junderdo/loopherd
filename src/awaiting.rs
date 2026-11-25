@@ -39,7 +39,7 @@ pub fn prompted(dir: &Path, pane: &str, input: &[u8], now: SystemTime) -> Result
     };
     let input: Option<serde_json::Value> = serde_json::from_slice(input).ok();
     let prompt = input.as_ref().and_then(|i| i["prompt"].as_str());
-    if prompt.is_some_and(crate::pane_label::is_task_notification) {
+    if prompt.is_some_and(crate::pane_label::is_background_event) {
         return Ok(());
     }
     // The lead can write this directory, so its mark mustn't reach another path.

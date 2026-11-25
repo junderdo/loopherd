@@ -425,7 +425,7 @@ pub fn prompted(
 ) -> Result<Option<String>> {
     let input: Option<serde_json::Value> = serde_json::from_slice(input).ok();
     let prompt = input.as_ref().and_then(|i| i["prompt"].as_str());
-    if prompt.is_some_and(pane_label::is_task_notification) {
+    if prompt.is_some_and(pane_label::is_background_event) {
         return Ok(None);
     }
     // A free claim means no waiter runs: it never started, or died.
@@ -900,7 +900,8 @@ mod tests {
     fn a_task_notification_doesnt_cancel_it() {
         let w = World::new();
         w.arm();
-        let notification = "<task-notification>watch exited</task-notification>";
+        let notification =
+            "<task-notification>\n<summary>watch exited</summary>\n</task-notification>";
         assert_eq!(w.prompt(notification), None);
         assert_eq!(w.saved()["self_restart"]["state"], "pending");
     }
