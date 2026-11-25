@@ -135,9 +135,24 @@ static MIGRATIONS: [Migration; 7] = [
         explanation: "Adds [template.grill-batch] and routes the queue's grilling tasks marked grill:batch\n\
                       to it; its worker answers the grill itself and posts one batch for the human.",
         lead_reads_at_start: false,
-        state: |herd| template(herd, "grill-batch"),
+        state: grill_batch,
     },
 ];
+
+/// Not for a local tracker's herd, whose source init writes to read `.scratch/`
+/// issue files: init offers it no batch grill.
+fn grill_batch(herd: &Herd) -> State {
+    let source = herd
+        .doc
+        .get("queue")
+        .and_then(|q| q.get("source"))
+        .and_then(Item::as_str)
+        .unwrap_or_default();
+    match source.contains(" -- .scratch)") {
+        true => State::Current,
+        false => template(herd, "grill-batch"),
+    }
+}
 
 fn template(herd: &Herd, name: &'static str) -> State {
     match herd.doc.get("template").and_then(|t| t.get(name)) {

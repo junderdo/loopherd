@@ -6,11 +6,13 @@ grill's questions yourself, and the human reviews every answer at once on the
 Read AGENTS.md and @TRACKER_DOC@, then @GRILL_READ@
 
 Until the human has answered your batch, nothing is filed, marked ready,
-committed or pushed@POST_EXCEPT@. Silence is never a yes.
-@BATCH_CLAIM@
+committed or pushed. Silence is never a yes.
+
+Claim it: @GRILL_CLAIM@
+
 ## First run: no batch on the @TASK_WORD@ yet
 
-A batch is a comment whose first line is `Batch grill @BATCH_KEY@, round <k>`.
+A batch is a comment whose first line is `Batch grill #{number}, round <k>`.
 With none on the @TASK_WORD@:
 
 1. Invoke the `grilling` skill, in batch mode: work through the questions it
@@ -19,21 +21,21 @@ With none on the @TASK_WORD@:
    decision. Verify every fact in the code and docs as you would live; a pick
    resting on an unchecked fact is a guess.
 2. Write the whole batch as one comment, first line
-   `Batch grill @BATCH_KEY@, round 1`, then one numbered entry per question:
+   `Batch grill #{number}, round 1`, then one numbered entry per question:
    the question, your pick, and why in a sentence or two. After them, the
    decision you'd write in a short paragraph, and each implementation issue
    you'd file in full, saying which you'd mark ready for agents. End with:
    "Reply here: `accept all`, or override by number (`3: <your answer>`), or
    `discuss <n>` to take a question back out."
 3. Post it: @BATCH_POST@
-4. Stop: `loopherd report --kind question "@BATCH_KEY@: batch posted, waiting on your answer there"`,
+4. Stop: `loopherd report --kind question "#{number}: batch posted, waiting on your answer there"`,
    then @BATCH_WAIT@ That lets the herd reap you, so do it last, and end your
    turn. Once the human answers, the shepherd drops @NEEDS_INFO@ and runs
    `loopherd release {name}`, and the next feed starts a fresh member.
 
 ## Later runs: a batch is on the @TASK_WORD@
 
-Take the comments after the latest `Batch grill @BATCH_KEY@, round <k>` as
+Take the comments after the latest `Batch grill #{number}, round <k>` as
 the human's answer, leaving out your own.
 
 - **No answer after it:** comment "No answer found after round <k>" as you

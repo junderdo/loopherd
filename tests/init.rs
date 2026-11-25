@@ -2689,9 +2689,12 @@ impl Fixture {
     fn with_herd(tracker: &[&str]) -> Fixture {
         let fixture = Fixture::new(&["acme"]);
         // With every template init offers, so no migration is pending.
-        assert_ok(
-            &fixture.init(&[tracker, &["--with", "wayfinding", "--with", "grill-batch"]].concat()),
-        );
+        // A local tracker's herd has no grill-batch template.
+        let grill_batch: &[&str] = match tracker.contains(&"local") {
+            true => &[],
+            false => &["--with", "grill-batch"],
+        };
+        assert_ok(&fixture.init(&[tracker, &["--with", "wayfinding"], grill_batch].concat()));
         fill_in_the_source(&fixture);
         fixture
     }
@@ -3001,7 +3004,11 @@ fn on_a_terminal_a_rerun_adds_a_lead_as_init_writes_one() {
         let led = fixture.config_listing();
         fs::remove_dir_all(fixture.herds()).unwrap();
         // The repo's tracker doc, written by the first init, now names the tracker.
-        assert_ok(&fixture.init(&["--no-lead", "--with", "wayfinding", "--with", "grill-batch"]));
+        let grill_batch: &[&str] = match tracker.contains(&"local") {
+            true => &[],
+            false => &["--with", "grill-batch"],
+        };
+        assert_ok(&fixture.init(&[&["--no-lead", "--with", "wayfinding"], grill_batch].concat()));
         fill_in_the_source(&fixture);
         let typed = [
             "",  // repo
@@ -8388,149 +8395,48 @@ fn diff_shows_the_grill_batch_template_and_prompt_init_would_add() {
     );
 }
 
-const LOCAL_GRILL_BATCH_ISSUES: &[(&str, &str)] = &[
-    (".scratch/f/issues/01-plain.md", "Status: ready-for-agent\n"),
-    (
-        ".scratch/f/issues/02-queue.md",
-        "Status: grilling, Grill:Batch\n",
-    ),
-    (
-        ".scratch/f/issues/03-names.md",
-        "Status: grilling ready-for-agent\n",
-    ),
-    (
-        ".scratch/f/issues/04-merges.md",
-        "Status: grilling grill:batch needs-info\n",
-    ),
-    (".scratch/f/issues/05-later.md", "Status: open\n"),
-];
-
 #[test]
-fn with_grill_batch_the_local_queue_routes_the_grilling_words_on_the_status_line() {
+fn a_local_tracker_is_offered_no_grill_batch_and_upgrade_leaves_it_out() {
     let fixture = Fixture::new(&["acme"]);
-    let env = fixture.push_local_issues(LOCAL_GRILL_BATCH_ISSUES);
-    assert_ok(&fixture.init(&["--tracker", "local", "--with", "grill-batch"]));
-    let run = |key: &str| {
-        let out = fixture.run(
-            Command::new("sh")
-                .args(["-c", &fixture.herd_get(key)])
-                .envs(env.iter().map(|(k, v)| (k, v))),
-        );
-        assert_ok(&out);
-        text(&out.stdout)
-    };
+    let refused = Fixture::new(&["acme"]);
 
-    assert_eq!(
-        run("queue.source"),
-        "issue f-01 feat tdd plain .scratch/f/issues/01-plain.md\n\
-         grill-batch f-02 docs grilling queue .scratch/f/issues/02-queue.md\n"
-    );
-    assert_eq!(
-        run("queue.backlog"),
-        ".scratch/f/issues/03-names.md 03-names\n\
-         .scratch/f/issues/04-merges.md 04-merges\n\
-         .scratch/f/issues/05-later.md 05-later\n"
-    );
-}
+    let out = refused.init(&["--tracker", "local", "--with", "grill-batch"]);
+    assert_ok(&fixture.init(&["--tracker", "local", "--with", "wayfinding"]));
+    let upgrade = fixture.loopherd(&["herd", "upgrade", "widgets"]);
 
-#[test]
-fn the_local_grill_batch_is_done_once_its_status_is_closed_or_waits_on_the_human() {
-    let fixture = Fixture::new(&["acme"]);
-    let env = fixture.push_local_issues(&[
-        (
-            ".scratch/f/issues/01-a.md",
-            "Status: grilling grill:batch\n",
-        ),
-        (".scratch/f/issues/02-b.md", "Status: grilling needs-info\n"),
-        (".scratch/f/issues/03-c.md", "**Status:** resolved\n"),
-    ]);
-    assert_ok(&fixture.init(&["--tracker", "local", "--with", "grill-batch"]));
-    let template = grill_batch(&fixture);
-    let done = |path: &str| {
-        let check = template["done"]
-            .as_str()
-            .unwrap()
-            .replace("{path}", path)
-            .replace("{{", "{")
-            .replace("}}", "}");
-        fixture
-            .run(
-                Command::new("sh")
-                    .args(["-c", &check])
-                    .envs(env.iter().map(|(k, v)| (k, v))),
-            )
-            .status
-            .success()
-    };
-
-    assert_eq!(template["name"].as_str(), Some("{herd}-grill-batch-{id}"));
-    assert_eq!(template["branch"].as_str(), Some("docs/{id}-{slug}"));
-    assert!(!done(".scratch/f/issues/01-a.md"));
-    assert!(done(".scratch/f/issues/02-b.md"));
-    assert!(done(".scratch/f/issues/03-c.md"));
-    assert!(!done(".scratch/f/issues/09-missing.md"));
-}
-
-#[test]
-fn the_local_grill_batch_prompt_posts_its_batch_on_the_default_branch() {
-    let fixture = Fixture::new(&["acme"]);
-    fixture.push_local_issues(LOCAL_GRILL_BATCH_ISSUES);
-    assert_ok(&fixture.init(&["--tracker", "local", "--with", "grill-batch"]));
-
-    let prompt = grill_batch_prompt(&fixture);
-
-    assert_has(
-        &prompt,
-        &[
-            "You're {name}, batch-grilling the local issue {path}",
-            "`Batch grill {id}, round <k>`",
-            "git switch --detach origin/main",
-            "add `needs-info` to its `Status:` line",
-            "credential.helper='!gh auth git-credential' push origin HEAD:main",
-            "Set {path}'s `Status:` line to\n  `resolved`",
-        ],
-    );
-    assert!(!prompt.contains("claimed by"), "{prompt}");
-}
-
-#[test]
-fn a_local_herd_too_long_for_a_grill_batch_name_skips_its_batch_grills() {
-    let fixture = Fixture::new(&["acme"]);
-    let env = fixture.push_local_issues(LOCAL_GRILL_BATCH_ISSUES);
-    let herd = "a-herd-of-twenty-two-c";
-    assert_ok(&fixture.init(&[
-        "--tracker",
-        "local",
-        "--with",
-        "grill-batch",
-        "--herd",
-        herd,
-    ]));
-    let source = fixture.loopherd(&["herd", "get", herd, "queue.source"]);
-    let source: String = toml::from_str::<toml::Table>(&format!("v = {}", text(&source.stdout)))
-        .unwrap()["v"]
-        .as_str()
-        .unwrap()
-        .into();
-
-    let tasks = fixture.run(
-        Command::new("sh")
-            .args(["-c", &source])
-            .envs(env.iter().map(|(k, v)| (k, v))),
-    );
-
-    assert_ok(&tasks);
-    assert_eq!(
-        text(&tasks.stdout),
-        "issue f-01 feat tdd plain .scratch/f/issues/01-plain.md\n"
-    );
+    assert_eq!(out.status.code(), Some(1));
     assert!(
-        text(&tasks.stderr).contains(
-            "skipped .scratch/f/issues/02-queue.md: the herd name leaves no room for its grill-batch name"
-        ),
+        text(&out.stderr).contains("no grill-batch template: a local tracker's herd has none yet"),
         "{}",
-        text(&tasks.stderr)
+        text(&out.stderr)
     );
+    assert!(!refused.herds().join("widgets.toml").exists());
+    assert!(herd_toml(&fixture)["template"].get("grill-batch").is_none());
+    assert!(!fixture.herds().join("widgets-grill-batch.md").exists());
+    assert_ok(&upgrade);
+    assert_eq!(text(&upgrade.stdout), "herd widgets is up to date\n");
+}
+
+#[test]
+fn on_a_terminal_a_local_tracker_isnt_asked_for_grill_batch() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.commit_local_issues_under_github_origin(LOCAL_ISSUES);
+    fixture.fail_gh();
+    let envs: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+
+    let out = fixture.on_terminal_with(
+        &envs,
+        &["--check", "cargo test", "--tracker", "local"],
+        "\n\n\n\n\n\n\n\n\n\n\n\n",
+    );
+
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("No grill-batch template: a local tracker's herd has none yet."),
+        "{shown}"
+    );
+    assert!(!shown.contains("Add a grill-batch template"), "{shown}");
+    assert!(shown.contains("  grill-batch no\r\n"), "{shown}");
 }
 
 #[test]
@@ -8574,7 +8480,10 @@ fn with_grill_batch_another_tracker_leaves_routing_and_done_to_fill_in() {
 
 #[test]
 fn with_grill_batch_the_lead_and_the_loopherd_doc_say_how_a_batch_is_released() {
-    for args in [&[][..], &["--tracker", "local"][..]] {
+    for args in [
+        &[][..],
+        &["--tracker", "other", "--tracker-desc", "Linear."][..],
+    ] {
         let fixture = Fixture::new(&["acme"]);
         let mut with = args.to_vec();
         with.extend(["--with", "grill-batch"]);
@@ -8712,31 +8621,27 @@ fn on_a_terminal_answering_no_to_grill_batch_writes_none() {
 
 #[test]
 fn herd_upgrade_gives_a_herd_without_grill_batch_the_routing_template_and_prompt_init_writes() {
-    for args in [&[][..], &["--tracker", "local"][..]] {
-        let routed = Fixture::new(&["acme"]);
-        assert_ok(
-            &routed.init(&[args, &["--with", "wayfinding", "--with", "grill-batch"]].concat()),
-        );
-        let fixture = Fixture::new(&["acme"]);
-        assert_ok(&fixture.init(&[args, &["--with", "wayfinding"]].concat()));
+    let routed = Fixture::new(&["acme"]);
+    assert_ok(&routed.init(&["--with", "wayfinding", "--with", "grill-batch"]));
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&["--with", "wayfinding"]));
 
-        let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n") else {
-            return;
-        };
+    let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n") else {
+        return;
+    };
 
-        assert_ok(&out);
-        let shown = text(&out.stdout);
-        assert!(
-            shown.contains("grill-batch — Adds [template.grill-batch]"),
-            "{shown}"
-        );
-        let routing = |fixture: &Fixture| {
-            let herd = herd_toml(fixture);
-            format!("{:?}\n{:?}", herd["queue"], herd["template"]["grill-batch"])
-                .replace(&fixture.root.path().display().to_string(), "<root>")
-        };
-        assert_eq!(routing(&fixture), routing(&routed), "{args:?}\n{shown}");
-        assert_eq!(grill_batch_prompt(&fixture), grill_batch_prompt(&routed));
-        assert_ok(&fixture.loopherd(&["herds"]));
-    }
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("grill-batch — Adds [template.grill-batch]"),
+        "{shown}"
+    );
+    let routing = |fixture: &Fixture| {
+        let herd = herd_toml(fixture);
+        format!("{:?}\n{:?}", herd["queue"], herd["template"]["grill-batch"])
+            .replace(&fixture.root.path().display().to_string(), "<root>")
+    };
+    assert_eq!(routing(&fixture), routing(&routed), "{shown}");
+    assert_eq!(grill_batch_prompt(&fixture), grill_batch_prompt(&routed));
+    assert_ok(&fixture.loopherd(&["herds"]));
 }

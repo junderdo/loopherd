@@ -130,14 +130,14 @@ done | awk -v room=@ID_ROOM@ -v list=@LIST@ '
       f = files[i]
       if (list == "backlog") {
         if (has(f, "blocked") || closed(f)) continue
-        if (@LOCAL_CLAIMABLE@ && !has(f, "@NEEDS_INFO_LC@") \
+        if (has(f, "@READY_FOR_AGENT_LC@") && !has(f, "@NEEDS_INFO_LC@") \
             && !has(f, "@READY_FOR_HUMAN_LC@")) continue
         if (!unblocked(f)) continue
         if (!(f in title)) { title[f] = name[f]; sub(/\.md$/, "", title[f]) }
         print f, title[f]
         continue
       }
-      if (!@LOCAL_CLAIMABLE@ || has(f, "blocked") || has(f, "@NEEDS_INFO_LC@") \
+      if (!has(f, "@READY_FOR_AGENT_LC@") || has(f, "blocked") || has(f, "@NEEDS_INFO_LC@") \
           || has(f, "@READY_FOR_HUMAN_LC@") || closed(f) || !unblocked(f)) continue
       type = "feat"; skill = "tdd"
       k = split(labels[f], words, " ")

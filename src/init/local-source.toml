@@ -15,6 +15,6 @@ source = '''
 # resolved, closed nor done, or has @NEEDS_INFO@ or @READY_FOR_HUMAN@, and its
 # Blocked by: line names only resolved issues. The title is its first
 # # heading, else the file's name. Ones waiting on the human stay: they are
-# what a dry queue forgets.@BACKLOG_NOTE@
+# what a dry queue forgets.
 backlog = '''
 @LOCAL_BACKLOG@'''
