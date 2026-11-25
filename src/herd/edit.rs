@@ -85,7 +85,7 @@ pub fn unset(paths: &Paths, herd: &str, key: &str) -> Result<bool> {
 /// Applies `change` to `herd`'s file under the file's lock and, when it
 /// returns true, replaces the file with the result through a temp file and a
 /// rename, once that passes the checks `loopherd herds` makes.
-fn edit(
+pub(super) fn edit(
     paths: &Paths,
     herd: &str,
     change: impl FnOnce(&mut DocumentMut) -> Result<bool>,

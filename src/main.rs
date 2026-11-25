@@ -66,7 +66,7 @@ mod watch;
 mod worker_sandbox;
 mod worktree;
 
-use std::io::{Read, Write};
+use std::io::{BufRead, IsTerminal, Read, Write};
 use std::num::NonZeroUsize;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::PermissionsExt;
@@ -84,7 +84,7 @@ use crate::herd_view::Options;
 use crate::herdr::events::SocketSubscriber;
 use crate::herdr::{CliHerdr, Herdr, socket_from_env};
 use crate::lead::LeadRequest;
-use crate::ledger::{FileLedger, Ledger, Process};
+use crate::ledger::{FileLedger, Ledger, Process, Role};
 use crate::process::Procs;
 use crate::report::{Filter, Kind, Reporter, report, reports};
 use crate::revive::{ReviveRequest, revive};
@@ -388,7 +388,7 @@ enum Command {
         /// Restart the lead in this pane once its turn ends: starts a detached
         /// waiter that runs the plain restart after its stop since the handoff
         /// reads finished, giving up after 30 minutes with a note. From the
-        /// shepherd's recorded pane, with `[shepherd] self_restart` on, it also
+        /// shepherd's recorded pane, unless `[shepherd] self_restart = false`, it also
         /// waits until the human leaves the pane alone for 5 minutes, and any
         /// prompt there cancels it.
         #[arg(long = "self", id = "own", conflicts_with_all = ["name", "force"])]
@@ -603,6 +603,13 @@ enum HerdAction {
     /// Remove the key; succeeds if it isn't set. Refuses, changing nothing, a
     /// file `loopherd herds` would call invalid.
     Unset { herd: String, key: String },
+    /// Offer the herd, or every herd, each change newer `loopherd init` writes
+    /// that it lacks: its id, why, and a diff, then `Apply? [Y/n]`. A no, or a
+    /// yes to `Stop offering this?` for a change its own value blocks, adds the
+    /// id to the herd file's `declined`. Backs a file up to `<file>.bak-<time>`
+    /// before its first write. Without a terminal it changes nothing and lists
+    /// each herd's pending ids.
+    Upgrade { herd: Option<String> },
     /// Delete a finished herd: its herd file, its pause, its `[lead]`
     /// `prompt_file` when that lies in the herds dir and no other herd file
     /// names it, and every run of the herd in the ledger, archived ones
@@ -745,6 +752,9 @@ struct InitArgs {
     /// now, inferring again; write nothing. Exits 1 when they differ, 2 on error.
     #[arg(long)]
     diff: bool,
+    /// A template to add, asked on a terminal and left out otherwise; repeatable.
+    #[arg(long = "with", value_enum, value_name = "TEMPLATE")]
+    with: Vec<init::Template>,
 }
 
 #[derive(Clone, Copy, clap::ValueEnum)]
@@ -1081,6 +1091,24 @@ fn run_herd(action: HerdAction) -> Result<i32> {
             true => println!("unset {key} in {herd}"),
             false => println!("{key} was not set in {herd}"),
         },
+        HerdAction::Upgrade { herd } => {
+            let ledger = FileLedger::new(FileLedger::default_path().context("ledger")?);
+            let running_leads = ledger
+                .entries()?
+                .into_values()
+                .filter(|r| r.role == Some(Role::Lead) && !r.retired)
+                .filter_map(|r| r.herd)
+                .collect();
+            let stdin = std::io::stdin();
+            let mut input = stdin.lock();
+            let terminal = std::io::stdin().is_terminal() && std::io::stdout().is_terminal();
+            let how = herd::Upgrade {
+                running_leads: &running_leads,
+                now: SystemTime::now(),
+                terminal: terminal.then_some(&mut input as &mut dyn BufRead),
+            };
+            herd::upgrade(&paths, herd.as_deref(), how, &mut std::io::stdout())?;
+        }
         HerdAction::Remove {
             herd,
             dry_run,
@@ -2896,6 +2924,7 @@ fn init_or_diff(args: InitArgs) -> Result<i32> {
         lead: args.no_lead.then_some(false),
         merge_guard: args.merge_guard,
         context_limit: args.context_limit,
+        with: &args.with,
     };
     if args.diff {
         return Ok(match init::diff(&paths, req)? {

@@ -88,7 +88,7 @@ pub fn checks(
     checks.extend(herdr_checks);
     match setup {
         Ok(setup) => {
-            checks.extend(config_checks(&setup.paths, &install.settings));
+            checks.extend(config_checks(&setup.paths, install));
             checks.extend(herd_checks(&setup.paths, herd));
             checks.extend(unix_socket_checks(install, &setup.paths, herd));
             checks.extend(state_checks(
@@ -233,7 +233,7 @@ fn install_record_check(paths: &Paths) -> Check {
     }
 }
 
-fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
+fn config_checks(paths: &Paths, install: &Install) -> Vec<Check> {
     let config = crate::herd::config_file(paths);
     let by_hand = format!("fix {} by hand", config.display());
     let mut checks = vec![install_record_check(paths)];
@@ -247,12 +247,9 @@ fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
             None
         }
     };
-    let self_restart = file
-        .as_ref()
-        .and_then(|f| f.shepherd.as_ref()?.self_restart)
-        .unwrap_or(false);
-    if self_restart {
-        checks.extend(self_restart_checks(&config, settings));
+    if let Some(file) = &file {
+        let set = file.shepherd.as_ref().and_then(|s| s.self_restart);
+        checks.extend(self_restart_checks(set, &config, install));
     }
     if crate::herd::parses_as_toml(&config) {
         match crate::notify::load(&config) {
@@ -288,25 +285,28 @@ fn config_checks(paths: &Paths, settings: &Path) -> Vec<Check> {
     checks
 }
 
-/// With `[shepherd] self_restart` on: a prompt can't cancel a self-restart
-/// without the UserPromptSubmit hook, and a give-up goes unseen unless
-/// `[notify]` sends it.
-fn self_restart_checks(config: &Path, settings: &Path) -> Vec<Check> {
+/// With `[shepherd] self_restart` on, set or by default: a prompt can't cancel
+/// a self-restart without the UserPromptSubmit hook. Only an explicit `true`
+/// asks for `[notify]`, since a give-up still labels the pane.
+fn self_restart_checks(set: Option<bool>, config: &Path, install: &Install) -> Vec<Check> {
     let mut checks = vec![];
-    if !crate::install_hook::prompt_hook_installed(settings).unwrap_or(false) {
+    if set == Some(false) {
+        return checks;
+    }
+    if !crate::install_hook::prompt_hook_installed(&install.settings).unwrap_or(false) {
         checks.push(warning(
             "self_restart",
             format!(
                 "[shepherd] self_restart is on, but loopherd's UserPromptSubmit hook isn't in {}, \
                  so restart --self refuses",
-                settings.display()
+                install.settings.display()
             ),
-            "loopherd install-hook".into(),
+            install_hook(install),
         ));
     }
     let sends = crate::notify::load(config)
         .is_ok_and(|n| n.is_some_and(|n| n.sends(crate::notify::Kind::SelfRestart)));
-    if !sends {
+    if set == Some(true) && !sends {
         checks.push(warning(
             "self_restart",
             "[shepherd] self_restart is on, but [notify] doesn't send self_restart, so a give-up \
@@ -904,18 +904,54 @@ fn state_checks(
     // A lead known to be on another herdr has its broker under that herdr's
     // config dir; one whose herdr can't be told apart is checked, as revive starts it.
     let here = reached.as_ref().and_then(|(_, socket)| socket.as_deref());
+    let leads_here: Vec<&str> = members
+        .iter()
+        .filter(|r| !r.retired && r.is_lead())
+        .filter(|lead| here.is_none_or(|here| !elsewhere(Some(here), lead)))
+        .map(|lead| lead.name.as_str())
+        .collect();
+    checks.extend(lead_notify_check(&setup.paths, &leads_here));
     checks.extend(
-        members
+        leads_here
             .iter()
-            .filter(|r| !r.retired && r.is_lead())
-            .filter(|lead| here.is_none_or(|here| !elsewhere(Some(here), lead)))
-            .filter_map(|lead| broker_check(&setup.paths, &lead.name, binary)),
+            .filter_map(|lead| broker_check(&setup.paths, lead, binary)),
     );
     if let Some((herdr, socket)) = reached {
         let unretired: Vec<_> = members.iter().filter(|r| !r.retired).collect();
         checks.extend(pane_checks(herdr, socket.as_deref(), &unretired));
     }
     checks
+}
+
+/// Running `leads` whose questions `[notify]` wouldn't send; a broken table
+/// is the notify check's failure.
+fn lead_notify_check(paths: &Paths, leads: &[&str]) -> Option<Check> {
+    if leads.is_empty() {
+        return None;
+    }
+    let config = crate::herd::config_file(paths);
+    let reason = match crate::notify::load(&config) {
+        Ok(None) => "[notify] is off",
+        Ok(Some(n)) if !n.sends(crate::notify::Kind::Question) => {
+            "[notify] kinds leaves out question"
+        }
+        _ => return None,
+    };
+    let (who, whose) = match leads {
+        [lead] => (format!("lead {lead} is"), "its"),
+        _ => (format!("leads {} are", leads.join(", ")), "their"),
+    };
+    Some(warning(
+        "notify",
+        format!(
+            "{who} running, but {reason}, so {whose} questions reach no one outside the \
+             shepherd's pane"
+        ),
+        format!(
+            "set [notify] enabled = true with question in its kinds, in {}",
+            config.display()
+        ),
+    ))
 }
 
 /// The loopherd a broker should run: the one on PATH, which `broker-restart`
@@ -1943,14 +1979,17 @@ mod tests {
     #[test]
     fn a_missing_prompt_hook_warns_unless_pane_label_is_on() {
         let mut m = machine(&without("UserPromptSubmit"));
-        let line = format!(
-            "UserPromptSubmit hook: not in {}; fix: loopherd install-hook\n",
-            m.install.settings.display()
+        let settings = m.install.settings.display().to_string();
+        let line =
+            format!("UserPromptSubmit hook: not in {settings}; fix: loopherd install-hook\n");
+        let self_restart = format!(
+            "warning self_restart: [shepherd] self_restart is on, but loopherd's UserPromptSubmit \
+             hook isn't in {settings}, so restart --self refuses; fix: loopherd install-hook\n"
         );
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("warning {line}doctor: 18 ok, 1 warnings, 0 failures\n"),
+                format!("warning {line}{self_restart}doctor: 18 ok, 2 warnings, 0 failures\n"),
                 0
             )
         );
@@ -1958,7 +1997,7 @@ mod tests {
         assert_eq!(
             run(&m, &herdr()),
             (
-                format!("failure {line}doctor: 18 ok, 0 warnings, 1 failures\n"),
+                format!("failure {line}{self_restart}doctor: 18 ok, 1 warnings, 1 failures\n"),
                 1
             )
         );
@@ -1984,7 +2023,7 @@ mod tests {
         m.install.settings = m.dir.path().join("absent.json");
         let (out, code) = run(&m, &herdr());
         assert!(
-            out.ends_with("doctor: 12 ok, 3 warnings, 4 failures\n"),
+            out.ends_with("doctor: 12 ok, 4 warnings, 4 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -2004,7 +2043,7 @@ mod tests {
             "{out}"
         );
         assert!(
-            out.ends_with("doctor: 11 ok, 0 warnings, 1 failures\n"),
+            out.ends_with("doctor: 11 ok, 1 warnings, 1 failures\n"),
             "{out}"
         );
         assert_eq!(code, 1);
@@ -2191,9 +2230,9 @@ mod tests {
         let data: Value = serde_json::from_str(&json(&checks)).unwrap();
         assert_eq!(
             (&data["ok"], &data["warnings"], &data["failures"]),
-            (&json!(18), &json!(1), &json!(0))
+            (&json!(18), &json!(2), &json!(0))
         );
-        assert_eq!(data["checks"].as_array().unwrap().len(), 19);
+        assert_eq!(data["checks"].as_array().unwrap().len(), 20);
         assert_eq!(
             data["checks"][4],
             json!({
@@ -4412,10 +4451,111 @@ mod tests {
         );
 
         let m = machine(&ALL[..4]);
-        std::fs::write(m.config(), format!("{CONFIG}{notify}")).unwrap();
+        std::fs::write(
+            m.config(),
+            format!("{CONFIG}[shepherd]\nself_restart = false\n"),
+        )
+        .unwrap();
         let found = problems(&m, &herdr());
         assert!(
             !found.iter().any(|p| p.contains("self_restart")),
+            "{found:?}"
+        );
+    }
+
+    #[test]
+    fn a_running_lead_warns_when_notify_would_not_send_its_questions() {
+        let lead = |name: &str, socket: Option<&str>| {
+            let mut lead = member(name, "h", "w1:p1", socket);
+            lead.role = Some(crate::ledger::Role::Lead);
+            lead
+        };
+        let notify_warnings = |m: &Machine, herdr: &FakeHerdr| -> Vec<String> {
+            problems(m, herdr)
+                .into_iter()
+                .filter(|p| p.starts_with("warning notify"))
+                .collect()
+        };
+        let fix = |m: &Machine| {
+            format!(
+                "fix: set [notify] enabled = true with question in its kinds, in {}",
+                m.config().display()
+            )
+        };
+
+        let m = machine(&ALL);
+        let mut retired = lead("lead-old", None);
+        retired.retired = true;
+        m.ledger(&[retired, member("w", "h", "w1:p2", None)]);
+        assert_eq!(notify_warnings(&m, &herdr()), Vec::<String>::new());
+
+        m.ledger(&[lead("lead-a", None)]);
+        assert_eq!(
+            notify_warnings(&m, &herdr()),
+            [format!(
+                "warning notify: lead lead-a is running, but [notify] is off, so its \
+                 questions reach no one outside the shepherd's pane; {}",
+                fix(&m)
+            )]
+        );
+
+        let m = machine(&ALL);
+        let config = m.config();
+        m.ledger(&[
+            lead("lead-a", None),
+            lead("lead-b", None),
+            lead("lead-dev", Some("/run/dev.sock")),
+        ]);
+        let mut here = herdr();
+        here.socket = Some("/run/live.sock".into());
+        let warned = |reason: &str| {
+            [format!(
+                "warning notify: leads lead-a, lead-b are running, but {reason}, so their \
+                 questions reach no one outside the shepherd's pane; {}",
+                fix(&m)
+            )]
+        };
+
+        assert_eq!(notify_warnings(&m, &here), warned("[notify] is off"));
+
+        std::fs::write(&config, format!("{CONFIG}[notify]\nenabled = false\n")).unwrap();
+        assert_eq!(notify_warnings(&m, &here), warned("[notify] is off"));
+
+        std::fs::write(
+            &config,
+            format!("{CONFIG}[notify]\nenabled = true\nkinds = ['blocked']\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            notify_warnings(&m, &here),
+            warned("[notify] kinds leaves out question")
+        );
+
+        std::fs::write(
+            &config,
+            format!("{CONFIG}[notify]\nenabled = true\nkinds = ['question']\n"),
+        )
+        .unwrap();
+        assert_eq!(notify_warnings(&m, &here), Vec::<String>::new());
+    }
+
+    #[test]
+    fn self_restart_on_by_default_warns_only_about_the_prompt_hook() {
+        let m = machine(&ALL);
+        std::fs::write(m.config(), CONFIG).unwrap();
+        assert_eq!(problems(&m, &herdr()), Vec::<String>::new());
+
+        let m = machine(&ALL[..4]);
+        std::fs::write(m.config(), CONFIG).unwrap();
+        let found: Vec<String> = problems(&m, &herdr())
+            .into_iter()
+            .filter(|p| p.contains("self_restart"))
+            .collect();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!(
+            found[0].starts_with(
+                "warning self_restart: [shepherd] self_restart is on, but loopherd's UserPromptSubmit hook isn't in"
+            ),
             "{found:?}"
         );
     }
