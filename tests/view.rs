@@ -18,11 +18,17 @@ const ALT_SCREEN: &[u8] = b"\x1b[?1049h";
 /// `herdr` stub, and waits until the view has drawn its screen and made its
 /// first herdr call.
 fn start_view(home: &Path) -> Child {
+    start_view_with(home, "exit 1\n", &[])
+}
+
+/// [`start_view`] with a stub that runs `stub` after marking the call, and
+/// with `env` set.
+fn start_view_with(home: &Path, stub: &str, env: &[(&str, &str)]) -> Child {
     let bin = home.join("bin");
     std::fs::create_dir(&bin).unwrap();
     executable(
         &bin.join("herdr"),
-        "#!/bin/sh\ntouch \"$HOME/called\"\nexit 1\n",
+        format!("#!/bin/sh\ntouch \"$HOME/called\"\n{stub}"),
     );
     let mut child = Command::new("script")
         .args([
@@ -38,6 +44,7 @@ fn start_view(home: &Path) -> Child {
         .env("LOOPHERD_CONFIG_DIR", home.join("config"))
         .env("HERDR_SOCKET_PATH", home.join("herdr.sock"))
         .env("HERDR_PLUGIN_ENTRYPOINT_ID", "view")
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .spawn()
@@ -186,4 +193,43 @@ fn a_hung_up_pty_ends_the_view() {
     }
 
     assert_eq!(left, Vec::<i32>::new());
+}
+
+#[test]
+fn s_splits_a_shepherd_left_of_the_view_with_the_ratio_the_swap_hands_it() {
+    let home = tempfile::tempdir().unwrap();
+    let stub = r#"echo "$*" >> "$HOME/calls"
+case "$1 $2" in
+  "agent list") echo '{"result":{"agents":[]}}' ;;
+  "pane split") echo '{"result":{"pane":{"pane_id":"w1:p2"}}}' ;;
+  "pane swap") echo '{"result":{"swap":{"changed":true}}}' ;;
+  *) exit 1 ;;
+esac
+"#;
+    let mut view = start_view_with(home.path(), stub, &[("HERDR_PANE_ID", "w1:p1")]);
+
+    view.stdin.as_mut().unwrap().write_all(b"s").unwrap();
+    let calls = home.path().join("calls");
+    let swapped = |calls: &str| calls.contains("pane swap");
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !std::fs::read_to_string(&calls).is_ok_and(|c| swapped(&c)) && Instant::now() < deadline {
+        thread::sleep(Duration::from_millis(20));
+    }
+    end(&mut view);
+
+    let calls = std::fs::read_to_string(&calls).unwrap_or_default();
+    let layout: Vec<_> = calls
+        .lines()
+        .filter(|c| c.starts_with("pane split") || c.starts_with("pane swap"))
+        .collect();
+    assert_eq!(layout.len(), 2, "{calls}");
+    assert!(
+        layout[0].starts_with("pane split w1:p1 --direction right --ratio 0.6 "),
+        "{}",
+        layout[0]
+    );
+    assert_eq!(
+        layout[1],
+        "pane swap --source-pane w1:p1 --target-pane w1:p2"
+    );
 }

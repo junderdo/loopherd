@@ -653,6 +653,27 @@ mod tests {
     }
 
     #[test]
+    fn side_by_side_a_swap_herdr_refuses_starts_no_shepherd_right_of_the_view() {
+        let state = tempfile::tempdir().unwrap();
+        let mut herdr = FakeHerdr::new(&[("w1", "main")]);
+        herdr.fail_swap = true;
+        let view = herdr.add_tab("w1", "view", Path::new("/repo"), true);
+
+        let err = summon(
+            &herdr,
+            &FakeProcs::default(),
+            state.path(),
+            Some(&view_pane(&view)),
+            Layout::SideBySide,
+        )
+        .unwrap_err();
+
+        assert!(format!("{err:#}").contains("swap"), "{err:#}");
+        assert!(herdr.splits().is_empty());
+        assert!(herdr.started().is_empty());
+    }
+
+    #[test]
     fn a_focus_that_fails_after_the_start_keeps_the_running_shepherd() {
         let state = tempfile::tempdir().unwrap();
         let mut herdr = FakeHerdr::new(&[("w1", "main")]);
