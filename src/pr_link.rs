@@ -63,7 +63,7 @@ pub fn click(
             ("LOOPHERD_PR_URL", pr),
         ];
         match herdr.open_plugin_pane(POPUP, &Placement::Manifest, &env) {
-            Ok(()) => return Ok(Shown::Popup { member }),
+            Ok(_) => return Ok(Shown::Popup { member }),
             Err(e) => eprintln!("loopherd pr: no popup for {member}, opening {url} instead: {e:#}"),
         }
     }

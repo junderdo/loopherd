@@ -1,5 +1,7 @@
 //! herdr, reached only through the [`Herdr`] trait.
 
+use std::io::{BufRead, BufReader, Write};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -182,7 +184,7 @@ pub trait Herdr {
         entrypoint: &str,
         placement: &Placement,
         env: &[(&str, &str)],
-    ) -> Result<()>;
+    ) -> Result<Landed>;
     /// The plugin `id` in the reached herdr's registry; `None` when neither
     /// installed nor linked. Gives up after `timeout`.
     fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>>;
@@ -208,6 +210,15 @@ pub enum Placement {
     },
 }
 
+/// Where an opened plugin pane ended up.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Landed {
+    AsPlaced,
+    /// Split right of or below its target and never swapped left or above,
+    /// herdr naming no new pane to swap, for the reason given.
+    Unswapped(String),
+}
+
 /// The side of its target a split's new pane takes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Side {
@@ -227,7 +238,7 @@ impl Side {
         }
     }
 
-    fn swaps(self) -> bool {
+    pub(crate) fn swaps(self) -> bool {
         matches!(self, Side::Left | Side::Above)
     }
 }
@@ -300,6 +311,9 @@ pub fn wait_for_shell_prompt(
     Ok(())
 }
 
+/// How long herdr gets to answer a socket request.
+const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+
 /// herdr's longest `agent start --timeout`.
 const MAX_START_TIMEOUT: Duration = Duration::from_millis(300_000);
 
@@ -348,37 +362,42 @@ impl CliHerdr {
             "--target-pane",
             other,
         ];
-        self.call_ok(&args)?;
+        let swap = &self.call_ok(&args)?["swap"];
+        // herdr answers success for a swap it didn't make.
+        if swap["changed"].as_bool() != Some(true) {
+            let reason = swap["reason"].as_str().unwrap_or("no reason given");
+            bail!("herdr pane swap left {source} and {other} in place ({reason})");
+        }
         if let Some(focused) = focused.filter(|f| f != source) {
             // Best effort: the layout is right whether or not focus goes back.
-            let _ = self.focus_through_neighbor(&focused);
+            let _ = self.focus_pane(&focused);
         }
         Ok(())
     }
 
-    /// Focuses `pane` by moving focus from a neighbor toward it, herdr having
-    /// no focus by ID for a shell's pane.
-    fn focus_through_neighbor(&self, pane: &str) -> Result<()> {
-        let neighbor = |of: &str, direction: &str| {
-            self.call_ok(&["pane", "neighbor", "--pane", of, "--direction", direction])
-                .ok()
-                .and_then(|r| r["neighbor"]["neighbor_pane_id"].as_str().map(String::from))
-        };
-        for (out, back) in [
-            ("left", "right"),
-            ("right", "left"),
-            ("up", "down"),
-            ("down", "up"),
-        ] {
-            let Some(next) = neighbor(pane, out) else {
-                continue;
-            };
-            if neighbor(&next, back).as_deref() == Some(pane) {
-                let args = ["pane", "focus", "--pane", &next, "--direction", back];
-                return self.call_ok(&args).map(drop);
-            }
+    /// Focuses `pane` over herdr's socket, the CLI's `pane focus` only
+    /// moving to a neighbor.
+    fn focus_pane(&self, pane: &str) -> Result<()> {
+        let socket = self.socket().context("herdr named no socket")?;
+        let mut stream = UnixStream::connect(&socket)
+            .with_context(|| format!("connect to {}", socket.display()))?;
+        stream.set_read_timeout(Some(SOCKET_TIMEOUT))?;
+        let request = serde_json::json!({
+            "id": "loopherd",
+            "method": "pane.focus",
+            "params": {"pane_id": pane},
+        });
+        writeln!(stream, "{request}").context("send pane.focus")?;
+        let mut line = String::new();
+        BufReader::new(&stream)
+            .read_line(&mut line)
+            .context("read the pane.focus reply")?;
+        let reply: Value =
+            serde_json::from_str(&line).with_context(|| MalformedReply("pane.focus".into()))?;
+        match reply["error"]["code"].as_str() {
+            Some(code) => bail!("herdr refused pane.focus {pane}: {code}"),
+            None => Ok(()),
         }
-        bail!("no neighbor of {pane} leads back to it")
     }
 
     fn call_ok_within(&self, args: &[&str], timeout: Duration) -> Result<Value> {
@@ -907,7 +926,7 @@ impl Herdr for CliHerdr {
         entrypoint: &str,
         placement: &Placement,
         env: &[(&str, &str)],
-    ) -> Result<()> {
+    ) -> Result<Landed> {
         let env: Vec<String> = env.iter().map(|(k, v)| format!("{k}={v}")).collect();
         let mut argv = vec![
             "plugin",
@@ -967,7 +986,7 @@ impl Herdr for CliHerdr {
             Some((toward_new, amount)),
         ) = (placement, resize)
         else {
-            return Ok(());
+            return Ok(Landed::AsPlaced);
         };
         if side.swaps() {
             let opened = serde_json::from_slice::<Value>(&out.stdout)
@@ -978,13 +997,14 @@ impl Herdr for CliHerdr {
                         "plugin pane open",
                     )
                 });
-            if let Err(e) = opened.and_then(|new| self.swap(pane, &new, *focus)) {
-                let instead = match side.direction() {
-                    "down" => "below",
-                    _ => "right of",
-                };
-                eprintln!("loopherd: the plugin pane opened {instead} its target instead: {e:#}");
-                return Ok(());
+            // Unnamed, the pane can't be closed, so a fallback would open a second view.
+            let new = match opened {
+                Ok(new) => new,
+                Err(e) => return Ok(Landed::Unswapped(format!("{e:#}"))),
+            };
+            if let Err(e) = self.swap(pane, &new, *focus) {
+                let _ = self.close_pane(&new);
+                return Err(e);
             }
         }
         // Resizing the target, not the new pane, moves the divider between them.
@@ -1002,7 +1022,7 @@ impl Herdr for CliHerdr {
         if let Err(e) = self.call_ok(&args) {
             eprintln!("loopherd: the plugin pane opened at half the split: {e:#}");
         }
-        Ok(())
+        Ok(Landed::AsPlaced)
     }
 
     fn plugin(&self, id: &str, timeout: Duration) -> Result<Option<Plugin>> {
@@ -1094,6 +1114,14 @@ mod tests {
             assert!((amount - 0.1).abs() < 1e-9, "{side:?}: {amount}");
         }
         assert_eq!(split_resize(Side::Above, 0.5).unwrap(), ("up", 0.0));
+    }
+
+    #[test]
+    fn a_pane_left_of_or_above_its_target_gets_the_ratio_the_swap_hands_it() {
+        assert_eq!(target_ratio(Side::Left, 0.6).unwrap(), "0.6");
+        assert_eq!(target_ratio(Side::Above, 0.6).unwrap(), "0.6");
+        assert_eq!(target_ratio(Side::Right, 0.25).unwrap(), "0.75");
+        assert_eq!(target_ratio(Side::Below, 0.25).unwrap(), "0.75");
     }
 
     #[test]

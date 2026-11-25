@@ -374,10 +374,14 @@ Checked 2026-11-19 against herdr 0.9.5 on the `loopherd-dev` server through
   `down`. `pane split --ratio r` gives the target (first slot) `r`.
   `pane swap --source-pane a --target-pane b` trades their places, the
   ratio staying with the slot, and focuses `a`, bringing its workspace and
-  tab forward. `pane move` within one tab changes nothing. `agent focus`
+  tab forward. A swap herdr doesn't make still succeeds, answering
+  `.result.swap.changed: false` and a `reason` (`same_pane`, `not_found`,
+  `cross_tab`). `pane move` within one tab changes nothing. `agent focus`
   refuses a pane with no agent; `pane neighbor --pane p --direction d`
   answers `.result.neighbor.neighbor_pane_id`, and `pane focus --pane p
-  --direction d` focuses that neighbor. `plugin pane open` answers its new
+  --direction d` focuses that neighbor. The socket's `pane.focus` with
+  `{"pane_id": p}` focuses any pane by ID, a shell's included, answering
+  `pane_info` or `pane_not_found` (checked on the dev session, LH-479). `plugin pane open` answers its new
   pane as `.result.plugin_pane.pane.pane_id`.
 
 ## Oldest supported herdr (LH-247)

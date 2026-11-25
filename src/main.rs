@@ -1502,6 +1502,9 @@ fn view_outcome(how: &view_pane::How) -> String {
         view_pane::How::Opened => "opened the view".into(),
         view_pane::How::OpenedFocused => "opened and focused the view".into(),
         view_pane::How::Focused { view } => format!("focused the view already open in {view}"),
+        view_pane::How::Unswapped { why } => {
+            format!("opened the view on herdr's side, not the layout's ({why}),")
+        }
     }
 }
 

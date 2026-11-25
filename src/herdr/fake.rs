@@ -11,8 +11,8 @@ use anyhow::{Result, anyhow, bail};
 
 use super::events::{Connection, OnPush, PaneNotFound, Pushed, Subscriber, Subscription};
 use super::{
-    Agent, AgentStatus, Herdr, MalformedReply, NewTab, Pane, Placement, Plugin, Server, Side,
-    StartOutcome, Tab, WaitOutcome, Workspace,
+    Agent, AgentStatus, Herdr, Landed, MalformedReply, NewTab, Pane, Placement, Plugin, Server,
+    Side, StartOutcome, Tab, WaitOutcome, Workspace,
 };
 
 /// How a Claude agent started by the fake behaves.
@@ -158,6 +158,12 @@ pub struct FakeHerdr {
     /// `focus` fails for this one pane.
     pub fail_focus_of: Option<String>,
     pub fail_dock: bool,
+    /// herdr leaves every swap unmade, so a pane bound left of or above its
+    /// target fails: a new one opens nowhere, a docked one only reaches the tab.
+    pub fail_swap: bool,
+    /// herdr's reply names no plugin pane, so one left of or above its
+    /// target lands unswapped.
+    pub unnamed_plugin_panes: bool,
     pub fail_wait: bool,
     pub fail_visible_text: bool,
     pub fail_shell_pid: bool,
@@ -212,6 +218,8 @@ impl FakeHerdr {
             fail_focus: false,
             fail_focus_of: None,
             fail_dock: false,
+            fail_swap: false,
+            unnamed_plugin_panes: false,
             fail_wait: false,
             fail_visible_text: false,
             fail_shell_pid: false,
@@ -382,6 +390,13 @@ impl FakeHerdr {
             .panes
             .iter()
             .any(|p| p.id == pane_id)
+    }
+
+    fn refuse_swap(&self, side: Side) -> Result<()> {
+        if self.fail_swap && side.swaps() {
+            bail!("herdr pane swap left them in place (not_found)");
+        }
+        Ok(())
     }
 
     pub fn splits(&self) -> Vec<Split> {
@@ -808,6 +823,7 @@ impl Herdr for FakeHerdr {
                 .tab_id
                 .clone()
         };
+        self.refuse_swap(side)?;
         let new = self.split(&tab_id, cwd);
         let mut state = self.state.lock().unwrap();
         state.splits.push(Split {
@@ -857,6 +873,8 @@ impl Herdr for FakeHerdr {
         for agent in state.agents.iter_mut().filter(|a| a.pane_id == pane_id) {
             agent.tab_id = tab.clone();
         }
+        // A dock's swap comes after its move, so the pane stays in the tab.
+        self.refuse_swap(side)?;
         state.docks.push(Dock {
             pane: pane_id.into(),
             target: target.into(),
@@ -1053,7 +1071,7 @@ impl Herdr for FakeHerdr {
         entrypoint: &str,
         placement: &Placement,
         env: &[(&str, &str)],
-    ) -> Result<()> {
+    ) -> Result<Landed> {
         self.called();
         if self.is_down() {
             bail!("herdr server not running");
@@ -1076,6 +1094,9 @@ impl Herdr for FakeHerdr {
         } = placement
         {
             super::split_resize(*side, *share)?;
+            if !self.unnamed_plugin_panes {
+                self.refuse_swap(*side)?;
+            }
             let target = state.panes.iter().find(|p| p.id == *pane).unwrap().clone();
             state.next_id += 1;
             let id = format!("{}:p{}", target.workspace_id, state.next_id);
@@ -1098,7 +1119,12 @@ impl Herdr for FakeHerdr {
         state
             .plugin_panes
             .push((entrypoint.to_string(), placement.clone(), env));
-        Ok(())
+        Ok(match placement {
+            Placement::Split { side, .. } if self.unnamed_plugin_panes && side.swaps() => {
+                Landed::Unswapped("herdr named no plugin pane".into())
+            }
+            _ => Landed::AsPlaced,
+        })
     }
 
     fn label_pane(&self, pane_id: &str, label: Option<&str>) -> Result<()> {
