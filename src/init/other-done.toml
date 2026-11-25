@@ -1,0 +1,3 @@
+# @FILL_IN@:
+# done, a shell command that exits 0 once task {number} is closed, its braces
+# doubled. Until it's set no member counts as done, so feed never retires one.

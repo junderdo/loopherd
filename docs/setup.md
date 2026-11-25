@@ -112,7 +112,7 @@ default branch, and checks from `Cargo.toml` and `package.json`, and on a
 terminal asks for each with the inferred value as the default. For a local
 tracker on a GitHub origin, the GitHub repo question defaults to none (no gh
 calls, no PR `merged` check); `--no-github` makes that choice off a
-terminal. It writes `<herd>.toml` and `<herd>-lead.md` in
+terminal. It writes `<herd>.toml`, `<herd>-lead.md` and `<herd>-grill.md` in
 `$XDG_CONFIG_HOME/loopherd/herds/` (default `~/.config/loopherd/herds/`;
 `LOOPHERD_CONFIG_DIR` replaces the `loopherd` dir), creates the labels the
 queue reads for a GitHub tracker, and, uncommitted, adds

@@ -1,0 +1,10 @@
+# A grill the shepherd starts live with the human: `loopherd add --no-focus
+# @HERD@ grill @GRILL_USAGE@`, then `loopherd tell` its background, then
+# focus. Attended, so feed never spawns it: keep it out of [queue].
+[template.grill]
+params = @GRILL_PARAMS@
+attended = true
+name = "{herd}-grill-{@GRILL_KEY@}"
+branch = "docs/{@GRILL_KEY@}-{slug}"
+@GRILL_CHECKS@
+prompt_file = @GRILL_PROMPT@
