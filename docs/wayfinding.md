@@ -182,6 +182,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D173](decisions/D173.md) | Amends D100 and D107. The settings checks also read the main checkout's `.claude/settings.local.json`, where Claude Code keeps a worktree session's local settings, for a lead's or worker's permissions; its `/` rules start at the worktree, as Claude Code anchors them. |
 | [D174](decisions/D174.md) | Amends D135. Only the skills and herdr offers need jq, so without it the agent types are still offered; agent types found installed on an unasked run aren't recorded in `agents.sha256`; `claude plugin list` runs under `timeout 10`; `install.sh` installs the herdr plugin at the release tag (`--ref`) where herdr takes one, else from the default branch, saying so. |
 | [D175](decisions/D175.md) | Amends D144. A credentials member's settings carry a fail-closed PreToolUse hook on Read and Grep, `loopherd file-hook`, refusing any path that lands in `/proc` or on `/`, as text or with symlinks followed, so its file tools can't read a process's `environ`. |
+| [D176](decisions/D176.md) | A lane whose read of the ledger fails just before it carries a request out leaves the request queued for a later round to decide, rather than refusing or running it. |
 
 ## Emerging model
 
