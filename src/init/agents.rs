@@ -85,7 +85,8 @@ pub struct Herd<'a> {
     pub checks: &'a [String],
     pub needs_info: &'a str,
     pub tracker: Kind,
-    pub wayfinding: bool,
+    /// The routed templates' sections, appended to the doc.
+    pub sections: &'a str,
 }
 
 /// What init writes into the repo, and the steps left to the human where
@@ -210,9 +211,7 @@ fn loopherd_doc(herd: &Herd) -> Doc {
             ("FILL_IN", super::FILL_IN),
         ],
     );
-    if herd.wayfinding {
-        text.push_str(super::wayfinding_section(herd.tracker));
-    }
+    text.push_str(herd.sections);
     Doc::new(LOOPHERD_DOC, text)
 }
 

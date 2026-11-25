@@ -115,7 +115,7 @@ pub fn resolve(repo: &Path, choice: Option<Choice>) -> Result<Tracker> {
 
 /// Today's built-in for each tracker doc the repo has, for `--diff`: the
 /// tracker doc when its title names a built-in tracker, and the labels doc.
-pub fn built_in(repo: &Path, wayfinding: bool) -> Result<Vec<Doc>> {
+pub fn built_in(repo: &Path, sections: &str) -> Result<Vec<Doc>> {
     let mut docs = vec![];
     if let Some(doc) = read(&repo.join(TRACKER_DOC))? {
         let built_in = match kind_named(&doc) {
@@ -123,11 +123,7 @@ pub fn built_in(repo: &Path, wayfinding: bool) -> Result<Vec<Doc>> {
             Kind::Local => Some(LOCAL),
             Kind::Other => None,
         };
-        let section = match wayfinding {
-            true => super::wayfinding_section(kind_named(&doc)),
-            false => "",
-        };
-        docs.extend(built_in.map(|text| Doc::new(TRACKER_DOC, format!("{text}{section}"))));
+        docs.extend(built_in.map(|text| Doc::new(TRACKER_DOC, format!("{text}{sections}"))));
     }
     if read(&repo.join(LABELS_DOC))?.is_some() {
         docs.push(Doc::new(LABELS_DOC, TRIAGE_LABELS.to_string()));

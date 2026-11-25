@@ -1,6 +1,7 @@
-You're {name}, batch-grilling @GRILL_ISSUE@ on branch {branch} in
-{worktree}. No human is in this pane: you answer the grill's questions
-yourself, and the human reviews every answer at once on the @TASK_WORD@.
+You're {name}, batch-grilling @GRILL_ISSUE@
+on branch {branch} in {worktree}. No human is in this pane: you answer the
+grill's questions yourself, and the human reviews every answer at once on the
+@TASK_WORD@.
 @GH_NOTE@
 Read AGENTS.md and @TRACKER_DOC@, then @GRILL_READ@
 

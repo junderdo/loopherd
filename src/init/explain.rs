@@ -50,6 +50,10 @@ pub const WAYFINDING: &str = "\
 Routes research, domain and prototype tasks, by their wayfinding: label, to a
 worker with its own prompt. Say no if this tracker holds only build work.";
 
+pub const GRILL_BATCH: &str = "\
+Answers a grilling task's questions itself and posts them for you to review at
+once. Say no if every grill should run live with you.";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -69,6 +73,7 @@ mod tests {
             DEFAULT_BRANCH,
             GROOM,
             WAYFINDING,
+            GRILL_BATCH,
         ] {
             let lines: Vec<&str> = text.lines().collect();
             assert!((1..=2).contains(&lines.len()), "{text}");

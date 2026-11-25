@@ -1758,9 +1758,10 @@ mod tests {
         fn herd(&self, herd: &str) -> PathBuf {
             let repo = self.dir.path().join(format!("repos/{herd}"));
             std::fs::create_dir_all(repo.join(".git")).unwrap();
-            // With a grill and wayfinding, so `herd upgrade` has nothing to offer it.
+            // With every template init offers, so `herd upgrade` has nothing to offer it.
             let templates = "[template.grill]\nparams = []\nattended = true\nprompt = \"grill\"\n\
-                             [template.wayfinding]\nparams = []\nprompt = \"answer\"\n";
+                             [template.wayfinding]\nparams = []\nprompt = \"answer\"\n\
+                             [template.grill-batch]\nparams = []\nprompt = \"batch\"\n";
             self.herd_file(
                 herd,
                 &format!("repo = {:?}\n{templates}", repo.to_str().unwrap()),
