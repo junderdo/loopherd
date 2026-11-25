@@ -1133,6 +1133,13 @@ fn write(paths: &Paths, herd: Herd) -> Result<Vec<String>> {
         );
     }
     steps.extend(herd.agents_steps.iter().cloned());
+    if herd.docs.iter().any(|doc| doc.path == agents::SHEPHERD_DOC) {
+        steps.push(format!(
+            "Fill in {}, the shepherd's runbook for this repo; `loopherd docs runbook` \
+             says what each section holds.",
+            agents::SHEPHERD_DOC
+        ));
+    }
     steps.push(
         "Tailor the herd to the repo per \"Setting up a project\" in `loopherd --skill`.".into(),
     );
