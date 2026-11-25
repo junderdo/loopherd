@@ -1189,6 +1189,14 @@ What differs from the shepherd:
   and Monitor you started (TaskStop each), your watch among them, write it, report `--kind handoff`, run `loopherd restart
   --self`, and end your turn; you restart in this pane once that turn
   stops. Restart your workers when they hand off; never with `--force`.
+- **Getting ready for a revive.** Keep your watch armed and keep working
+  until the human quits your Claude: a quit Claude ends its watch and
+  frees its lock, and `loopherd revive` has no check that a running shell
+  fails. Stopping background shells and Monitors applies only before
+  `restart --self`, whose stop must read finished. Any handoff you write,
+  for any reason, is followed by `loopherd report --kind handoff`, never a
+  plain `note`: a plain `loopherd restart` refuses a member that hasn't
+  handed off since it started.
 - **Your checkout** is detached; refresh it with `git fetch origin && git
   checkout --detach origin/<default branch>` rather than `git pull`, and
   never commit in it.
