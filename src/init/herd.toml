@@ -8,5 +8,5 @@ args = ["--permission-mode", "auto"]
 @SOURCE@
 max = @MAX@
 
-@TEMPLATE@@WAYFINDING@
+@TEMPLATE@@WAYFINDING@@GRILL_BATCH@
 @GRILL@@LEAD_TABLE@@GROOM@
