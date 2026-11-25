@@ -5,8 +5,10 @@
 #   install-extras splash
 #   install-extras offers <agents> <skills> <herdr-plugin> <herdr-keys> <loopherd> [<settings file>]
 #
-# Each offer is ask, yes or no; ask reads its answer from stdin. Agents and
-# skills also take update, which refreshes only what is already installed.
+# Each offer is ask, yes or no; ask reads its answer from stdin. Without a
+# terminal, ask skips, naming the scripts/install flag that adds the extra, or
+# printing the text of LOOPHERD_EXTRAS_NO_TERMINAL when it's set. Agents and skills also take
+# update, which refreshes only what is already installed.
 set -euo pipefail
 
 root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

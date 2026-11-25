@@ -459,31 +459,31 @@ fn a_missing_checksum_tool_is_named() {
 }
 
 #[test]
-fn without_a_terminal_each_offer_is_skipped_naming_its_flag() {
+fn without_a_terminal_each_offer_is_skipped_saying_how_to_be_asked() {
     let release = Release::new("Linux", "x86_64");
     let out = release.install(&[]);
     let said = text(&out);
     assert!(out.status.success(), "{said}");
     for line in [
-        "skipped loopherd's agent types (no terminal); add --with-agents to install them",
-        "skipped the mattpocock-skills plugin (no terminal); add --with-skills to install it",
-        "skipped loopherd's herdr plugin (no terminal); add --with-herdr-plugin to install it",
-        "skipped herdr key bindings (no terminal); add --with-herdr-keys to add them",
+        "skipped loopherd's agent types (no terminal); run this installer again in a terminal to be asked",
+        "skipped the mattpocock-skills plugin (no terminal); run this installer again in a terminal to be asked",
+        "skipped loopherd's herdr plugin (no terminal); run this installer again in a terminal to be asked",
+        "skipped herdr key bindings (no terminal); run this installer again in a terminal to be asked",
     ] {
         assert!(said.contains(line), "{line}\n---\n{said}");
     }
+    assert!(!said.contains("--with-"), "{said}");
     assert!(!release.home.join(".claude/agents").exists());
+    assert_eq!(
+        release.log(),
+        "v0.2.0 install-hook\nv0.2.0 setup\nv0.2.0 doctor\n"
+    );
 }
 
 impl Release {
-    /// The installer as `curl | sh -s -- <args>` on a pty fed `typed`, or None
-    /// where util-linux `script` isn't available.
-    fn install_on_terminal(
-        &self,
-        args: &[&str],
-        envs: &[(&str, &str)],
-        typed: &str,
-    ) -> Option<String> {
+    /// The installer as `curl | sh` on a pty fed `typed`, or None where
+    /// util-linux `script` isn't available.
+    fn install_on_terminal(&self, envs: &[(&str, &str)], typed: &str) -> Option<String> {
         let util_linux = Command::new("script")
             .arg("--version")
             .output()
@@ -491,10 +491,7 @@ impl Release {
         if !util_linux {
             return None;
         }
-        let shell = format!(
-            "stty cols 100 rows 30; sh -s -- {} < '{INSTALL_SH}'",
-            args.join(" ")
-        );
+        let shell = format!("stty cols 100 rows 30; sh -s < '{INSTALL_SH}'");
         let mut cmd = Command::new("script");
         cmd.args(["-qec", &shell, "/dev/null"])
             .env_clear()
@@ -526,11 +523,12 @@ impl Release {
 }
 
 const ALT_SCREEN: &str = "\x1b[?1049h";
+const NO_SPLASH: (&str, &str) = ("LOOPHERD_NO_SPLASH", "1");
 
 #[test]
 fn on_a_terminal_the_offers_are_asked_there_and_yes_installs() {
     let release = Release::new("Linux", "x86_64");
-    let Some(said) = release.install_on_terminal(&["--no-splash"], &[], "y\n") else {
+    let Some(said) = release.install_on_terminal(&[NO_SPLASH], "y\n") else {
         eprintln!("skipped: needs util-linux script");
         return;
     };
@@ -546,54 +544,36 @@ fn on_a_terminal_the_offers_are_asked_there_and_yes_installs() {
 #[test]
 fn on_a_terminal_the_splash_plays_unless_turned_off() {
     let release = Release::new("Linux", "x86_64");
-    let Some(said) = release.install_on_terminal(&[], &[], "\n") else {
+    let Some(said) = release.install_on_terminal(&[], "\n") else {
         eprintln!("skipped: needs util-linux script");
         return;
     };
     assert!(said.contains(ALT_SCREEN), "{said}");
-    let said = release
-        .install_on_terminal(&["--no-splash"], &[], "\n")
-        .unwrap();
-    assert!(!said.contains(ALT_SCREEN), "{said}");
-    let said = release
-        .install_on_terminal(&[], &[("LOOPHERD_NO_SPLASH", "1")], "\n")
-        .unwrap();
+    let said = release.install_on_terminal(&[NO_SPLASH], "\n").unwrap();
     assert!(!said.contains(ALT_SCREEN), "{said}");
 }
 
 #[test]
-fn no_extras_offers_nothing_and_runs_no_setup() {
-    let release = Release::new("Linux", "x86_64");
-    let out = release.install_with(&["--no-extras"], &[]);
-    let said = text(&out);
-    assert!(out.status.success(), "{said}");
-    assert!(!said.contains("skipped"), "{said}");
-    assert_eq!(release.log(), "v0.2.0 install-hook\nv0.2.0 doctor\n");
-}
-
-#[test]
-fn naming_an_extra_installs_just_that_one_without_setup() {
-    let release = Release::new("Linux", "x86_64");
-    let out = release.install_with(&["--with-agents"], &[]);
-    let said = text(&out);
-    assert!(out.status.success(), "{said}");
-    for name in AGENTS {
-        assert!(
-            release.agents_dir().join(format!("{name}.md")).exists(),
-            "{said}"
+fn any_argument_is_refused_before_installing_anything() {
+    for arg in [
+        "--no-splash",
+        "--with-agents",
+        "--with-skills",
+        "--with-herdr-plugin",
+        "--with-herdr-keys",
+        "--no-extras",
+        "anything",
+    ] {
+        let release = Release::new("Linux", "x86_64");
+        let out = release.install_with(&[arg], &[]);
+        assert!(!out.status.success(), "{arg}");
+        assert_eq!(
+            text(&out),
+            "install: takes no options; it asks about each extra as it installs\n",
+            "{arg}"
         );
+        assert!(!release.installed().exists(), "{arg}");
     }
-    assert!(!said.contains("mattpocock-skills"), "{said}");
-    assert_eq!(release.log(), "v0.2.0 install-hook\nv0.2.0 doctor\n");
-}
-
-#[test]
-fn an_unknown_argument_installs_nothing() {
-    let release = Release::new("Linux", "x86_64");
-    let out = release.install_with(&["--with-everything"], &[]);
-    assert!(!out.status.success());
-    assert!(text(&out).contains("--with-everything"), "{}", text(&out));
-    assert!(!release.installed().exists());
 }
 
 #[test]
@@ -718,7 +698,7 @@ impl Release {
 }
 
 #[test]
-fn without_a_terminal_an_older_herdr_plugin_is_skipped_naming_the_flag_that_updates_it() {
+fn without_a_terminal_an_older_herdr_plugin_is_skipped_saying_how_to_be_asked() {
     let release = Release::new("Linux", "x86_64");
     release.herdr_lists_plugin("0.1.1", "github");
 
@@ -728,7 +708,7 @@ fn without_a_terminal_an_older_herdr_plugin_is_skipped_naming_the_flag_that_upda
     assert!(out.status.success(), "{said}");
     assert!(
         said.contains(
-            "skipped loopherd's herdr plugin 0.1.1 (no terminal); add --with-herdr-plugin to update it"
+            "skipped loopherd's herdr plugin 0.1.1 (no terminal); run this installer again in a terminal to be asked"
         ),
         "{said}"
     );
@@ -741,7 +721,7 @@ fn on_a_terminal_yes_updates_an_older_herdr_plugin() {
     release.agents_and_skills_installed();
     release.herdr_lists_plugin("0.1.1", "github");
 
-    let Some(said) = release.install_on_terminal(&["--no-splash"], &[], "y\n") else {
+    let Some(said) = release.install_on_terminal(&[NO_SPLASH], "y\n") else {
         eprintln!("skipped: needs util-linux script");
         return;
     };
@@ -766,7 +746,7 @@ fn on_a_terminal_an_older_herdr_plugin_is_left_by_default() {
     release.agents_and_skills_installed();
     release.herdr_lists_plugin("0.1.1", "github");
 
-    let Some(said) = release.install_on_terminal(&["--no-splash"], &[], "\n") else {
+    let Some(said) = release.install_on_terminal(&[NO_SPLASH], "\n") else {
         eprintln!("skipped: needs util-linux script");
         return;
     };
@@ -801,7 +781,7 @@ fn on_a_terminal_a_current_newer_or_linked_herdr_plugin_is_left_as_is() {
         release.agents_and_skills_installed();
         release.herdr_lists_plugin(version, kind);
 
-        let Some(said) = release.install_on_terminal(&["--no-splash"], &[], "y\n") else {
+        let Some(said) = release.install_on_terminal(&[NO_SPLASH], "y\n") else {
             eprintln!("skipped: needs util-linux script");
             return;
         };
