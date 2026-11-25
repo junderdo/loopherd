@@ -1804,7 +1804,7 @@ impl Fixture {
     fn init_on_terminal(&self, extra: &[&str], input: &str) -> Output {
         let mut args = vec!["--check", "cargo test"];
         args.extend(extra);
-        self.on_terminal(&args, &format!("\n\n{input}\n\n\n\n\n\n\n\n\n"))
+        self.on_terminal(&args, &format!("\n\n{input}\n\n\n\n\n\n\n\n\n\n"))
     }
 
     /// `loopherd init <args>` with stdin and stderr on a terminal, typing `input`.
@@ -1853,9 +1853,11 @@ fn on_a_terminal_init_asks_for_the_tracker_until_answered_then_for_an_others_des
         2,
         "{shown}"
     );
-    assert_eq!(
-        repo_file(&fixture, "docs/agents/issue-tracker.md"),
-        "# Issue tracker\n\nIssues live in Linear.\n"
+    let tracker_doc = repo_file(&fixture, "docs/agents/issue-tracker.md");
+    assert!(
+        tracker_doc
+            .starts_with("# Issue tracker\n\nIssues live in Linear.\n\n## Wayfinding tasks\n"),
+        "{tracker_doc}"
     );
     assert_eq!(fixture.loopherd(&["herds"]).status.code(), Some(1));
 }
@@ -2120,6 +2122,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
         "bot",    // gh account
         "trunk",  // default branch
         "",       // groom
+        "",       // wayfinding
         "",       // confirm
     ];
 
@@ -2173,7 +2176,7 @@ fn on_a_terminal_init_shows_each_inferred_value_takes_edits_and_re_asks_bad_ones
 fn on_a_terminal_declining_the_summary_writes_nothing() {
     let fixture = Fixture::new(&["acme"]);
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -2186,7 +2189,7 @@ fn on_a_terminal_declining_the_summary_writes_nothing() {
 #[test]
 fn on_a_terminal_without_a_build_file_init_asks_for_checks_until_one_is_given() {
     let fixture = Fixture::new(&["acme"]);
-    let typed = "\n\n\n\n\nmake lint\nmake test\n\n\n\n\n\n\n\n\n\n";
+    let typed = "\n\n\n\n\nmake lint\nmake test\n\n\n\n\n\n\n\n\n\n\n";
 
     let out = fixture.on_terminal(&[], typed);
 
@@ -2226,6 +2229,7 @@ fn on_a_terminal_declining_the_suggested_checks_edits_each_then_adds_more() {
         "cargo nextest run",
         "just check",
         "", // no more checks
+        "",
         "",
         "",
         "",
@@ -2286,7 +2290,9 @@ fn on_a_terminal_a_taken_herd_name_or_lead_prompt_is_asked_again() {
     )
     .unwrap();
     fs::write(fixture.herds().join("gadgets-lead.md"), "mine\n").unwrap();
-    let typed = ["", "", "gadgets", "", "", "", "y", "n", "", "", "", "", ""];
+    let typed = [
+        "", "", "gadgets", "", "", "", "y", "n", "", "", "", "", "", "",
+    ];
 
     let out = fixture.on_terminal(&["--check", "cargo test"], &(typed.join("\n") + "\n"));
 
@@ -2486,7 +2492,7 @@ fn on_a_terminal_a_repo_answer_outside_git_is_asked_again_naming_no_flag() {
 
     let out = fixture.on_terminal(
         &["--check", "cargo test"],
-        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n\n", outside.display()),
+        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n\n\n", outside.display()),
     );
 
     assert_ok(&out);
@@ -2598,8 +2604,9 @@ fn on_a_terminal_the_summary_names_the_labels_and_docs_writing_creates() {
     assert_ok(&out);
     assert!(
         text(&out.stdout).contains(
-            "Writing it also creates the labels ready-for-agent, needs-info, ready-for-human \
-             and blocked in acme/widgets where missing, and writes \
+            "Writing it also creates the labels ready-for-agent, needs-info, ready-for-human, \
+             blocked, wayfinding:research, wayfinding:domain and wayfinding:prototype in \
+             acme/widgets where missing, and writes \
              docs/agents/issue-tracker.md, docs/agents/triage-labels.md, \
              docs/agents/loopherd.md and AGENTS.md in the repo, uncommitted.\r\n"
         ),
@@ -2648,7 +2655,7 @@ fn on_a_terminal_a_repo_answer_git_refuses_to_read_shows_gits_reason() {
             ("GIT_CONFIG_VALUE_0", &repo),
         ],
         &["--check", "cargo test"],
-        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n\n", other.display()),
+        &format!("{}\n\n\n\n\n\n\n\n\n\n\n\n\n\n", other.display()),
     );
 
     assert_ok(&out);
@@ -3252,7 +3259,7 @@ fn on_a_terminal_declining_the_summary_leaves_an_existing_agents_md_as_it_was() 
     let fixture = Fixture::new(&["acme"]);
     fs::write(fixture.repo().join("AGENTS.md"), "# Widgets\n").unwrap();
 
-    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\n\nn\n");
+    let out = fixture.init_on_terminal(&[], "\n\n\n\n\n\n\n\n\n\nn\n");
 
     assert_eq!(out.status.code(), Some(1), "{}", text(&out.stdout));
     assert!(text(&out.stdout).contains("nothing written"));
@@ -3992,7 +3999,7 @@ fn on_a_terminal_a_gh_account_keeps_a_github_origins_local_herd_on_github() {
             "--gh-account",
             "acme",
         ],
-        "\n\n\n\n\n\n\n\n\n\n",
+        "\n\n\n\n\n\n\n\n\n\n\n",
     );
 
     assert_ok(&out);
@@ -4013,7 +4020,7 @@ fn on_a_terminal_a_github_origins_local_herd_takes_enter_for_no_github() {
     let out = fixture.on_terminal_with(
         &envs,
         &["--check", "cargo test", "--tracker", "local"],
-        "\n\n\n\n\n\n\n\n\n\n",
+        "\n\n\n\n\n\n\n\n\n\n\n",
     );
 
     assert!(
@@ -5437,7 +5444,7 @@ fn on_a_terminal_a_detached_head_without_origin_head_asks_for_the_default_branch
     let mut args = vec!["--check", "cargo test"];
     args.extend(OTHER);
 
-    let out = fixture.on_terminal(&args, "\n\n\n\n\n\n\nmain\n\n\n");
+    let out = fixture.on_terminal(&args, "\n\n\n\n\n\n\nmain\n\n\n\n");
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -6005,6 +6012,7 @@ fn on_a_terminal_answering_no_to_groom_writes_none() {
         "",  // gh account
         "",  // default branch
         "n", // groom
+        "",  // wayfinding
         "",  // confirm
     ];
 
@@ -6216,7 +6224,7 @@ fn on_a_terminal_each_question_explains_itself_above_its_prompt() {
     )
     .unwrap();
 
-    let out = fixture.on_terminal(&[], &"\n".repeat(13));
+    let out = fixture.on_terminal(&[], &"\n".repeat(14));
 
     assert_ok(&out);
     let shown = text(&out.stdout);
@@ -6246,6 +6254,7 @@ fn on_a_terminal_each_question_explains_itself_above_its_prompt() {
         ("The gh login the herd", "gh account ("),
         ("The branch workers cut", "Default branch ("),
         ("A groomer triages", "Add a groom template"),
+        ("Routes research, domain", "Add a wayfinding template"),
     ] {
         assert!(at(explanation) < at(prompt), "{explanation:?}\n{shown}");
     }
@@ -6280,4 +6289,620 @@ fn without_a_terminal_init_explains_nothing() {
 
     assert_ok(&out);
     assert_eq!(text(&out.stderr), "");
+}
+
+impl Fixture {
+    /// Every file init wrote, herd files then repo docs, each under a `== <name>` line,
+    /// with the temp dir shown as `<root>`.
+    fn written(&self) -> String {
+        let mut files: Vec<(String, PathBuf)> = ["widgets.toml", "widgets-lead.md"]
+            .into_iter()
+            .map(|name| (name.to_string(), self.herds().join(name)))
+            .collect();
+        for doc in [
+            "AGENTS.md",
+            "docs/agents/issue-tracker.md",
+            "docs/agents/triage-labels.md",
+            "docs/agents/loopherd.md",
+        ] {
+            files.push((doc.to_string(), self.repo().join(doc)));
+        }
+        let root = self.root.path().display().to_string();
+        files
+            .iter()
+            .map(|(name, path)| {
+                format!(
+                    "== {name}\n{}",
+                    fs::read_to_string(path).unwrap_or_default()
+                )
+            })
+            .collect::<String>()
+            .replace(&root, "<root>")
+    }
+}
+
+#[test]
+fn without_wayfinding_init_writes_what_it_wrote_before_routing_byte_for_byte() {
+    for (tracker, args) in [
+        ("github", &[][..]),
+        ("local", &["--tracker", "local"][..]),
+        (
+            "other",
+            &[
+                "--tracker",
+                "other",
+                "--tracker-desc",
+                "Issues live in Linear.",
+            ][..],
+        ),
+    ] {
+        let fixture = Fixture::new(&["acme"]);
+
+        assert_ok(&fixture.init(args));
+
+        let golden = Path::new(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "tests/fixtures/init/{tracker}-without-wayfinding.txt"
+        ));
+        assert_eq!(
+            fixture.written(),
+            fs::read_to_string(&golden).unwrap(),
+            "{tracker}"
+        );
+    }
+}
+
+const WAYFINDING_ISSUES: &str = r#"[
+  {"number": 7, "title": "Add the frobnicator!", "labels": [{"name": "ready-for-agent"}]},
+  {"number": 13, "title": "Survey queue libraries", "labels": [{"name": "ready-for-agent"}, {"name": "wayfinding:research"}]},
+  {"number": 14, "title": "Name the herd's parts", "labels": [{"name": "Wayfinding:Domain"}, {"name": "ready-for-agent"}]},
+  {"number": 15, "title": "Try a TUI layout", "labels": [{"name": "ready-for-agent"}, {"name": "wayfinding:prototype"}, {"name": "skill:tdd"}]}
+]"#;
+
+fn wayfinding(fixture: &Fixture) -> toml::Table {
+    herd_toml(fixture)["template"]["wayfinding"]
+        .as_table()
+        .expect("a [template.wayfinding]")
+        .clone()
+}
+
+impl Fixture {
+    /// What the herd's queue source prints, run with the fake gh on PATH.
+    fn github_tasks(&self) -> String {
+        let source = self.herd_get("queue.source");
+        let path = format!(
+            "{}:{}",
+            self.gh_dir().display(),
+            std::env::var("PATH").unwrap()
+        );
+        let out = Command::new("sh")
+            .args(["-c", &source])
+            .env("PATH", path)
+            .output()
+            .unwrap();
+        assert_ok(&out);
+        text(&out.stdout)
+    }
+}
+
+#[test]
+fn with_wayfinding_the_github_queue_routes_each_wayfinding_label_to_its_template_and_skill() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("issues.json", WAYFINDING_ISSUES);
+
+    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+
+    let queue = herd_toml(&fixture)["queue"].as_table().unwrap().clone();
+    assert!(!queue.contains_key("template"), "{queue:?}");
+    assert_eq!(
+        queue["templates"],
+        toml::Value::Array(vec!["issue".into(), "wayfinding".into()])
+    );
+    assert_eq!(
+        fixture.github_tasks(),
+        "issue 7 feat tdd add-the-frobnicator\n\
+         wayfinding 13 docs research survey-queue-libraries\n\
+         wayfinding 14 docs domain-modeling name-the-herd-s-parts\n\
+         wayfinding 15 docs prototype try-a-tui-layout\n"
+    );
+}
+
+#[test]
+fn routing_leaves_the_backlog_as_it_was() {
+    let plain = Fixture::new(&["acme"]);
+    assert_ok(&plain.init(&[]));
+    let routed = Fixture::new(&["acme"]);
+
+    assert_ok(&routed.init(&["--with", "wayfinding"]));
+
+    assert_eq!(
+        routed.herd_get("queue.backlog"),
+        plain.herd_get("queue.backlog")
+    );
+}
+
+#[test]
+fn the_github_wayfinding_template_resolves_the_issue_with_its_skill_on_a_docs_branch() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--context-limit", "150000"]));
+
+    let template = wayfinding(&fixture);
+    let issue = herd_toml(&fixture)["template"]["issue"].clone();
+    let mut keys: Vec<&str> = template.keys().map(String::as_str).collect();
+    keys.sort();
+    assert_eq!(
+        keys,
+        [
+            "branch",
+            "context_limit",
+            "done",
+            "merged",
+            "name",
+            "params",
+            "prompt"
+        ]
+    );
+    assert_eq!(template["params"], issue["params"]);
+    assert_eq!(template["name"].as_str(), Some("{herd}-research-{number}"));
+    assert_eq!(template["branch"].as_str(), Some("docs/{number}-{slug}"));
+    assert_eq!(template["done"], issue["done"]);
+    assert_eq!(template["merged"], issue["merged"]);
+    assert_eq!(template["context_limit"], issue["context_limit"]);
+    let prompt = template["prompt"].as_str().unwrap();
+    let gh = "GH_TOKEN=$(gh auth token --user acme) gh";
+    for expected in [
+        format!("`{gh} issue view {{number}} --repo acme/widgets --comments`"),
+        format!(
+            "`{gh} issue comment {{number}} --repo acme/widgets --body \"claimed by {{name}}\"`"
+        ),
+        "Resolve it with the {skill} skill".into(),
+        "4. Commit its output (a research note, a decision record or a prototype) on {branch}."
+            .into(),
+        format!(
+            "`{gh} pr create --repo acme/widgets --base main --head {{branch}} --assignee acme"
+        ),
+        "a three-line summary of the outcome".into(),
+        "`Closes #{number}`".into(),
+        "`loopherd report --kind done \"<PR link and one-line summary>\"`".into(),
+        format!("`{gh} issue edit {{number}} --repo acme/widgets --add-label needs-info`"),
+        "`loopherd report --kind question \"<the exact question>\"`".into(),
+    ] {
+        assert!(
+            prompt.contains(&expected),
+            "missing {expected:?} in\n{prompt}"
+        );
+    }
+}
+
+#[test]
+fn with_wayfinding_init_creates_the_three_wayfinding_labels_where_missing() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("labels.json", r#"[{"name": "Wayfinding:Domain"}]"#);
+
+    assert_ok(&fixture.init(&["--with", "wayfinding"]));
+
+    let calls = fixture.gh_calls();
+    assert!(
+        calls.contains("label create wayfinding:research --repo acme/widgets"),
+        "{calls}"
+    );
+    assert!(
+        calls.contains("label create wayfinding:prototype --repo acme/widgets"),
+        "{calls}"
+    );
+    assert!(!calls.contains("label create wayfinding:domain"), "{calls}");
+}
+
+#[test]
+fn without_wayfinding_init_creates_no_wayfinding_label() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&[]));
+
+    assert!(
+        !fixture.gh_calls().contains("wayfinding"),
+        "{}",
+        fixture.gh_calls()
+    );
+}
+
+#[test]
+fn with_wayfinding_herds_shows_both_templates_valid_and_feed_names_each_members_template() {
+    let fixture = Fixture::new(&["acme"]);
+    fixture.gh_json("issues.json", WAYFINDING_ISSUES);
+    assert_ok(&fixture.init(&["--with", "wayfinding", "--max", "4"]));
+
+    let herds = fixture.loopherd(&["herds"]);
+    let feed = fixture.loopherd(&["feed", "widgets", "--dry-run"]);
+
+    assert_ok(&herds);
+    assert!(
+        text(&herds.stdout).contains("templates issue, wayfinding"),
+        "{}",
+        text(&herds.stdout)
+    );
+    assert!(
+        !text(&herds.stdout).contains("invalid"),
+        "{}",
+        text(&herds.stdout)
+    );
+    assert_ok(&feed);
+    let fed = text(&feed.stdout);
+    assert!(
+        fed.contains("would add widgets-7 (template issue)"),
+        "{fed}"
+    );
+    assert!(
+        fed.contains("would add widgets-research-13 (template wayfinding)"),
+        "{fed}"
+    );
+}
+
+const LOCAL_WAYFINDING_ISSUES: &[(&str, &str)] = &[
+    (".scratch/f/issues/01-plain.md", "Status: ready-for-agent\n"),
+    (
+        ".scratch/f/issues/02-survey.md",
+        "Status: ready-for-agent wayfinding:research\n",
+    ),
+    (
+        ".scratch/f/issues/03-names.md",
+        "**Status:** Wayfinding:Domain, ready-for-agent\n",
+    ),
+    (
+        ".scratch/f/issues/04-try.md",
+        "Status: ready-for-agent, wayfinding:prototype, skill:tdd\n",
+    ),
+    (
+        ".scratch/f/issues/05-later.md",
+        "Status: wayfinding:research\n",
+    ),
+];
+
+#[test]
+fn with_wayfinding_the_local_queue_routes_the_wayfinding_words_on_the_status_line() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_WAYFINDING_ISSUES);
+    assert_ok(&fixture.init(&["--tracker", "local", "--with", "wayfinding"]));
+
+    let tasks = fixture.run(
+        Command::new("sh")
+            .args(["-c", &fixture.herd_get("queue.source")])
+            .envs(env.iter().map(|(k, v)| (k, v))),
+    );
+
+    assert_ok(&tasks);
+    assert_eq!(
+        text(&tasks.stdout),
+        "issue f-01 feat tdd plain .scratch/f/issues/01-plain.md\n\
+         wayfinding f-02 docs research survey .scratch/f/issues/02-survey.md\n\
+         wayfinding f-03 docs domain-modeling names .scratch/f/issues/03-names.md\n\
+         wayfinding f-04 docs prototype try .scratch/f/issues/04-try.md\n"
+    );
+}
+
+#[test]
+fn the_local_wayfinding_template_names_its_member_by_id_and_resolves_the_issue_file() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&["--tracker", "local", "--with", "wayfinding"]));
+
+    let template = wayfinding(&fixture);
+    let issue = herd_toml(&fixture)["template"]["issue"].clone();
+    assert_eq!(template["params"], issue["params"]);
+    assert_eq!(template["name"].as_str(), Some("{herd}-research-{id}"));
+    assert_eq!(template["branch"].as_str(), Some("docs/{id}-{slug}"));
+    assert_eq!(template["done"], issue["done"]);
+    assert!(!template.contains_key("args"));
+    let prompt = template["prompt"].as_str().unwrap();
+    for expected in [
+        "1. Read {path} in full, comments included.",
+        "Resolve it with the {skill} skill",
+        "append a three-line summary of the outcome under `## Comments`",
+        "the issue's `Status:` line to `needs-info`, append the question",
+    ] {
+        assert!(
+            prompt.contains(expected),
+            "missing {expected:?} in\n{prompt}"
+        );
+    }
+}
+
+#[test]
+fn a_local_herd_too_long_for_a_research_name_skips_its_wayfinding_issues() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(LOCAL_WAYFINDING_ISSUES);
+    let herd = "a-herd-of-twenty-two-c";
+    assert_ok(&fixture.init(&["--tracker", "local", "--with", "wayfinding", "--herd", herd]));
+    let source = fixture.loopherd(&["herd", "get", herd, "queue.source"]);
+    let source: String = toml::from_str::<toml::Table>(&format!("v = {}", text(&source.stdout)))
+        .unwrap()["v"]
+        .as_str()
+        .unwrap()
+        .into();
+
+    let tasks = fixture.run(
+        Command::new("sh")
+            .args(["-c", &source])
+            .envs(env.iter().map(|(k, v)| (k, v))),
+    );
+
+    assert_ok(&tasks);
+    assert_eq!(
+        text(&tasks.stdout),
+        "issue f-01 feat tdd plain .scratch/f/issues/01-plain.md\n"
+    );
+    assert!(
+        text(&tasks.stderr).contains(
+            "skipped .scratch/f/issues/02-survey.md: the herd name leaves no room for its research name"
+        ),
+        "{}",
+        text(&tasks.stderr)
+    );
+}
+
+#[test]
+fn with_wayfinding_another_tracker_leaves_routing_to_fill_in_and_names_the_rule() {
+    let fixture = Fixture::new(&["acme"]);
+
+    assert_ok(&fixture.init(&[
+        "--tracker",
+        "other",
+        "--tracker-desc",
+        "Issues live in Linear.",
+        "--with",
+        "wayfinding",
+    ]));
+
+    let herd = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+    assert!(
+        herd.contains("templates = [\"issue\", \"wayfinding\"]"),
+        "{herd}"
+    );
+    assert!(
+        herd.contains(
+            "# \"<template> <number> <type> <skill> <slug>\" per ready task, oldest first: \
+             <template> is\n# wayfinding for a task marked wayfinding:research, \
+             wayfinding:domain or\n# wayfinding:prototype, whose <skill> is research, \
+             domain-modeling or prototype,\n# and issue for any other."
+        ),
+        "{herd}"
+    );
+    let prompt = wayfinding(&fixture)["prompt"].as_str().unwrap().to_string();
+    for expected in [
+        "1. Read task {number} and every comment on it. (fill in)",
+        "Resolve it with the {skill} skill",
+        "comment a three-line summary of the outcome on task {number}. (fill in)",
+    ] {
+        assert!(
+            prompt.contains(expected),
+            "missing {expected:?} in\n{prompt}"
+        );
+    }
+}
+
+#[test]
+fn with_wayfinding_the_docs_init_writes_name_the_wayfinding_labels() {
+    for args in [&[][..], &["--tracker", "local"][..]] {
+        let fixture = Fixture::new(&["acme"]);
+
+        let mut with = args.to_vec();
+        with.extend(["--with", "wayfinding"]);
+        assert_ok(&fixture.init(&with));
+
+        for doc in ["docs/agents/issue-tracker.md", "docs/agents/loopherd.md"] {
+            let text = repo_file(&fixture, doc);
+            assert!(text.contains("## Wayfinding tasks"), "{doc}:\n{text}");
+            for label in [
+                "wayfinding:research",
+                "wayfinding:domain",
+                "wayfinding:prototype",
+            ] {
+                assert!(text.contains(label), "{doc} lacks {label}:\n{text}");
+            }
+        }
+    }
+}
+
+#[test]
+fn on_a_terminal_init_asks_for_a_wayfinding_template_and_enter_adds_it() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&[], "\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains(&format!(
+            "{WAYFINDING_EXPLANATION}Add a wayfinding template, for research, domain and \
+             prototype tasks? [Y/n]: "
+        )),
+        "{shown}"
+    );
+    for line in WAYFINDING_EXPLANATION.lines() {
+        assert!(line.trim_end().chars().count() <= 80, "{line:?}");
+    }
+    assert!(shown.contains("  wayfinding yes\r\n"), "{shown}");
+    assert!(herd_toml(&fixture)["queue"].get("templates").is_some());
+    wayfinding(&fixture);
+}
+
+const WAYFINDING_EXPLANATION: &str = "Routes research, domain and prototype tasks, by their wayfinding: label, to a\r\n\
+     worker with its own prompt. Say no if this tracker holds only build work.\r\n";
+
+#[test]
+fn on_a_terminal_answering_no_to_wayfinding_writes_the_single_template_queue() {
+    let fixture = Fixture::new(&["acme"]);
+    let typed = [
+        "", "",  // repo, herd name
+        "",  // tracker
+        "",  // owner/name
+        "",  // max
+        "",  // lead
+        "",  // merge_guard
+        "",  // context_limit
+        "",  // gh account
+        "",  // default branch
+        "",  // groom
+        "n", // wayfinding
+        "",  // confirm
+    ];
+
+    let out = fixture.on_terminal(&["--check", "cargo test"], &(typed.join("\n") + "\n"));
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("  wayfinding no\r\n"),
+        "{}",
+        text(&out.stdout)
+    );
+    let herd = herd_toml(&fixture);
+    assert_eq!(herd["queue"]["template"].as_str(), Some("issue"));
+    assert!(herd["template"].get("wayfinding").is_none());
+}
+
+#[test]
+fn on_a_terminal_with_wayfinding_answers_the_question() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&["--with", "wayfinding"], "\n");
+
+    assert_ok(&out);
+    assert!(
+        !text(&out.stdout).contains("Add a wayfinding template")
+            && !text(&out.stdout).contains("Routes research, domain"),
+        "{}",
+        text(&out.stdout)
+    );
+    wayfinding(&fixture);
+}
+
+#[test]
+fn diff_reads_a_wayfinding_template_back_and_with_wayfinding_shows_the_one_init_would_add() {
+    let routed = Fixture::new(&["acme"]);
+    assert_ok(&routed.init(&["--with", "wayfinding"]));
+    let plain = Fixture::new(&["acme"]);
+    assert_ok(&plain.init(&[]));
+
+    let unchanged = routed.init(&["--diff"]);
+    let added = plain.init(&["--diff", "--with", "wayfinding"]);
+
+    assert_ok(&unchanged);
+    assert_eq!(text(&unchanged.stdout), "");
+    assert_eq!(added.status.code(), Some(1), "{}", text(&added.stderr));
+    let shown = text(&added.stdout);
+    assert!(shown.contains("\n+[template.wayfinding]\n"), "{shown}");
+    assert!(shown.contains("\n-template = \"issue\"\n"), "{shown}");
+    assert!(
+        shown.contains("\n+templates = [\"issue\", \"wayfinding\"]\n"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_local_wayfinding_issue_in_a_long_feature_takes_a_shorter_cut_id_that_fits_its_name() {
+    let fixture = Fixture::new(&["acme"]);
+    let env = fixture.push_local_issues(&[
+        (
+            ".scratch/queue-routing/issues/03-survey.md",
+            "Status: ready-for-agent wayfinding:research\n",
+        ),
+        (
+            ".scratch/queue-routing/issues/04-build.md",
+            "Status: ready-for-agent\n",
+        ),
+    ]);
+    assert_ok(&fixture.init(&["--tracker", "local", "--with", "wayfinding"]));
+
+    let tasks = fixture.run(
+        Command::new("sh")
+            .args(["-c", &fixture.herd_get("queue.source")])
+            .envs(env.iter().map(|(k, v)| (k, v))),
+    );
+
+    assert_ok(&tasks);
+    let shown = text(&tasks.stdout);
+    let lines: Vec<&str> = shown.lines().collect();
+    assert_eq!(lines.len(), 2, "{shown}\n{}", text(&tasks.stderr));
+    let research_id = lines[0].split(' ').nth(1).unwrap();
+    assert!(lines[0].starts_with("wayfinding queue-ro_"), "{shown}");
+    assert!(research_id.ends_with("-03"), "{shown}");
+    assert!(
+        "widgets-research-".len() + research_id.len() <= 32,
+        "{research_id}"
+    );
+    assert_eq!(
+        lines[1],
+        "issue queue-routing-04 feat tdd build .scratch/queue-routing/issues/04-build.md"
+    );
+}
+
+#[test]
+fn routing_leaves_a_local_backlog_as_it_was() {
+    let plain = Fixture::new(&["acme"]);
+    assert_ok(&plain.init(&["--tracker", "local"]));
+    let routed = Fixture::new(&["acme"]);
+
+    assert_ok(&routed.init(&["--tracker", "local", "--with", "wayfinding"]));
+
+    assert_eq!(
+        routed.herd_get("queue.backlog"),
+        plain.herd_get("queue.backlog")
+    );
+}
+
+#[test]
+fn with_wayfinding_a_github_herd_name_too_long_for_a_research_name_is_refused() {
+    let fitting = Fixture::new(&["acme"]);
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fitting.init(&["--with", "wayfinding", "--herd", "widgets-platform"]);
+    let too_long = fixture.init(&["--with", "wayfinding", "--herd", "widgets-platforms"]);
+
+    assert_ok(&out);
+    assert!(!too_long.status.success());
+    assert!(
+        text(&too_long.stderr).contains(
+            "the herd name widgets-platforms leaves no room for wayfinding members' names"
+        ),
+        "{}",
+        text(&too_long.stderr)
+    );
+    assert!(!fixture.herds().join("widgets-platforms.toml").exists());
+}
+
+#[test]
+fn on_a_terminal_a_herd_name_too_long_for_a_research_name_isnt_offered_wayfinding() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init_on_terminal(&["--herd", "widgets-platforms"], "\n");
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(!shown.contains("Add a wayfinding template"), "{shown}");
+    assert!(
+        shown.contains("No wayfinding template: the herd name"),
+        "{shown}"
+    );
+    assert!(shown.contains("  wayfinding no\r\n"), "{shown}");
+}
+
+#[test]
+fn with_wayfinding_another_trackers_next_steps_name_the_wayfinding_done_check() {
+    let fixture = Fixture::new(&["acme"]);
+
+    let out = fixture.init(&[
+        "--tracker",
+        "other",
+        "--tracker-desc",
+        "Issues live in Linear.",
+        "--with",
+        "wayfinding",
+    ]);
+
+    assert_ok(&out);
+    assert!(
+        text(&out.stdout).contains("[template.issue] done, [template.wayfinding] done, and each"),
+        "{}",
+        text(&out.stdout)
+    );
 }

@@ -4,9 +4,9 @@ repo = @REPO@
 args = ["--permission-mode", "auto"]
 
 [queue]
-template = "issue"
+@QUEUE_TEMPLATE@
 @SOURCE@
 max = @MAX@
 
-@TEMPLATE@
+@TEMPLATE@@WAYFINDING@
 @LEAD_TABLE@@GROOM@

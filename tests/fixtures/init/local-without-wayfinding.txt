@@ -1,0 +1,565 @@
+== widgets.toml
+# Herd widgets: one worker per ready issue under .scratch/ in this repo.
+# Written by `loopherd init`; yours to edit, loopherd never rewrites it.
+repo = "<root>/widgets"
+args = ["--permission-mode", "auto"]
+
+[queue]
+template = "issue"
+# Prints "<id> <type> <skill> <slug> <path>" per issue file on origin/main under
+# .scratch/<feature>/issues/<NN>-<slug>.md whose Status: line has
+# ready-for-agent and none of blocked, needs-info, ready-for-human,
+# resolved, closed or done, and whose Blocked by: line names only resolved
+# issues of its feature, or of the feature the issue path before each number
+# names. The id is <feature>-<NN>; a feature that isn't
+# lowercase letters, digits and - or doesn't fit the member name is cut and
+# takes a 3-character hash, as <cut>_<hash>-<NN>, rehashed when another
+# feature holds it. The Status: words act as labels: types maps one to the branch
+# type (else feat), and skill:<name> names the worker's skill (else tdd).
+source = '''
+git fetch -q origin main 2>/dev/null || git fetch -q origin main || exit
+files=$(git ls-tree -r --name-only origin/main -- .scratch) || exit
+issue='^\.scratch/[A-Za-z0-9._-]+/issues/[0-9]+-[A-Za-z0-9._-]*\.md$'
+printf '%s\n' "$files" | grep -E '^"?\.scratch/.+/issues/[^/]+\.md"?$' | grep -vE "$issue" \
+  | sed 's|.*|skipped &: an issue path is .scratch/<feature>/issues/<NN>-<slug>.md of letters, digits and . _ -|' >&2
+printf '%s\n' "$files" | grep -E "$issue" | while read -r f; do
+  printf '\n\036%s\n' "$f"
+  git show "origin/main:$f"
+done | awk -v room=24 -v list=ready '
+  BEGIN {
+    types["bug"] = "fix"; types["documentation"] = "docs"
+    b36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+    chars = b36 "ABCDEFGHIJKLMNOPQRSTUVWXYZ._-"
+  }
+  { sub(/\r$/, "") }
+  function has(f, label) { return index(labels[f], " " label " ") > 0 }
+  function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
+  function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
+  function unblocked(f,    items, k, i, item, said, words, w, j, n, of, b, found, dir) {
+    if (!(f in blockers) || blockers[f] ~ /^[ \t,]*(none|$)/) return 1
+    k = split(blockers[f], items, /[,;]/)
+    for (i = 1; i <= k; i++) {
+      item = items[i]
+      if (item ~ /^[ \t]*$/) continue
+      said = item
+      gsub(/^[ \t]+|[ \t]+$/, "", said)
+      # An item names the numbers in its first run of number-words, joined
+      # by and, & or /: not a title in parentheses, after a colon or after
+      # the run, nor a slug past the leading number.
+      gsub(/\([^)]*\)/, " ", item)
+      sub(/:.*/, "", item)
+      of = feature[f]
+      # Each path becomes one \001<dir> word naming the feature of the numbers
+      # after it. Only a bare ./issues/ or ../issues/ names the feature of the
+      # issue itself; a longer path ending in . or .. names none.
+      while (match(item, /[^ \t]*\/issues\//)) {
+        dir = substr(item, RSTART, RLENGTH - 8)
+        if (dir !~ /^\.\.?$/ && sub(/.*\//, "", dir) && dir ~ /^\.\.?$/) dir = ""
+        item = substr(item, 1, RSTART - 1) " \001" dir " " substr(item, RSTART + RLENGTH)
+      }
+      gsub(/(^|[ \t])issues\//, " ", item)
+      w = split(item, words, /[ \t\/]+/)
+      found = 0
+      for (j = 1; j <= w; j++) {
+        if (words[j] ~ /^\001/) {
+          dir = substr(words[j], 2)
+          of = dir ~ /^\.\.?$/ ? feature[f] : features[dir]
+          continue
+        }
+        if (words[j] !~ /^#?[0-9]/) {
+          if (found && words[j] !~ /^(and|&|\+)?$/) break
+          continue
+        }
+        n = words[j]
+        sub(/^#/, "", n)
+        sub(/[^0-9].*/, "", n)
+        b = issue[of "/" (n + 0)]
+        if (b == "") {
+          if (of == feature[f]) print "skipped " f ": its Blocked by names " n ", which is no issue of its feature" > "/dev/stderr"
+          else print "skipped " f ": its Blocked by names " said ", which is no issue" > "/dev/stderr"
+          return 0
+        }
+        if (!closed(b)) return 0
+        found = 1
+      }
+      if (!found) {
+        print "skipped " f ": its Blocked by item \"" said "\" names no issue number" > "/dev/stderr"
+        return 0
+      }
+    }
+    return 1
+  }
+  function hash(s,    i, n) {
+    n = 0
+    for (i = 1; i <= length(s); i++) n = (n * 67 + index(chars, substr(s, i, 1))) % 46656
+    return substr(b36, int(n / 1296) + 1, 1) substr(b36, int(n / 36) % 36 + 1, 1) substr(b36, n % 36 + 1, 1)
+  }
+  function id_of(f,    id, cut, salt) {
+    id = tolower(feature[f])
+    gsub(/[^a-z0-9]+/, "-", id)
+    gsub(/^-+|-+$/, "", id)
+    if (id == feature[f] && length(id) + 1 + length(num[f]) <= room) return id
+    cut = substr(id, 1, room - length(num[f]) - 5)
+    gsub(/-+$/, "", cut)
+    # Another feature on the same hashed id rehashes, so no two share one.
+    salt = ""
+    id = cut "_" hash(feature[f])
+    while ((id in owner) && owner[id] != feature[f]) id = cut "_" hash(feature[f] "#" ++salt)
+    owner[id] = feature[f]
+    return id
+  }
+  /^\036/ {
+    f = substr($0, 2)
+    files[++n] = f
+    split(f, part, "/")
+    feature[f] = part[2]
+    features[tolower(part[2])] = part[2]
+    name[f] = part[4]
+    num[f] = name[f]
+    sub(/-.*/, "", num[f])
+    issue[part[2] "/" (num[f] + 0)] = f
+    comments = 0
+    listing = 0
+    next
+  }
+  { line = tolower($0) }
+  line ~ /^#+[ \t]*comments[ \t]*$/ { comments = 1 }
+  comments { next }
+  !(f in title) && /^#[ \t]/ {
+    title[f] = $0
+    sub(/^#[ \t]+/, "", title[f]); sub(/[ \t]+$/, "", title[f])
+  }
+  !(f in labels) && line ~ /^[ \t*_]*status[ \t*_]*:/ {
+    s = value(line)
+    gsub(/[ \t,]+/, " ", s)
+    labels[f] = " " s " "
+  }
+  listing && line ~ /^[ \t]*[-*+][ \t]/ {
+    sub(/^[ \t]*[-*+][ \t]+/, "", line)
+    blockers[f] = blockers[f] "," line
+    next
+  }
+  listing && line !~ /^[ \t]*$/ { listing = 0 }
+  !(f in blockers) && line ~ /^[ \t*_]*blocked by[ \t*_]*:/ {
+    blockers[f] = value(line)
+    listing = blockers[f] ~ /^[ \t]*$/
+  }
+  END {
+    for (i = 1; i <= n; i++) ids[files[i]] = id_of(files[i])
+    for (i = 1; i <= n; i++) {
+      f = files[i]
+      if (list == "backlog") {
+        if (has(f, "blocked") || closed(f)) continue
+        if (has(f, "ready-for-agent") && !has(f, "needs-info") \
+            && !has(f, "ready-for-human")) continue
+        if (!unblocked(f)) continue
+        if (!(f in title)) { title[f] = name[f]; sub(/\.md$/, "", title[f]) }
+        print f, title[f]
+        continue
+      }
+      if (!has(f, "ready-for-agent") || has(f, "blocked") || has(f, "needs-info") \
+          || has(f, "ready-for-human") || closed(f) || !unblocked(f)) continue
+      type = "feat"; skill = "tdd"
+      k = split(labels[f], words, " ")
+      for (j = k; j >= 1; j--) {
+        if (words[j] in types) type = types[words[j]]
+        if (words[j] ~ /^skill:[a-z0-9._:-]+$/) skill = substr(words[j], 7)
+      }
+      slug = tolower(name[f])
+      sub(/^[0-9]+-/, "", slug); sub(/\.md$/, "", slug)
+      gsub(/[^a-z0-9]+/, " ", slug)
+      k = split(slug, words, " ")
+      slug = ""
+      for (j = 1; j <= k && j <= 5; j++) slug = slug (j > 1 ? "-" : "") words[j]
+      if (slug == "") slug = "issue"
+      id = ids[f]
+      if (length(id) + 1 + length(num[f]) > room) {
+        print "skipped " f ": the herd name leaves no room for its id" > "/dev/stderr"
+        continue
+      }
+      id = id "-" num[f]
+      print id, type, skill, slug, f
+    }
+  }'
+'''
+# Prints "<path> <title>" per open issue file the source leaves out, but for
+# blocked ones: its Status: line has neither ready-for-agent, blocked,
+# resolved, closed nor done, or has needs-info or ready-for-human, and its
+# Blocked by: line names only resolved issues. The title is its first
+# # heading, else the file's name. Ones waiting on the human stay: they are
+# what a dry queue forgets.
+backlog = '''
+git fetch -q origin main 2>/dev/null || git fetch -q origin main || exit
+files=$(git ls-tree -r --name-only origin/main -- .scratch) || exit
+issue='^\.scratch/[A-Za-z0-9._-]+/issues/[0-9]+-[A-Za-z0-9._-]*\.md$'
+printf '%s\n' "$files" | grep -E '^"?\.scratch/.+/issues/[^/]+\.md"?$' | grep -vE "$issue" \
+  | sed 's|.*|skipped &: an issue path is .scratch/<feature>/issues/<NN>-<slug>.md of letters, digits and . _ -|' >&2
+printf '%s\n' "$files" | grep -E "$issue" | while read -r f; do
+  printf '\n\036%s\n' "$f"
+  git show "origin/main:$f"
+done | awk -v room=24 -v list=backlog '
+  BEGIN {
+    types["bug"] = "fix"; types["documentation"] = "docs"
+    b36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+    chars = b36 "ABCDEFGHIJKLMNOPQRSTUVWXYZ._-"
+  }
+  { sub(/\r$/, "") }
+  function has(f, label) { return index(labels[f], " " label " ") > 0 }
+  function closed(f) { return has(f, "resolved") || has(f, "closed") || has(f, "done") }
+  function value(line) { sub(/^[^:]*:/, "", line); gsub(/[*`]/, " ", line); return line }
+  function unblocked(f,    items, k, i, item, said, words, w, j, n, of, b, found, dir) {
+    if (!(f in blockers) || blockers[f] ~ /^[ \t,]*(none|$)/) return 1
+    k = split(blockers[f], items, /[,;]/)
+    for (i = 1; i <= k; i++) {
+      item = items[i]
+      if (item ~ /^[ \t]*$/) continue
+      said = item
+      gsub(/^[ \t]+|[ \t]+$/, "", said)
+      # An item names the numbers in its first run of number-words, joined
+      # by and, & or /: not a title in parentheses, after a colon or after
+      # the run, nor a slug past the leading number.
+      gsub(/\([^)]*\)/, " ", item)
+      sub(/:.*/, "", item)
+      of = feature[f]
+      # Each path becomes one \001<dir> word naming the feature of the numbers
+      # after it. Only a bare ./issues/ or ../issues/ names the feature of the
+      # issue itself; a longer path ending in . or .. names none.
+      while (match(item, /[^ \t]*\/issues\//)) {
+        dir = substr(item, RSTART, RLENGTH - 8)
+        if (dir !~ /^\.\.?$/ && sub(/.*\//, "", dir) && dir ~ /^\.\.?$/) dir = ""
+        item = substr(item, 1, RSTART - 1) " \001" dir " " substr(item, RSTART + RLENGTH)
+      }
+      gsub(/(^|[ \t])issues\//, " ", item)
+      w = split(item, words, /[ \t\/]+/)
+      found = 0
+      for (j = 1; j <= w; j++) {
+        if (words[j] ~ /^\001/) {
+          dir = substr(words[j], 2)
+          of = dir ~ /^\.\.?$/ ? feature[f] : features[dir]
+          continue
+        }
+        if (words[j] !~ /^#?[0-9]/) {
+          if (found && words[j] !~ /^(and|&|\+)?$/) break
+          continue
+        }
+        n = words[j]
+        sub(/^#/, "", n)
+        sub(/[^0-9].*/, "", n)
+        b = issue[of "/" (n + 0)]
+        if (b == "") {
+          if (of == feature[f]) print "skipped " f ": its Blocked by names " n ", which is no issue of its feature" > "/dev/stderr"
+          else print "skipped " f ": its Blocked by names " said ", which is no issue" > "/dev/stderr"
+          return 0
+        }
+        if (!closed(b)) return 0
+        found = 1
+      }
+      if (!found) {
+        print "skipped " f ": its Blocked by item \"" said "\" names no issue number" > "/dev/stderr"
+        return 0
+      }
+    }
+    return 1
+  }
+  function hash(s,    i, n) {
+    n = 0
+    for (i = 1; i <= length(s); i++) n = (n * 67 + index(chars, substr(s, i, 1))) % 46656
+    return substr(b36, int(n / 1296) + 1, 1) substr(b36, int(n / 36) % 36 + 1, 1) substr(b36, n % 36 + 1, 1)
+  }
+  function id_of(f,    id, cut, salt) {
+    id = tolower(feature[f])
+    gsub(/[^a-z0-9]+/, "-", id)
+    gsub(/^-+|-+$/, "", id)
+    if (id == feature[f] && length(id) + 1 + length(num[f]) <= room) return id
+    cut = substr(id, 1, room - length(num[f]) - 5)
+    gsub(/-+$/, "", cut)
+    # Another feature on the same hashed id rehashes, so no two share one.
+    salt = ""
+    id = cut "_" hash(feature[f])
+    while ((id in owner) && owner[id] != feature[f]) id = cut "_" hash(feature[f] "#" ++salt)
+    owner[id] = feature[f]
+    return id
+  }
+  /^\036/ {
+    f = substr($0, 2)
+    files[++n] = f
+    split(f, part, "/")
+    feature[f] = part[2]
+    features[tolower(part[2])] = part[2]
+    name[f] = part[4]
+    num[f] = name[f]
+    sub(/-.*/, "", num[f])
+    issue[part[2] "/" (num[f] + 0)] = f
+    comments = 0
+    listing = 0
+    next
+  }
+  { line = tolower($0) }
+  line ~ /^#+[ \t]*comments[ \t]*$/ { comments = 1 }
+  comments { next }
+  !(f in title) && /^#[ \t]/ {
+    title[f] = $0
+    sub(/^#[ \t]+/, "", title[f]); sub(/[ \t]+$/, "", title[f])
+  }
+  !(f in labels) && line ~ /^[ \t*_]*status[ \t*_]*:/ {
+    s = value(line)
+    gsub(/[ \t,]+/, " ", s)
+    labels[f] = " " s " "
+  }
+  listing && line ~ /^[ \t]*[-*+][ \t]/ {
+    sub(/^[ \t]*[-*+][ \t]+/, "", line)
+    blockers[f] = blockers[f] "," line
+    next
+  }
+  listing && line !~ /^[ \t]*$/ { listing = 0 }
+  !(f in blockers) && line ~ /^[ \t*_]*blocked by[ \t*_]*:/ {
+    blockers[f] = value(line)
+    listing = blockers[f] ~ /^[ \t]*$/
+  }
+  END {
+    for (i = 1; i <= n; i++) ids[files[i]] = id_of(files[i])
+    for (i = 1; i <= n; i++) {
+      f = files[i]
+      if (list == "backlog") {
+        if (has(f, "blocked") || closed(f)) continue
+        if (has(f, "ready-for-agent") && !has(f, "needs-info") \
+            && !has(f, "ready-for-human")) continue
+        if (!unblocked(f)) continue
+        if (!(f in title)) { title[f] = name[f]; sub(/\.md$/, "", title[f]) }
+        print f, title[f]
+        continue
+      }
+      if (!has(f, "ready-for-agent") || has(f, "blocked") || has(f, "needs-info") \
+          || has(f, "ready-for-human") || closed(f) || !unblocked(f)) continue
+      type = "feat"; skill = "tdd"
+      k = split(labels[f], words, " ")
+      for (j = k; j >= 1; j--) {
+        if (words[j] in types) type = types[words[j]]
+        if (words[j] ~ /^skill:[a-z0-9._:-]+$/) skill = substr(words[j], 7)
+      }
+      slug = tolower(name[f])
+      sub(/^[0-9]+-/, "", slug); sub(/\.md$/, "", slug)
+      gsub(/[^a-z0-9]+/, " ", slug)
+      k = split(slug, words, " ")
+      slug = ""
+      for (j = 1; j <= k && j <= 5; j++) slug = slug (j > 1 ? "-" : "") words[j]
+      if (slug == "") slug = "issue"
+      id = ids[f]
+      if (length(id) + 1 + length(num[f]) > room) {
+        print "skipped " f ": the herd name leaves no room for its id" > "/dev/stderr"
+        continue
+      }
+      id = id "-" num[f]
+      print id, type, skill, slug, f
+    }
+  }'
+'''
+max = 3
+
+[template.issue]
+params = ["id", "type", "skill", "slug", "path"]
+name = "{herd}-{id}"
+branch = "{type}/{id}-{slug}"
+# Done once origin/main has the issue's Status: line resolved, closed or done, and
+# not done while the file is missing there. Braces are doubled, as loopherd
+# fills {placeholders} in checks.
+done = '''
+git fetch -q origin main 2>/dev/null || git fetch -q origin main || exit
+git cat-file -e origin/main:{path} 2>/dev/null || exit 1
+text=$(git show origin/main:{path}) && printf '%s\n' "$text" | awk '
+  {{ sub(/\r$/, "") }}
+  tolower($0) ~ /^#+[ \t]*comments[ \t]*$/ {{ exit }}
+  tolower($0) ~ /^[ \t*_]*status[ \t*_]*:/ {{
+    s = tolower($0); sub(/^[^:]*:/, "", s); gsub(/[*`,]/, " ", s)
+    closed = " " s " " ~ /[ \t](resolved|closed|done)[ \t]/
+    exit
+  }}
+  END {{ exit !closed }}'
+'''
+merged = "GH_TOKEN=$(gh auth token --user acme) gh pr list --repo acme/widgets --head {branch} --state merged --json number --jq 'length > 0' | grep -qx true"
+prompt = '''
+You're {name}, working the local issue {path} on branch {branch} in
+{worktree}. The issue is a markdown file in the repo; its `Status:` line near
+the top holds its triage state, and comments go under a `## Comments` heading
+at the bottom.
+
+Run every gh command as acme, prefixed with
+`GH_TOKEN=$(gh auth token --user acme)` as in the commands below.
+
+1. Read {path} in full, comments included.
+2. Claim it: set its `Status:` line to `claimed`, append `claimed by {name}`
+   under `## Comments` (adding the heading if it's missing), and commit.
+3. Build it with the {skill} skill.
+4. Before calling it done, run each check and fix what fails:
+   - `cargo test`
+   - `cargo fmt --check`
+5. Set the issue's `Status:` line to `resolved`, append a one-line summary of
+   the work under `## Comments`, and commit, so the issue closes when your
+   branch merges.
+6. Push the branch as acme:
+   `GH_TOKEN=$(gh auth token --user acme) git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Open a PR with `GH_TOKEN=$(gh auth token --user acme) gh pr create --repo acme/widgets --base main --head {branch} --assignee acme --title "<title>" --body "<summary>"`.
+7. Finish with `loopherd report --kind done "<PR link and one-line summary>"`.
+
+If main moves under you, merge origin/main into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess: set
+the issue's `Status:` line to `needs-info`, append the question and the
+options you see under `## Comments`, commit and push the branch, then
+`loopherd report --kind question "<the exact question>"`.
+'''
+
+[lead]
+prompt_file = "widgets-lead.md"
+# From [lead_defaults] when init ran. Off means the lead asks the human.
+merge = false
+install = false
+rebase = false
+new_cards = false
+design_escalation = false
+blocked_dialogs = false
+follow_ups_ready = false
+merge_guard = "hook"
+== widgets-lead.md
+You're {name}, the lead of herd {herd}, in {worktree}, a detached checkout of
+acme/widgets you never commit in. No human is in this pane.
+
+Read `loopherd --skill` in full, its Lead section most closely. Tasks are issue files under `.scratch/` on origin's main. A worker's branch sets its issue's `Status:` line to `resolved`, so the issue closes when the branch merges.
+Run every gh command as acme, prefixed with
+`GH_TOKEN=$(gh auth token --user acme)`. You run the shepherd's loop for {herd}'s workers: feed, watch, verify
+each worker's PR with a reviewer subagent, send only blocking findings back
+to the member, and the after-merge steps.
+
+Your switches (off means the human does it; ask with a question report):
+{switches}
+
+Your review-round limit: {review_rounds}.
+
+Grilling is always the human's.
+
+Start now:
+1. `loopherd status` and `loopherd reports --all`, to see where the herd is.
+2. `loopherd feed {herd} --dry-run`, then `loopherd feed {herd}` if it reads right.
+3. Arm `loopherd watch {herd} --timeout 3600` as a background task, and
+   re-arm after every exit but `{herd} drained`: on that, report done and
+   stop. On `<member> merged`, run `loopherd feed {herd}`,
+   which retires it once its issue is closed. On `<name> claimable`, feed.
+   Exit 2 is your heartbeat: check each worker's PR for a merge and run
+   `loopherd feed {herd} --dry-run`.
+
+When you need the human, run `loopherd report --kind question "<the exact
+question>"` and end your turn. With merge off, a merge question carries the PR
+link, any PR that must merge first, and the line
+`! GH_TOKEN=$(gh auth token --user acme) gh pr merge <n> --repo acme/widgets --merge --match-head-commit <full sha>`
+for the head your reviewer verified. Single-quote that question ('...', not
+"..."): double quotes run the $(...) and leak the token.
+== AGENTS.md
+# Agent instructions
+
+## loopherd
+
+A loopherd herd works this repo's ready issues, one worker per issue on its
+own branch. A worker reads `docs/agents/loopherd.md` for how to claim, build,
+check, hand in and report an issue, and `docs/agents/issue-tracker.md` for
+the tracker.
+== docs/agents/issue-tracker.md
+# Issue tracker: Local Markdown
+
+Issues and specs for this repo live as markdown files under `.scratch/`.
+
+## Conventions
+
+- One feature per directory: `.scratch/<feature-slug>/`.
+- The feature's spec is `.scratch/<feature-slug>/spec.md`.
+- One file per implementation issue: `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, never in one combined tickets file.
+- Triage state is a `Status:` line near the top of each issue file, using the strings in `triage-labels.md`.
+- Comments and the rest of the conversation append to the bottom of the file under a `## Comments` heading.
+
+## When a skill says "publish to the issue tracker"
+
+Create a new file under `.scratch/<feature-slug>/`, creating the directory if needed.
+
+## When a skill says "fetch the relevant ticket"
+
+Read the file at the referenced path. Usually the user hands over the path or the issue number.
+
+## Wayfinding operations
+
+`/wayfinder` works through these. Its **map** is one file, and each ticket is a **child** file beside it.
+
+- **Map**: `.scratch/<effort>/map.md`, holding the Notes, Decisions-so-far and Fog sections.
+- **Child ticket**: `.scratch/<effort>/issues/NN-<slug>.md`, numbered from `01`, its body stating the question. A `Type:` line names the ticket type (`research`, `prototype`, `grilling` or `task`), and a `Status:` line reads `claimed` or `resolved`.
+- **Blocking**: a `Blocked by: NN, NN` line near the top. The ticket unblocks once every file it names is `resolved`.
+- **Frontier**: look through `.scratch/<effort>/issues/` for files that are open, unblocked and unclaimed, and take the lowest number.
+- **Claim**: set `Status: claimed` and save the file before starting.
+- **Resolve**: write the answer under an `## Answer` heading, set `Status: resolved`, then add a pointer (a one-line gist and a link) to Decisions-so-far in `map.md`.
+== docs/agents/triage-labels.md
+# Triage Labels
+
+The skills speak in five canonical triage roles. This file maps each role to
+the label string this repo's issue tracker uses.
+
+| Label in mattpocock/skills | Label in our tracker | Meaning |
+| --- | --- | --- |
+| `needs-triage` | `needs-triage` | Maintainer needs to evaluate this issue |
+| `needs-info` | `needs-info` | Waiting on reporter for more information |
+| `ready-for-agent` | `ready-for-agent` | Fully specified, ready for an AFK agent |
+| `ready-for-human` | `ready-for-human` | Requires human implementation |
+| `wontfix` | `wontfix` | Will not be actioned |
+
+When a skill mentions a role, use the corresponding label string from this
+table. Edit the "Label in our tracker" column to match the labels you use.
+== docs/agents/loopherd.md
+# Working an issue in a loopherd herd
+
+Issues are markdown files under `.scratch/<feature>/issues/`. An issue's
+triage state is the `Status:` line near its top, and comments go under a
+`## Comments` heading at its bottom.
+
+loopherd starts one worker per ready issue, each in its own worktree on its
+own branch. The worker's prompt names the issue, the branch and the exact
+commands; this doc says what each step is for. How the tracker works is in
+`docs/agents/issue-tracker.md`.
+
+## Claiming
+
+Read the issue file in full first. Then set its `Status:` line to `claimed`,
+append `claimed by <member>` under `## Comments`, with your member name, and
+commit on your branch. Every gh command runs as acme.
+
+## Branch names
+
+`<type>/<id>-<slug>`: the id is the feature and the issue's number; the type
+comes from the words of its `Status:` line through the herd file's type map
+(by default `fix` for `bug`, `docs` for `documentation`, else `feat`); the
+slug comes from the file name.
+loopherd creates the branch and its worktree; work only there. If main
+moves under you, merge `origin/main` into your branch; never rebase or
+force-push.
+
+## Checks
+
+Before calling the work done, run each check and fix what fails:
+
+- `cargo test`
+- `cargo fmt --check`
+
+## Handing in
+
+Before pushing, set the issue's `Status:` line to `resolved` and append a
+one-line summary under `## Comments`, so merging the branch closes the issue;
+loopherd counts the issue done once main has it resolved. Push the branch and open a PR with `--base main`.
+
+## Stopping on a question
+
+When only the human can answer, stop rather than guess: set the issue's
+`Status:` line to `needs-info`, append the question and the options you see
+under `## Comments`, commit and push, then report it.
+
+## Reporting
+
+Tell the shepherd how the work ended:
+
+- Done: `loopherd report --kind done "<PR link and one-line summary>"`.
+- Stopped on a question: `loopherd report --kind question "<the exact question>"`.

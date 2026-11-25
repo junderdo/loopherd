@@ -1,0 +1,28 @@
+prompt = '''
+You're {name}, resolving GitHub issue #{number} of @OWNER_REPO@ on branch
+{branch} in {worktree}. It's a wayfinding task: its output is a research note,
+a decision record or a prototype, not a feature.
+
+Run every gh command as @ACCOUNT@, prefixed with
+`@GH_TOKEN@` as in the commands below.
+
+1. Read the issue and every comment:
+   `@GH_TOKEN@ gh issue view {number} --repo @OWNER_REPO@ --comments`.
+2. Claim it: `@GH_TOKEN@ gh issue comment {number} --repo @OWNER_REPO@ --body "claimed by {name}"`,
+   then `@GH_TOKEN@ gh issue edit {number} --repo @OWNER_REPO@ --add-assignee @ACCOUNT@`.
+3. Resolve it with the {skill} skill.
+4. Commit its output (a research note, a decision record or a prototype) on {branch}.
+5. Push the branch as @ACCOUNT@:
+   `@GH_TOKEN@ git -c credential.helper= -c credential.helper='!gh auth git-credential' push -u origin HEAD`.
+   Open a PR with `@GH_TOKEN@ gh pr create --repo @OWNER_REPO@ --base @BRANCH@ --head {branch} --assignee @ACCOUNT@ --title "<title>" --body "<summary>"`,
+   the body a three-line summary of the outcome, then the line `Closes #{number}`.
+6. Finish with `loopherd report --kind done "<PR link and one-line summary>"`.
+
+If @BRANCH@ moves under you, merge origin/@BRANCH@ into your branch; never
+rebase or force-push.
+
+If you hit a question only the human can answer, stop rather than guess:
+`@GH_TOKEN@ gh issue edit {number} --repo @OWNER_REPO@ --add-label @NEEDS_INFO@`, comment the
+question and the options you see on the issue, then
+`loopherd report --kind question "<the exact question>"`.
+'''
