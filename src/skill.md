@@ -439,9 +439,10 @@ and, once per session past your limit, adds `shepherd handoff <n>k over
    session after your handoff is written moves it to `handoffs/shepherd/prev.md` and adds the
    resume to the new session's context.
 
-   With `[shepherd] self_restart = true` in `config.toml`
-   (`loopherd config get shepherd.self_restart`), first run `loopherd
-   restart --self` in this turn. When it arms, tell the human in your last
+   Self-restart is on unless `config.toml` sets
+   `[shepherd] self_restart = false`
+   (`loopherd config get shepherd.self_restart`); while it is on, first run
+   `loopherd restart --self` in this turn. When it arms, tell the human in your last
    message, above the lines above: you restart yourself in this pane in 5
    minutes, and any prompt here stops that. Then end your turn. A detached
    waiter sends `/clear` and `go` once your turn has ended, herdr shows the
