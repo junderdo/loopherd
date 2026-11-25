@@ -11,6 +11,7 @@ use crate::herdr::{
     Agent, AgentStatus, Herdr, NewTab, StartOutcome, WaitOutcome, Workspace, wait_for_shell_prompt,
 };
 use crate::ledger::{AgentRecord, Attended, Ledger, Process, Role};
+use crate::prompt::ensure_submitted;
 use crate::report::member_of_own_pane;
 use crate::template::Template;
 use crate::worktree::{ensure_detached_worktree, ensure_worktree, planned_worktree, worktree_path};
@@ -266,6 +267,9 @@ pub fn spawn(
     record.prompt_sent = sent.is_ok() && prompt.is_some();
     let unmarked = record_started(ledger, record)?;
     sent?;
+    if prompt.is_some() {
+        ensure_submitted(herdr, &req.name, &tab.pane_id).context("prompt")?;
+    }
     Ok(Spawned {
         tab_id: tab.tab_id,
         pane_id: tab.pane_id,
@@ -807,6 +811,39 @@ mod tests {
             "{}",
             rec.created
         );
+    }
+
+    #[test]
+    fn a_pasted_prompt_left_unsubmitted_is_submitted_again() {
+        let herdr = herdr();
+        herdr.swallow_enters(2);
+        let mut ledger = MemLedger::default();
+
+        run(&herdr, &mut ledger, &request("a")).unwrap();
+
+        assert_eq!(herdr.prompts(), vec![("a".into(), "start work".into())]);
+        assert_eq!(herdr.submits(), vec!["a", "a"]);
+        assert_eq!(herdr.agent("a").unwrap().status, AgentStatus::Working);
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn a_prompt_still_unsubmitted_after_three_more_enters_fails_naming_the_member() {
+        let herdr = herdr();
+        herdr.swallow_enters(4);
+        let mut ledger = MemLedger::default();
+
+        let err = run(&herdr, &mut ledger, &request("a")).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "prompt: a's prompt is still unsubmitted in its input box after 3 more Enters: \
+             press Enter in pane w1:p1"
+        );
+        assert_eq!(herdr.prompts().len(), 1);
+        assert_eq!(herdr.submits().len(), 3);
+        assert_eq!(herdr.tabs().len(), 1);
+        assert!(ledger.0["a"].prompt_sent);
     }
 
     #[test]

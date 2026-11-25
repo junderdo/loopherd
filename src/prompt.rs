@@ -1,11 +1,58 @@
 //! `loopherd prompt`: send a ledger entry's stored prompt that spawn couldn't.
 
-use anyhow::{Result, anyhow, bail};
+use std::time::Duration;
 
-use crate::herdr::{AgentStatus, Herdr};
+use anyhow::{Context, Result, anyhow, bail};
+
+use crate::herdr::{AgentStatus, Herdr, WaitOutcome};
 use crate::ledger::Ledger;
 use crate::sandbox::Guard;
-use crate::subagent_view::{TEXT_REACHES_SUBAGENT, ensure_main_view};
+use crate::subagent_view::{TEXT_REACHES_SUBAGENT, ensure_main_view, input_box_empty};
+
+/// Enters pressed after a prompt's own before giving up on it.
+const RESUBMITS: usize = 3;
+/// How long a submission has to show the agent took it.
+const TAKEN_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Makes sure the prompt just sent to `name` in `pane` was submitted: the
+/// agent went to work on it, or its input box is empty. herdr writes the paste
+/// and its Enter together, and a Claude that has only just started can take
+/// that Enter as part of the paste, so Enter is pressed again a few times.
+pub fn ensure_submitted(herdr: &dyn Herdr, name: &str, pane: &str) -> Result<()> {
+    for _ in 0..RESUBMITS {
+        if taken(herdr, name, pane)? {
+            return Ok(());
+        }
+        herdr
+            .submit(name)
+            .with_context(|| format!("press Enter to submit {name}'s prompt"))?;
+    }
+    if taken(herdr, name, pane)? {
+        return Ok(());
+    }
+    bail!(
+        "{name}'s prompt is still unsubmitted in its input box after {RESUBMITS} more Enters: \
+         press Enter in pane {pane}"
+    )
+}
+
+fn taken(herdr: &dyn Herdr, name: &str, pane: &str) -> Result<bool> {
+    let started = [
+        AgentStatus::Working,
+        AgentStatus::Blocked,
+        AgentStatus::Done,
+    ];
+    let outcome = herdr
+        .wait(name, &started, TAKEN_TIMEOUT)
+        .with_context(|| format!("wait for {name} to take its prompt"))?;
+    if outcome == WaitOutcome::Reached {
+        return Ok(true);
+    }
+    let screen = herdr
+        .visible_text(pane)
+        .with_context(|| format!("read {name}'s pane {pane} for its prompt"))?;
+    Ok(input_box_empty(&screen))
+}
 
 /// Sends `name`'s stored prompt to its live agent and marks it sent,
 /// refusing a pane that shows a subagent's view, and any member outside the
@@ -50,12 +97,11 @@ pub fn prompt(
         &format!("run loopherd prompt {name} again"),
     )?;
     herdr.prompt(name, &text)?;
-    ledger
-        .update(name, &mut |record| {
-            record.prompt_sent = true;
-            Ok(())
-        })
-        .map(|_| ())
+    ledger.update(name, &mut |record| {
+        record.prompt_sent = true;
+        Ok(())
+    })?;
+    ensure_submitted(herdr, name, &agent.pane_id)
 }
 
 #[cfg(test)]
@@ -179,6 +225,23 @@ mod tests {
         let mut ledger = ledger_with(record("a"));
         prompt(&herdr, &mut ledger, "a", false, &no_lead()).unwrap();
         assert_eq!(herdr.prompts(), vec![("a".into(), "start work".into())]);
+        assert!(ledger.0["a"].prompt_sent);
+    }
+
+    #[test]
+    fn a_prompt_left_unsubmitted_is_marked_sent_and_fails_naming_its_pane() {
+        let herdr = FakeHerdr::new(&[]).with_agent("a");
+        herdr.swallow_enters(4);
+        let mut ledger = ledger_with(record("a"));
+
+        let err = prompt(&herdr, &mut ledger, "a", false, &no_lead()).unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            "a's prompt is still unsubmitted in its input box after 3 more Enters: \
+             press Enter in pane w9:p9"
+        );
+        assert_eq!(herdr.submits().len(), 3);
         assert!(ledger.0["a"].prompt_sent);
     }
 
