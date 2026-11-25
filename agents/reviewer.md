@@ -13,6 +13,9 @@ branch, or a range) and the task it answers.
 - To build or run anything, use a detached worktree under the temp
   directory the caller gives, and point any state at temp dirs
   (`XDG_STATE_HOME`, `LOOPHERD_CONFIG_DIR`), never the real ones.
+- Every wait you run has a timeout, and you stop every background shell
+  you started before you return; a leftover one keeps running in the
+  caller's session.
 - Check each acceptance criterion against the code and say whether it is
   met, naming the test that covers it. Run the repo's checks, piping
   their output through `tail` (or grepping the failures), and never Read a
