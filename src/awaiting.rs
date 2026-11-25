@@ -30,7 +30,7 @@ pub fn mark(dir: &Path, pane: &str, lead: &str) -> Result<()> {
 }
 
 /// Answers the lead marked on `pane` for the prompt in a UserPromptSubmit
-/// hook's `input`, unless that prompt is a finished background task's.
+/// hook's `input`, unless that prompt is a finished background task's or subagent's.
 pub fn prompted(dir: &Path, pane: &str, input: &[u8], now: SystemTime) -> Result<()> {
     let path = mark_path(dir, pane);
     let lead = match fs::read_to_string(&path) {

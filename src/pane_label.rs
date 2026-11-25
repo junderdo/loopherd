@@ -72,9 +72,9 @@ pub fn lead_asked(
 }
 
 /// Clears `pane`'s label for the prompt in a UserPromptSubmit hook's `input`.
-/// Claude hands each finished background task to the model as a prompt of
-/// its own, the shepherd's watch among them; that keeps the label, and a
-/// prompt with any other text before or after the block clears it.
+/// Claude hands each finished background task or subagent report to the
+/// model as a prompt of its own, the shepherd's watch among them; that keeps
+/// the label, and a prompt with any other text clears it.
 pub fn prompted(herdr: &dyn Herdr, dir: &Path, pane: &str, input: &[u8]) -> Result<()> {
     let input: Option<serde_json::Value> = serde_json::from_slice(input).ok();
     let prompt = input.as_ref().and_then(|i| i["prompt"].as_str());
