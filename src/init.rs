@@ -291,8 +291,9 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         refuse_second_herd(paths, &repo)?;
     }
     let inferred = match mode {
-        Mode::Diff => herd_running(paths, &repo)?,
-        Mode::Write => None,
+        // A named herd needs no inference, so another herd's unreadable file can't stop it.
+        Mode::Diff if req.herd.is_none() => herd_running(paths, &repo)?,
+        _ => None,
     }
     .or_else(|| repo.file_name().map(|n| n.to_string_lossy().into_owned()));
     let name = ask.value(
@@ -1089,6 +1090,22 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     })
 }
 
+/// The gh account `[template.issue]`'s checks run as, from their `--user <login>`.
+fn recorded_account(herd_file: &Path) -> Option<String> {
+    let herd: toml::Table = fs::read_to_string(herd_file).ok()?.parse().ok()?;
+    let issue = herd.get("template")?.get("issue")?;
+    ["done", "merged"]
+        .iter()
+        .filter_map(|key| issue.get(key)?.as_str())
+        .find_map(|check| {
+            let (_, after) = check.split_once("gh auth token --user ")?;
+            let login = after
+                .split(|c: char| c == ')' || c.is_whitespace())
+                .next()?;
+            is_github_name(login).then(|| login.to_string())
+        })
+}
+
 struct Rendered {
     files: Vec<(PathBuf, String)>,
     /// The `[template.grill]` within the herd file.
@@ -1102,12 +1119,13 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
         bail!("init writes no template {template}");
     }
     let repo = herd::repo(paths, herd)?;
+    let account = recorded_account(&paths.herds.join(format!("{herd}.toml")));
     let req = Request {
         dir: &repo,
         herd: Some(herd),
         // A grill's prompt names no checks, so a herd without readable ones still renders.
         checks: &["true".to_string()],
-        gh_account: None,
+        gh_account: account.as_deref(),
         github: None,
         no_github: false,
         tracker: None,

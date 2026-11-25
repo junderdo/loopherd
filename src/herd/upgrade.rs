@@ -75,8 +75,8 @@ const MIGRATIONS: [Migration; 3] = [
     },
     Migration {
         id: "grill",
-        explanation: "Adds [template.grill], an attended grill the shepherd starts with\n\
-                      `loopherd add <herd> grill`, and its prompt file beside the herd file.",
+        explanation: "Adds [template.grill], an attended grill the shepherd starts live with the human,\n\
+                      and its prompt file beside the herd file. Feed never spawns it.",
         lead_reads_at_start: false,
         state: grill,
     },
@@ -263,10 +263,22 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
             }
             State::Template(name) => {
                 writeln!(out, "{header}")?;
-                let new = match (how.render)(herd, name) {
-                    Ok(new) => new,
+                let offer = (how.render)(herd, name).and_then(|new| {
+                    let mut after = doc.clone();
+                    add_template(&mut after, name, &new.table)?;
+                    Ok((new, after))
+                });
+                let (new, after) = match offer {
+                    Ok(offer) => offer,
                     Err(e) => {
                         writeln!(out, "Not applied: can't render it: {e:#}")?;
+                        if ask(input, out, "Stop offering this?", false)? {
+                            backup.take()?;
+                            edit(paths, herd, |doc| {
+                                add_declined(doc, migration.id);
+                                Ok(true)
+                            })?;
+                        }
                         continue;
                     }
                 };
@@ -289,8 +301,6 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                     }
                     ask(input, out, "Stop offering this?", false)?
                 } else {
-                    let mut after = doc.clone();
-                    add_template(&mut after, name, &new.table)?;
                     let (was, now) = (doc.to_string(), after.to_string());
                     let shown = file.display().to_string();
                     let diff = similar::TextDiff::from_lines(&was, &now);
@@ -306,6 +316,10 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                             write_new(path, text)?;
                         }
                         let added = edit(paths, herd, |doc| {
+                            // Added since it was read, by hand or another run.
+                            if doc.get("template").and_then(|t| t.get(name)).is_some() {
+                                return Ok(false);
+                            }
                             add_template(doc, name, &new.table)?;
                             Ok(true)
                         });
@@ -384,8 +398,12 @@ fn write_new(path: &Path, text: &str) -> Result<()> {
         .create_new(true)
         .open(path)
         .with_context(|| format!("write {}", path.display()))?;
-    file.write_all(text.as_bytes())
-        .with_context(|| format!("write {}", path.display()))
+    if let Err(e) = file.write_all(text.as_bytes()) {
+        drop(file);
+        let _ = fs::remove_file(path);
+        return Err(e).with_context(|| format!("write {}", path.display()));
+    }
+    Ok(())
 }
 
 fn read(file: &Path) -> Result<DocumentMut> {
@@ -776,8 +794,8 @@ merge = false # the human merges
         assert_eq!(
             printed,
             format!(
-                "grill — Adds [template.grill], an attended grill the shepherd starts with\n\
-                 `loopherd add <herd> grill`, and its prompt file beside the herd file.\n\
+                "grill — Adds [template.grill], an attended grill the shepherd starts live with the human,\n\
+                 and its prompt file beside the herd file. Feed never spawns it.\n\
                  --- {file}\n\
                  +++ {file}\n\
                  @@ -5,3 +5,9 @@\n \
@@ -860,11 +878,9 @@ merge = false # the human merges
         );
     }
 
-    #[test]
-    fn a_grill_that_cant_be_rendered_says_why_and_is_offered_again() {
-        let (_dir, paths) = herds(GRILLLESS);
+    fn unrenderable(paths: &Paths, answers: &str) -> String {
         let running_leads = BTreeSet::new();
-        let mut input = "".as_bytes();
+        let mut input = answers.as_bytes();
         let mut out = vec![];
         let how = Upgrade {
             running_leads: &running_leads,
@@ -872,14 +888,71 @@ merge = false # the human merges
             terminal: Some(&mut input),
             render: &|_, _| bail!("no origin"),
         };
+        upgrade(paths, Some("h"), how, &mut out).unwrap();
+        String::from_utf8(out).unwrap()
+    }
 
-        upgrade(&paths, Some("h"), how, &mut out).unwrap();
+    #[test]
+    fn a_grill_that_cant_be_rendered_says_why_and_a_no_offers_it_again() {
+        let (_dir, paths) = herds(GRILLLESS);
+
+        let printed = unrenderable(&paths, "\n");
 
         assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .ends_with("Not applied: can't render it: no origin\n")
+            printed
+                .ends_with("Not applied: can't render it: no origin\nStop offering this? [y/N] "),
+            "{printed}"
         );
         assert_eq!(text(&paths), GRILLLESS);
+        assert!(unrenderable(&paths, "\n").contains("can't render it"));
+    }
+
+    #[test]
+    fn stop_offering_a_grill_that_cant_be_rendered_declines_it() {
+        let (_dir, paths) = herds(GRILLLESS);
+
+        unrenderable(&paths, "y\n");
+
+        assert_eq!(
+            text(&paths),
+            GRILLLESS.replace(
+                "repo = \"/src/repo\"\n",
+                "repo = \"/src/repo\"\ndeclined = [\"grill\"]\n"
+            )
+        );
+    }
+
+    #[test]
+    fn a_herd_whose_template_table_is_inline_is_told_and_the_next_herd_still_offered() {
+        let (_dir, paths) = herds(GRILLLESS);
+        fs::write(
+            paths.herds.join("a.toml"),
+            "repo = \"/r\"\ntemplate = { issue = { params = [], prompt = \"x\" } }\n",
+        )
+        .unwrap();
+
+        let printed = answered(&paths, None, "\n\n", &[]);
+
+        assert!(
+            printed.contains("Not applied: can't render it: template is not a table\n"),
+            "{printed}"
+        );
+        assert!(text(&paths).contains("[template.grill]"), "{printed}");
+    }
+
+    #[test]
+    fn stop_offering_a_grill_whose_prompt_exists_declines_it() {
+        let (_dir, paths) = herds(GRILLLESS);
+        fs::write(paths.herds.join("h-grill.md"), "mine\n").unwrap();
+
+        answered(&paths, Some("h"), "y\n", &[]);
+
+        assert_eq!(
+            text(&paths),
+            GRILLLESS.replace(
+                "repo = \"/src/repo\"\n",
+                "repo = \"/src/repo\"\ndeclined = [\"grill\"]\n"
+            )
+        );
     }
 }
