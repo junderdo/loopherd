@@ -35,6 +35,7 @@ Usage: scripts/trello <command> [args]
   archive CARD                       Close (archive) the card
   label CARD +NAME|-NAME...          Add (+) or remove (-) labels
   comment CARD TEXT|-                Add a comment (- reads stdin)
+  desc CARD TEXT|-                   Replace the description (- reads stdin)
   unblock [--dry-run]                Unblock blocked cards whose blocked-by: cards are all Done
   setup-labels                       Create/recolor the standard labels (idempotent)
 
@@ -192,6 +193,14 @@ cmd_comment() {
   echo "commented on LH-$(card_number "$1")"
 }
 
+cmd_desc() {
+  local id text=${2:?TEXT required}
+  id=$(card_id "${1:?CARD required}")
+  [[ $text == - ]] && text=$(cat)
+  api PUT "/cards/$id" --data-urlencode "desc=$text" >/dev/null
+  echo "described LH-$(card_number "$1")"
+}
+
 # Plans from every card, archived ones included, since a Done blocker may be archived.
 cmd_unblock() {
   local dry_run=false
@@ -275,6 +284,7 @@ main() {
     archive) cmd_archive "$@" ;;
     label) cmd_label "$@" ;;
     comment) cmd_comment "$@" ;;
+    desc) cmd_desc "$@" ;;
     unblock) cmd_unblock "$@" ;;
     setup-labels) cmd_setup_labels ;;
     *) usage >&2; exit 2 ;;

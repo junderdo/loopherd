@@ -667,14 +667,31 @@ fn is_ancestor(repo: &Path, commit: &str, of: &str) -> Result<bool> {
 }
 
 /// Returns a worktree at `slug`'s path detached at origin's default branch,
-/// reusing a worktree already there. Creates no local branch.
+/// after a fetch. A worktree already there is moved to it, keeping untracked
+/// files; one with tracked changes or commits not on it is refused, untouched.
+/// Creates no local branch.
 pub fn ensure_detached_worktree(repo: &Path, slug: &str) -> Result<PathBuf> {
     let path = worktree_path(repo, slug);
-    if is_worktree(repo, &path)? {
-        return Ok(path);
-    }
+    let reused = is_worktree(repo, &path)?;
     fetch(repo)?;
     let base = default_branch(repo)?;
+    if reused {
+        let tracked_changes = git_at(
+            repo,
+            &path,
+            &["status", "--porcelain", "--untracked-files=no"],
+        )?;
+        let head = git_at(repo, &path, &["rev-parse", "HEAD"])?;
+        if !tracked_changes.is_empty() || !is_ancestor(repo, head.trim(), &base)? {
+            bail!(
+                "{} has commits or changes not on {base}; save or drop them, \
+                 or remove the worktree, so it can start at {base}",
+                path.display()
+            );
+        }
+        git_at(repo, &path, &["checkout", "--quiet", "--detach", &base])?;
+        return Ok(path);
+    }
     let path_str = path.to_str().context("worktree path is not UTF-8")?;
     git(
         repo,
@@ -1789,6 +1806,74 @@ mod tests {
         );
         assert!(!wt.exists());
         ensure_worktree(&repo, "feat/x").unwrap();
+    }
+
+    fn advance_origin_main(root: &Path, repo: &Path) -> String {
+        let wt = ensure_worktree(repo, "feat/next").unwrap();
+        commit(&wt, "merged since");
+        push_head(&wt, "feat/next");
+        merge_on_origin(root, "feat/next");
+        head(&wt)
+    }
+
+    #[test]
+    fn a_reused_detached_worktree_moves_to_origins_newest_default_branch_keeping_untracked_files() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_detached_worktree(&repo, "groom-h").unwrap();
+        std::fs::write(wt.join("notes.txt"), "scratch").unwrap();
+        let merged = advance_origin_main(root.path(), &repo);
+
+        let reused = ensure_detached_worktree(&repo, "groom-h").unwrap();
+
+        assert_eq!(reused, wt);
+        assert_eq!(head(&wt), merged);
+        assert!(wt.join("notes.txt").exists());
+    }
+
+    #[test]
+    fn a_reused_detached_worktree_with_its_own_commits_is_refused_and_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_detached_worktree(&repo, "groom-h").unwrap();
+        commit(&wt, "left behind");
+        let own = head(&wt);
+        advance_origin_main(root.path(), &repo);
+
+        let err = ensure_detached_worktree(&repo, "groom-h").unwrap_err();
+
+        assert_eq!(
+            format!("{err:#}"),
+            format!(
+                "{} has commits or changes not on origin/main; save or drop them, \
+                 or remove the worktree, so it can start at origin/main",
+                wt.display()
+            )
+        );
+        assert_eq!(head(&wt), own);
+    }
+
+    #[test]
+    fn a_reused_detached_worktree_with_tracked_changes_is_refused_and_left_alone() {
+        let root = tempfile::tempdir().unwrap();
+        let repo = repo_with_origin(root.path());
+        let wt = ensure_detached_worktree(&repo, "groom-h").unwrap();
+        let start = head(&wt);
+        std::fs::write(wt.join("README"), "edited").unwrap();
+        git_in(&wt, &["add", "README"]);
+        advance_origin_main(root.path(), &repo);
+
+        let err = ensure_detached_worktree(&repo, "groom-h").unwrap_err();
+
+        assert!(
+            format!("{err:#}").contains("has commits or changes not on origin/main"),
+            "{err:#}"
+        );
+        assert_eq!(head(&wt), start);
+        assert_eq!(
+            std::fs::read_to_string(wt.join("README")).unwrap(),
+            "edited"
+        );
     }
 
     #[test]

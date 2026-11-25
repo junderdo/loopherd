@@ -345,3 +345,32 @@ fn a_groom_batchs_double_quoted_comment_line_keeps_apostrophes_quotes_and_dollar
         ]
     );
 }
+
+#[test]
+fn desc_replaces_the_cards_description_with_the_text_on_stdin() {
+    let board = Board::new(&[Card(3, "Backlog", &[], "old")]);
+
+    let output = run_line(
+        &board,
+        "scripts/trello desc LH-3 - <<'EOF'\n## Goal\nName the \"file\" and $HOME path.\nEOF",
+    );
+
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), "described LH-3\n");
+    assert_eq!(
+        board.writes(),
+        [
+            "PUT /cards/card3 desc=## Goal",
+            "Name the \"file\" and $HOME path."
+        ]
+    );
+}
+
+#[test]
+fn desc_takes_the_text_as_an_argument() {
+    let board = Board::new(&[Card(3, "Backlog", &[], "old")]);
+
+    board.trello(&["desc", "3", "Short and clear"]);
+
+    assert_eq!(board.writes(), ["PUT /cards/card3 desc=Short and clear"]);
+}

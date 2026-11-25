@@ -211,7 +211,8 @@ Init never launches an agent.
    with `reports --all`. For a member that left no report, read its screen
    with `loopherd read <name>` (its last 40 lines; `--lines <n>` up to 1000).
 4. **Verify** a finished member's output with a read-only reviewer
-   subagent against the task's acceptance criteria. Ask for it by role:
+   subagent against the task's acceptance criteria (a groomer's `done` is
+   relayed instead, see Triage). Ask for it by role:
    the `reviewer` agent type, else `loopherd-reviewer`, else a
    general-purpose subagent told to stay read-only. A first review uses
    the reviewer as defined; later rounds pass `model: sonnet` to the
@@ -937,6 +938,7 @@ Shepherd section has the detail):
    member that left none, `loopherd read <name>` shows its screen, not raw
    `herdr agent read`.
 4. **Verify** a `done` member's output with a read-only reviewer subagent
+   (a groomer's `done` is relayed instead, see Running low)
    against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
    `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. Tell it every
    wait it runs has a timeout, and it stops every background shell it
@@ -1265,13 +1267,15 @@ backlog`) so the human can approve them in one go.
 
 - **Rights.** You may edit a card's text, comment on it, mark a duplicate
   by a comment naming the card it duplicates, and check whether a card is
-  stale against the code.
+  stale against the code. Edit text only with the command your prompt
+  names for it; with none, comment the edit instead.
 - **Limits.** Never add `ready-for-agent`, archive a card, move a card
   between lists, or add or remove `need-human` or `blocked`. Those are the
   shepherd's, on the human's word. Commit nothing.
 - **`need-human` cards.** For a `need-human` card, change nothing: restate
   its open question in your report.
-- **Grilling cards.** On each `wayfinding:grilling` card, post a draft
+- **Grilling cards.** On each `wayfinding:grilling` card without
+  `need-human`, post a draft
   grill prompt as a comment: the decision to settle, the questions to put
   to the human in order, and what the grill should file once it settles.
 - **Report.** Three parts, in this order:
