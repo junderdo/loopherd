@@ -1221,6 +1221,7 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     Ok(Rendered {
         files,
         grill: grill.trim_start().to_string(),
+        wayfinding: wayfinding.trim_start().to_string(),
     })
 }
 
@@ -1244,20 +1245,24 @@ struct Rendered {
     files: Vec<(PathBuf, String)>,
     /// The `[template.grill]` within the herd file.
     grill: String,
+    /// The `[template.wayfinding]` within the herd file, empty without one.
+    wayfinding: String,
 }
 
 /// `template` as init would write it now for the existing `herd`, rendered as
 /// `init --diff` renders over the herd's files.
 pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTemplate> {
-    if template != "grill" {
-        bail!("init writes no template {template}");
-    }
+    let with = match template {
+        "grill" => vec![],
+        "wayfinding" => vec![Template::Wayfinding],
+        _ => bail!("init writes no template {template}"),
+    };
     let repo = herd::repo(paths, herd)?;
     let account = recorded_account(&paths.herds.join(format!("{herd}.toml")));
     let req = Request {
         dir: &repo,
         herd: Some(herd),
-        // A grill's prompt names no checks, so a herd without readable ones still renders.
+        // Neither template's prompt names checks, so a herd without readable ones still renders.
         checks: &["true".to_string()],
         gh_account: account.as_deref(),
         github: None,
@@ -1267,9 +1272,12 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
         lead: None,
         merge_guard: None,
         context_limit: None,
-        with: &[],
+        with: &with,
     };
-    let herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
+    let mut herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
+    if template == "wayfinding" {
+        return routed_wayfinding(paths, &mut herd);
+    }
     let mut rendered = rendered(paths, &herd)?;
     let prompt_file = grill_file(paths, &herd.name);
     let prompt = rendered
@@ -1281,6 +1289,34 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
     Ok(herd::NewTemplate {
         table: rendered.grill,
         prompt: Some((format!("{}-grill.md", herd.name), prompt)),
+        queue: None,
+    })
+}
+
+/// The `[template.wayfinding]` with the `[queue]` init writes without and with it.
+fn routed_wayfinding(paths: &Paths, herd: &mut Herd) -> Result<herd::NewTemplate> {
+    let herd_file = paths.herds.join(format!("{}.toml", herd.name));
+    let mut queue = |wayfinding| -> Result<(toml_edit::Table, String)> {
+        herd.wayfinding = wayfinding;
+        let rendered = rendered(paths, herd)?;
+        let (_, text) = rendered
+            .files
+            .iter()
+            .find(|(path, _)| *path == herd_file)
+            .context("init renders no herd file")?;
+        let doc: toml_edit::DocumentMut = text.parse().context("rendered herd file")?;
+        let queue = doc
+            .get("queue")
+            .and_then(toml_edit::Item::as_table)
+            .context("rendered herd file has no [queue]")?;
+        Ok((queue.clone(), rendered.wayfinding))
+    };
+    let (before, _) = queue(false)?;
+    let (after, table) = queue(true)?;
+    Ok(herd::NewTemplate {
+        table,
+        prompt: None,
+        queue: Some(herd::RoutedQueue { before, after }),
     })
 }
 

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
 use anyhow::{Context, Result, bail};
-use toml_edit::{Array, DocumentMut, Item, Value, value};
+use toml_edit::{Array, DocumentMut, Item, Table, Value, value};
 
 use super::edit::{edit, replace};
 use super::{Paths, SwitchValues, expand_home, file_of, lead_defaults, load, names};
@@ -35,6 +35,15 @@ pub struct NewTemplate {
     pub table: String,
     /// Its prompt file's name in the herds directory, and text.
     pub prompt: Option<(String, String)>,
+    /// For a template the queue routes tasks to, the routing it needs.
+    pub queue: Option<RoutedQueue>,
+}
+
+/// The `[queue]` init writes without and with a routed template. The template
+/// and its routing are added together or not at all.
+pub struct RoutedQueue {
+    pub before: Table,
+    pub after: Table,
 }
 
 /// One change newer init writes. Whether a herd has it is read from the
@@ -78,7 +87,7 @@ enum Change {
     },
 }
 
-static MIGRATIONS: [Migration; 5] = [
+static MIGRATIONS: [Migration; 6] = [
     Migration {
         id: "lead-review-rounds",
         explanation: "Writes the lead's review-round limit into its prompt where init puts it,\n\
@@ -112,15 +121,104 @@ static MIGRATIONS: [Migration; 5] = [
         explanation: "Adds [template.grill], an attended grill the shepherd starts live with the human,\n\
                       and its prompt file beside the herd file. Feed never spawns it.",
         lead_reads_at_start: false,
-        state: grill,
+        state: |herd| template(herd, "grill"),
+    },
+    Migration {
+        id: "wayfinding",
+        explanation: "Adds [template.wayfinding] and routes the queue's wayfinding:research, :domain\n\
+                      and :prototype tasks to it, resolved with that skill on a docs/ branch.",
+        lead_reads_at_start: false,
+        state: |herd| template(herd, "wayfinding"),
     },
 ];
 
-fn grill(herd: &Herd) -> State {
-    match herd.doc.get("template").and_then(|t| t.get("grill")) {
+fn template(herd: &Herd, name: &'static str) -> State {
+    match herd.doc.get("template").and_then(|t| t.get(name)) {
         Some(_) => State::Current,
-        None => State::Template("grill"),
+        None => State::Template(name),
     }
+}
+
+/// Why `queue` can't route `doc`'s queue to `name` without undoing the human's edits.
+fn unroutable(doc: &DocumentMut, name: &str, queue: &RoutedQueue) -> Option<String> {
+    let routed = queue
+        .after
+        .get("templates")
+        .and_then(Item::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str);
+    for other in routed.filter(|t| *t != name) {
+        if doc.get("template").and_then(|t| t.get(other)).is_none() {
+            return Some(format!(
+                "the herd has no [template.{other}] to route beside it"
+            ));
+        }
+    }
+    let current = doc.get("queue").and_then(Item::as_table);
+    for key in changed_keys(queue) {
+        let have = current.and_then(|q| q.get(key)).map(Item::to_string);
+        let was = queue.before.get(key).map(Item::to_string);
+        if have.as_deref().map(str::trim) != was.as_deref().map(str::trim) {
+            return Some(format!(
+                "[queue]'s {key} isn't the one init writes for this herd"
+            ));
+        }
+    }
+    None
+}
+
+/// The `[queue]` keys init writes differently with the routed template.
+fn changed_keys(queue: &RoutedQueue) -> Vec<&str> {
+    let (before, after) = (&queue.before, &queue.after);
+    let mut keys: Vec<&str> = before
+        .iter()
+        .map(|(key, _)| key)
+        .chain(after.iter().map(|(key, _)| key))
+        .filter(|key| before.get(key).map(Item::to_string) != after.get(key).map(Item::to_string))
+        .collect();
+    let mut seen = BTreeSet::new();
+    keys.retain(|key| seen.insert(*key));
+    keys
+}
+
+/// Rewrites `doc`'s `[queue]` to route as `queue.after`, keeping its other
+/// keys, their order and its own comments on keys it changes.
+fn route(doc: &mut DocumentMut, queue: &RoutedQueue) -> Result<()> {
+    let changed = changed_keys(queue);
+    let current = doc
+        .get_mut("queue")
+        .and_then(Item::as_table_mut)
+        .context("the herd has no [queue]")?;
+    let mut new: Vec<_> = changed
+        .iter()
+        .filter(|key| !current.contains_key(key))
+        .filter_map(|key| queue.after.get_key_value(key))
+        .map(|(key, item)| (key.clone(), item.clone()))
+        .collect();
+    let mut routed = vec![];
+    for (key, item) in current.iter() {
+        let key = current.key(key).expect("an iterated key");
+        if !changed.contains(&key.get()) {
+            routed.push((key.clone(), item.clone()));
+            continue;
+        }
+        match queue.after.get_key_value(key.get()) {
+            Some((after, item)) => {
+                let before = queue.before.key(key.get());
+                // A comment the human rewrote stays theirs.
+                let ours = before.is_some_and(|b| b.leaf_decor() == key.leaf_decor());
+                routed.push((if ours { after } else { key }.clone(), item.clone()));
+            }
+            None => routed.append(&mut new),
+        }
+    }
+    routed.append(&mut new);
+    current.clear();
+    for (key, item) in routed {
+        current.insert_formatted(&key, item);
+    }
+    Ok(())
 }
 
 /// Adds `table`, a TOML `[template.<name>]`, at the end of `doc`.
@@ -453,6 +551,11 @@ fn upgrade_herd(
                 let offer = (how.render)(herd, name).and_then(|new| {
                     let mut after = doc.clone();
                     add_template(&mut after, name, &new.table)?;
+                    if let Some(queue) = &new.queue
+                        && unroutable(&doc, name, queue).is_none()
+                    {
+                        route(&mut after, queue)?;
+                    }
                     Ok((new, after))
                 });
                 let (new, after) = match offer {
@@ -473,7 +576,39 @@ fn upgrade_herd(
                     .prompt
                     .as_ref()
                     .map(|(name, text)| (paths.herds.join(name), text));
-                if let Some((path, _)) = prompt
+                let unrouted = new
+                    .queue
+                    .as_ref()
+                    .and_then(|queue| Some((queue, unroutable(&doc, name, queue)?)));
+                if let Some((queue, reason)) = unrouted {
+                    writeln!(
+                        out,
+                        "Not applied: {reason}. Together they belong in {}:",
+                        file.display()
+                    )?;
+                    let mut snippet = DocumentMut::new();
+                    let changed = changed_keys(queue);
+                    let mut keys = Table::new();
+                    for (key, item) in queue.after.iter() {
+                        if changed.contains(&key) {
+                            let key = queue.after.key(key).expect("an iterated key");
+                            keys.insert_formatted(key, item.clone());
+                        }
+                    }
+                    snippet.insert("queue", Item::Table(keys));
+                    for line in snippet
+                        .to_string()
+                        .lines()
+                        .chain([""])
+                        .chain(new.table.lines())
+                    {
+                        match line {
+                            "" => writeln!(out)?,
+                            line => writeln!(out, "  {line}")?,
+                        }
+                    }
+                    ask(input, out, "Stop offering this?", false)?
+                } else if let Some((path, _)) = prompt
                     .as_ref()
                     .filter(|(path, _)| fs::symlink_metadata(path).is_ok())
                 {
@@ -506,6 +641,12 @@ fn upgrade_herd(
                             // Added since it was read, by hand or another run.
                             if doc.get("template").and_then(|t| t.get(name)).is_some() {
                                 return Ok(false);
+                            }
+                            if let Some(queue) = &new.queue {
+                                if unroutable(doc, name, queue).is_some() {
+                                    return Ok(false);
+                                }
+                                route(doc, queue)?;
                             }
                             add_template(doc, name, &new.table)?;
                             Ok(true)
@@ -654,6 +795,10 @@ params = ["number"]
 attended = true
 prompt = "grill {number}"
 
+[template.wayfinding]
+params = ["number"]
+prompt = "answer {number}"
+
 [lead]
 prompt = "lead {herd} to {herd} drained in {review_rounds} rounds"
 # From [lead_defaults] when init ran.
@@ -676,14 +821,38 @@ merge = false # the human merges
         humantime::parse_rfc3339(stamp).unwrap()
     }
 
-    fn grill(_herd: &str, template: &str) -> Result<NewTemplate> {
-        assert_eq!(template, "grill");
-        Ok(NewTemplate {
-            table: "# Started live.\n[template.grill]\nparams = [\"number\"]\nattended = true\n\
-                    prompt_file = \"h-grill.md\"\n"
-                .into(),
-            prompt: Some(("h-grill.md".into(), "grill {number}\n".into())),
+    fn render(_herd: &str, template: &str) -> Result<NewTemplate> {
+        Ok(match template {
+            "grill" => NewTemplate {
+                table:
+                    "# Started live.\n[template.grill]\nparams = [\"number\"]\nattended = true\n\
+                        prompt_file = \"h-grill.md\"\n"
+                        .into(),
+                prompt: Some(("h-grill.md".into(), "grill {number}\n".into())),
+                queue: None,
+            },
+            "wayfinding" => NewTemplate {
+                table:
+                    "[template.wayfinding]\nparams = [\"number\"]\nprompt = \"answer {number}\"\n"
+                        .into(),
+                prompt: None,
+                queue: Some(RoutedQueue {
+                    before: queue(
+                        "template = \"issue\"\n# Prints tasks.\nsource = \"list\"\nmax = 2\n",
+                    ),
+                    after: queue(
+                        "templates = [\"issue\", \"wayfinding\"]\n# Prints routed tasks.\n\
+                         source = \"routed list\"\nmax = 2\n",
+                    ),
+                }),
+            },
+            _ => bail!("no template {template}"),
         })
+    }
+
+    fn queue(keys: &str) -> Table {
+        let doc: DocumentMut = format!("[queue]\n{keys}").parse().unwrap();
+        doc["queue"].as_table().unwrap().clone()
     }
 
     /// Runs an upgrade of `herd` answering `answers` on a terminal; what it printed.
@@ -695,7 +864,7 @@ merge = false # the human merges
             running_leads: &running_leads,
             now: at("2026-11-24T10:00:00Z"),
             terminal: Some(&mut input),
-            render: &grill,
+            render: &render,
         };
         upgrade(paths, herd, how, &mut out).unwrap();
         String::from_utf8(out).unwrap()
@@ -726,7 +895,7 @@ merge = false # the human merges
                  On, the lead files a reviewer's in-scope follow-ups ready for agents.\n\
                  --- {file}\n\
                  +++ {file}\n\
-                 @@ -20,3 +20,4 @@\n \
+                 @@ -24,3 +24,4 @@\n \
                  prompt = \"lead {{herd}} to {{herd}} drained in {{review_rounds}} rounds\"\n \
                  # From [lead_defaults] when init ran.\n \
                  merge = false # the human merges\n\
@@ -877,7 +1046,7 @@ merge = false # the human merges
             running_leads: &running_leads,
             now: at("2026-11-24T10:00:00Z"),
             terminal: None,
-            render: &grill,
+            render: &render,
         };
         upgrade(&paths, None, how, &mut out).unwrap();
         assert_eq!(
@@ -903,7 +1072,7 @@ merge = false # the human merges
             running_leads: &running_leads,
             now: at("2026-11-24T10:00:00Z"),
             terminal: None,
-            render: &grill,
+            render: &render,
         };
         upgrade(&paths, Some("h"), how, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "herd h is up to date\n");
@@ -967,7 +1136,8 @@ merge = false # the human merges
         );
     }
 
-    const GRILLLESS: &str = "# Herd h\nrepo = \"/src/repo\"\n\n[template.issue]\nparams = [\"number\"]\n\
+    const GRILLLESS: &str = "# Herd h\nrepo = \"/src/repo\"\n\n[template.wayfinding]\nparams = []\n\
+                             prompt = \"answer\"\n\n[template.issue]\nparams = [\"number\"]\n\
                              prompt = \"work {number}\"\ndone = \"exit 0\"\n";
 
     #[test]
@@ -985,7 +1155,7 @@ merge = false # the human merges
                  and its prompt file beside the herd file. Feed never spawns it.\n\
                  --- {file}\n\
                  +++ {file}\n\
-                 @@ -5,3 +5,9 @@\n \
+                 @@ -9,3 +9,9 @@\n \
                  params = [\"number\"]\n \
                  prompt = \"work {{number}}\"\n \
                  done = \"exit 0\"\n\
@@ -1065,6 +1235,137 @@ merge = false # the human merges
         );
     }
 
+    const UNROUTED: &str = "# Herd h\nrepo = \"/src/repo\"\n\n[queue]\ntemplate = \"issue\"\n\
+                            # Prints tasks.\nsource = \"list\"\nmax = 2\n\n[template.issue]\n\
+                            params = [\"number\"]\nprompt = \"work {number}\"\n\n[template.grill]\n\
+                            params = [\"number\"]\nattended = true\nprompt = \"grill {number}\"\n";
+
+    #[test]
+    fn a_herd_without_wayfinding_is_offered_it_and_a_yes_writes_the_template_and_its_routing() {
+        let (_dir, paths) = herds(UNROUTED);
+        let file = paths.herds.join("h.toml").display().to_string();
+
+        let printed = answered(&paths, Some("h"), "\n", &[]);
+
+        assert_eq!(
+            printed,
+            format!(
+                "wayfinding — Adds [template.wayfinding] and routes the queue's wayfinding:research, :domain\n\
+                 and :prototype tasks to it, resolved with that skill on a docs/ branch.\n\
+                 --- {file}\n\
+                 +++ {file}\n\
+                 @@ -2,9 +2,9 @@\n \
+                 repo = \"/src/repo\"\n \n \
+                 [queue]\n\
+                 -template = \"issue\"\n\
+                 -# Prints tasks.\n\
+                 -source = \"list\"\n\
+                 +templates = [\"issue\", \"wayfinding\"]\n\
+                 +# Prints routed tasks.\n\
+                 +source = \"routed list\"\n \
+                 max = 2\n \n \
+                 [template.issue]\n\
+                 @@ -15,3 +15,7 @@\n \
+                 params = [\"number\"]\n \
+                 attended = true\n \
+                 prompt = \"grill {{number}}\"\n\
+                 +\n\
+                 +[template.wayfinding]\n\
+                 +params = [\"number\"]\n\
+                 +prompt = \"answer {{number}}\"\n\
+                 Apply? [Y/n] "
+            )
+        );
+        assert_eq!(
+            text(&paths),
+            UNROUTED.replace(
+                "template = \"issue\"\n# Prints tasks.\nsource = \"list\"\n",
+                "templates = [\"issue\", \"wayfinding\"]\n# Prints routed tasks.\n\
+                     source = \"routed list\"\n"
+            ) + "\n[template.wayfinding]\nparams = [\"number\"]\nprompt = \"answer {number}\"\n"
+        );
+        assert_eq!(
+            answered(&paths, Some("h"), "", &[]),
+            "herd h is up to date\n"
+        );
+    }
+
+    #[test]
+    fn routing_keeps_a_comment_the_human_rewrote_on_a_key_it_changes() {
+        let mine = UNROUTED.replace("# Prints tasks.", "# My tasks.");
+        let (_dir, paths) = herds(&mine);
+
+        answered(&paths, Some("h"), "\n", &[]);
+
+        assert!(
+            text(&paths).contains("# My tasks.\nsource = \"routed list\"\n"),
+            "{}",
+            text(&paths)
+        );
+    }
+
+    #[test]
+    fn a_no_to_wayfinding_declines_it_and_leaves_the_queue() {
+        let (_dir, paths) = herds(UNROUTED);
+
+        answered(&paths, Some("h"), "n\n", &[]);
+
+        assert_eq!(
+            text(&paths),
+            UNROUTED.replace(
+                "repo = \"/src/repo\"\n",
+                "repo = \"/src/repo\"\ndeclined = [\"wayfinding\"]\n"
+            )
+        );
+    }
+
+    #[test]
+    fn wayfinding_over_a_tailored_source_or_no_issue_template_is_shown_not_applied() {
+        for (herd, reason) in [
+            (
+                UNROUTED.replace("source = \"list\"", "source = \"mine\""),
+                "[queue]'s source isn't the one init writes for this herd",
+            ),
+            (
+                UNROUTED
+                    .replace("[template.issue]", "[template.feature]")
+                    .replace("template = \"issue\"", "template = \"feature\""),
+                "the herd has no [template.issue] to route beside it",
+            ),
+        ] {
+            let (_dir, paths) = herds(&herd);
+            let file = paths.herds.join("h.toml").display().to_string();
+
+            let printed = answered(&paths, Some("h"), "\n", &[]);
+
+            assert!(
+                printed.ends_with(&format!(
+                    "Not applied: {reason}. Together they belong in {file}:\n  \
+                     [queue]\n  templates = [\"issue\", \"wayfinding\"]\n  # Prints routed tasks.\n  \
+                     source = \"routed list\"\n\n  [template.wayfinding]\n  params = [\"number\"]\n  \
+                     prompt = \"answer {{number}}\"\nStop offering this? [y/N] "
+                )),
+                "{printed}"
+            );
+            assert_eq!(text(&paths), herd);
+
+            answered(&paths, Some("h"), "y\n", &[]);
+            assert!(text(&paths).contains("declined = [\"wayfinding\"]"));
+        }
+    }
+
+    #[test]
+    fn a_herd_with_wayfinding_is_not_offered_it() {
+        let (_dir, paths) = herds(&format!(
+            "{UNROUTED}\n[template.wayfinding]\nparams = []\nprompt = \"x\"\n"
+        ));
+
+        assert_eq!(
+            answered(&paths, Some("h"), "", &[]),
+            "herd h is up to date\n"
+        );
+    }
+
     fn unrenderable(paths: &Paths, answers: &str) -> String {
         let running_leads = BTreeSet::new();
         let mut input = answers.as_bytes();
@@ -1118,7 +1419,7 @@ merge = false # the human merges
         )
         .unwrap();
 
-        let printed = answered(&paths, None, "\n\n", &[]);
+        let printed = answered(&paths, None, "\n\n\n", &[]);
 
         assert!(
             printed.contains("Not applied: can't render it: template is not a table\n"),

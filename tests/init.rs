@@ -7353,7 +7353,7 @@ fn herd_upgrade_gives_a_herd_without_a_grill_the_one_init_writes_today() {
         (&["acme", "jeff"][..], &["--gh-account", "jeff"][..], "jeff"),
     ] {
         let fixture = Fixture::new(logins);
-        assert_ok(&fixture.init(extra));
+        assert_ok(&fixture.init(&[extra, &["--with", "wayfinding"]].concat()));
         let grill = grill_template(&fixture);
         let prompt = grill_prompt(&fixture);
         fixture.remove_grill();
@@ -7388,7 +7388,7 @@ fn herd_upgrade_gives_a_herd_without_a_grill_the_one_init_writes_today() {
 #[test]
 fn herd_upgrade_without_a_terminal_lists_a_missing_grill_and_writes_nothing() {
     let fixture = Fixture::new(&["acme"]);
-    assert_ok(&fixture.init(&[]));
+    assert_ok(&fixture.init(&["--with", "wayfinding"]));
     assert_ok(&fixture.loopherd(&["herd", "unset", "widgets", "template.grill"]));
     let before = fixture.config_listing();
 
@@ -7401,4 +7401,56 @@ fn herd_upgrade_without_a_terminal_lists_a_missing_grill_and_writes_nothing() {
         text(&out.stdout)
     );
     assert_eq!(fixture.config_listing(), before);
+}
+
+#[test]
+fn herd_upgrade_gives_a_herd_without_wayfinding_the_routing_and_template_init_writes_today() {
+    // An other tracker's herd is invalid until its source is filled in, so upgrade skips it.
+    for args in [&[][..], &["--tracker", "local"][..]] {
+        let routed = Fixture::new(&["acme"]);
+        assert_ok(&routed.init(&[args, &["--with", "wayfinding"]].concat()));
+        let fixture = Fixture::new(&["acme"]);
+        assert_ok(&fixture.init(args));
+
+        let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n") else {
+            return;
+        };
+
+        assert_ok(&out);
+        let shown = text(&out.stdout);
+        assert!(
+            shown.contains("wayfinding — Adds [template.wayfinding]"),
+            "{shown}"
+        );
+        let routing = |fixture: &Fixture| {
+            let herd = herd_toml(fixture);
+            format!("{:?}\n{:?}", herd["queue"], herd["template"]["wayfinding"])
+                .replace(&fixture.root.path().display().to_string(), "<root>")
+        };
+        assert_eq!(routing(&fixture), routing(&routed), "{args:?}\n{shown}");
+        assert_ok(&fixture.loopherd(&["herds"]));
+    }
+}
+
+#[test]
+fn herd_upgrade_skips_wayfinding_over_a_source_the_human_edited() {
+    let fixture = Fixture::new(&["acme"]);
+    assert_ok(&fixture.init(&[]));
+    assert_ok(&fixture.loopherd(&["herd", "set", "widgets", "queue.source", "'echo'"]));
+    let before = fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap();
+
+    let Some(out) = fixture.loopherd_on_terminal(&["herd", "upgrade", "widgets"], "\n") else {
+        return;
+    };
+
+    assert_ok(&out);
+    let shown = text(&out.stdout);
+    assert!(
+        shown.contains("Not applied: [queue]'s source isn't the one init writes for this herd."),
+        "{shown}"
+    );
+    assert_eq!(
+        fs::read_to_string(fixture.herds().join("widgets.toml")).unwrap(),
+        before
+    );
 }
