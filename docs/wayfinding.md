@@ -177,6 +177,7 @@ decision is a new `decisions/D<n>.md` plus a row here.
 | [D162](decisions/D162.md) | Amends D91. `[shepherd] self_restart` defaults to true; `self_restart = false` turns it off. Doctor's missing-UserPromptSubmit-hook warning fires whenever it is on, set or by default; its `[notify]` warning only for an explicit `true`. |
 | [D166](decisions/D166.md) | A lead's watch ends, freeing `watch-<lead>.lock`, on the first poll after the nearest Claude above it is gone, so a killed lead's orphaned watch can't keep `revive` from prompting the re-arm. |
 | [D171](decisions/D171.md) | `spawn` and `loopherd prompt` confirm a sent prompt was taken (agent `working`, `blocked` or `done`, or Claude's input box empty), pressing Enter again up to 3 times; spawn then reports the member `unsubmitted:` with exit 1 after its callers' bookkeeping, and `loopherd prompt` fails naming it. The prompt stays marked sent. |
+| [D172](decisions/D172.md) | Amends D122. `loopherd update` runs a release's `install.sh` with `LOOPHERD_UPDATE=1`, an env var older installers ignore where they'd refuse a flag: no splash and no offers, only refreshing the agent types loopherd installed and naming the skills plugin's update, as `scripts/install --update` does; plain `setup` still runs. |
 
 ## Emerging model
 
