@@ -777,3 +777,15 @@ fn a_lead_getting_ready_for_a_revive_keeps_its_watch_and_reports_every_handoff()
         assert!(lead.contains(rule), "{rule}: {lead}");
     }
 }
+
+#[test]
+fn verify_tells_the_reviewer_to_bound_waits_and_stop_its_shells() {
+    let home = tempfile::tempdir().unwrap();
+    let printed = String::from_utf8(skill(home.path())).unwrap();
+    let rule = "every wait it runs has a timeout, and it stops every background shell it started before it returns";
+    let verify = flat_section(&printed, "4. **Verify**", "5. **After merge**");
+    let brief = flat_section(&printed, "**Task life, in brief**", "5. **After merge**");
+    for (section, text) in [("Verify", &verify), ("Task life", &brief)] {
+        assert!(text.contains(rule), "{section} misses {rule:?}");
+    }
+}
