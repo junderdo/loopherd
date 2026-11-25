@@ -59,7 +59,11 @@ enum State {
 
 enum Change {
     Herd(Box<dyn Fn(&mut DocumentMut)>),
-    File { path: PathBuf, text: String },
+    /// Worked out again on the file as it reads at each use.
+    Prompt {
+        path: PathBuf,
+        anchored: &'static Anchored,
+    },
 }
 
 const MIGRATIONS: [Migration; 4] = [
@@ -112,24 +116,16 @@ fn lead_prompt(herd: &Herd, anchored: &'static Anchored) -> State {
     let Some(lead) = herd.doc.get("lead").and_then(Item::as_table_like) else {
         return State::Current;
     };
+    // How often the anchor appears; none when the quoting can't hold the change.
     let (matches, source) = match (lead.get("prompt"), lead.get("prompt_file")) {
-        (Some(inline), _) => {
-            let Some(placed) = inline.as_value().and_then(|v| anchored.place_in_toml(v)) else {
-                return State::Current;
-            };
-            let matches = match placed {
-                Placed::Has => return State::Current,
-                Placed::Edited(new) => {
-                    return State::Pending(Change::Herd(Box::new(move |doc| {
-                        if let Some(lead) = doc.get_mut("lead").and_then(Item::as_table_like_mut) {
-                            lead.insert("prompt", Item::Value(new.clone()));
-                        }
-                    })));
-                }
-                Placed::Unplaced { matches } => matches,
-            };
-            (matches, "[lead]'s prompt".to_string())
-        }
+        (Some(inline), _) => match inline.as_value().and_then(|v| anchored.place_in_toml(v)) {
+            None | Some(Placed::Has) => return State::Current,
+            Some(Placed::Edited(_)) => {
+                return State::Pending(Change::Herd(Box::new(|doc| place_inline(doc, anchored))));
+            }
+            Some(Placed::Unplaced { matches }) => (Some(matches), "[lead]'s prompt".to_string()),
+            Some(Placed::Unquotable) => (None, "[lead]'s prompt".to_string()),
+        },
         (None, Some(file)) => {
             let Some(file) = file.as_str() else {
                 return State::Current;
@@ -139,24 +135,50 @@ fn lead_prompt(herd: &Herd, anchored: &'static Anchored) -> State {
             let Ok(text) = fs::read_to_string(&path) else {
                 return State::Current;
             };
-            let matches = match anchored.place(&text) {
+            match anchored.place(&text) {
                 Placed::Has => return State::Current,
-                Placed::Edited(text) => return State::Pending(Change::File { path, text }),
-                Placed::Unplaced { matches } => matches,
-            };
-            (matches, path.display().to_string())
+                Placed::Edited(_) => return State::Pending(Change::Prompt { path, anchored }),
+                Placed::Unplaced { matches } => (Some(matches), path.display().to_string()),
+                Placed::Unquotable => (None, path.display().to_string()),
+            }
         }
         (None, None) => return State::Current,
     };
-    let times = match matches {
-        0 => "is not".to_string(),
-        n => format!("appears {n} times"),
+    let anchor = anchored.anchor;
+    let reason = match matches {
+        Some(0) => format!("{anchor:?} is not in {source}"),
+        Some(n) => format!("{anchor:?} appears {n} times in {source}"),
+        None => format!("{source}'s quoting can't hold it as written"),
     };
     State::Tailored {
-        reason: format!("{:?} {times} in {source}", anchored.anchor),
+        reason,
         place: format!("{source}, {}", anchored.place_name()),
         snippet: anchored.text.to_string(),
     }
+}
+
+/// Places `anchored` in the inline prompt as it reads now, so a hand edit
+/// made while the offer waited is kept.
+fn place_inline(doc: &mut DocumentMut, anchored: &Anchored) {
+    let Some(lead) = doc.get_mut("lead").and_then(Item::as_table_like_mut) else {
+        return;
+    };
+    let placed = lead
+        .get("prompt")
+        .and_then(Item::as_value)
+        .and_then(|v| anchored.place_in_toml(v));
+    if let Some(Placed::Edited(new)) = placed {
+        lead.insert("prompt", Item::Value(new));
+    }
+}
+
+/// `path` as it reads now and with `anchored` placed; none when it can't be.
+fn placed_in_file(path: &Path, anchored: &Anchored) -> Result<Option<(String, String)>> {
+    let was = fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+    Ok(match anchored.place(&was) {
+        Placed::Edited(now) => Some((was, now)),
+        _ => None,
+    })
 }
 
 fn follow_ups_ready(herd: &Herd) -> State {
@@ -217,17 +239,25 @@ pub fn upgrade(
         Some(herd) => vec![herd.to_string()],
         None => names(&paths.herds)?,
     };
+    let mut backups = Backups::new(how.now);
     for herd in &herds {
         if let Err(invalid) = super::checked(&file_of(&paths.herds, herd)?, paths) {
             writeln!(out, "{herd}: skipped, {invalid}")?;
             continue;
         }
-        upgrade_herd(paths, herd, &mut how, out).with_context(|| format!("upgrade {herd}"))?;
+        upgrade_herd(paths, herd, &mut how, &mut backups, out)
+            .with_context(|| format!("upgrade {herd}"))?;
     }
     Ok(())
 }
 
-fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Write) -> Result<()> {
+fn upgrade_herd(
+    paths: &Paths,
+    herd: &str,
+    how: &mut Upgrade,
+    backups: &mut Backups,
+    out: &mut dyn Write,
+) -> Result<()> {
     let file = file_of(&paths.herds, herd)?;
     let declined = load(&paths.herds, herd)?.declined;
     let defaults = lead_defaults(paths)?;
@@ -264,7 +294,6 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
         writeln!(out, "  run: loopherd herd upgrade {herd}")?;
         return Ok(());
     };
-    let mut backups = Backups::new(how.now);
     for migration in pending {
         // Read again: an earlier answer may have written the file.
         let doc = read(&file)?;
@@ -285,11 +314,10 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                         change(&mut after);
                         (&file, doc.to_string(), after.to_string())
                     }
-                    Change::File { path, text } => {
-                        let was = fs::read_to_string(path)
-                            .with_context(|| format!("read {}", path.display()))?;
-                        (path, was, text.clone())
-                    }
+                    Change::Prompt { path, anchored } => match placed_in_file(path, anchored)? {
+                        Some((was, now)) => (path, was, now),
+                        None => continue,
+                    },
                 };
                 let shown = shown.display().to_string();
                 let diff = similar::TextDiff::from_lines(&was, &now);
@@ -303,9 +331,18 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                                 Ok(true)
                             })?;
                         }
-                        Change::File { path, text } => {
-                            backups.take(&path)?;
-                            replace(&path, &text)?;
+                        Change::Prompt { path, anchored } => {
+                            match placed_in_file(&path, anchored)? {
+                                Some((_, now)) => {
+                                    backups.take(&path)?;
+                                    replace(&path, &now)?;
+                                }
+                                None => writeln!(
+                                    out,
+                                    "Not applied: {} changed and no longer takes it.",
+                                    path.display()
+                                )?,
+                            }
                         }
                     }
                     false

@@ -31,6 +31,8 @@ pub enum Placed<T = String> {
     Unplaced {
         matches: usize,
     },
+    /// An inline prompt's quoting or layout can't hold the change as written.
+    Unquotable,
 }
 
 impl Anchored {
@@ -72,19 +74,20 @@ impl Anchored {
         let prompt = old.as_str()?;
         Some(match self.place(prompt) {
             Placed::Edited(edited) => {
-                let mut new = self
-                    .reencoded(old, &edited)
-                    .unwrap_or_else(|| edited.into());
+                let Some(mut new) = self.reencoded(old, prompt, &edited) else {
+                    return Some(Placed::Unquotable);
+                };
                 *new.decor_mut() = old.decor().clone();
                 Placed::Edited(new)
             }
             Placed::Has => Placed::Has,
             Placed::Unplaced { matches } => Placed::Unplaced { matches },
+            Placed::Unquotable => Placed::Unquotable,
         })
     }
 
     /// The edit made on `old`'s raw text, when that decodes to `edited`.
-    fn reencoded(&self, old: &Value, edited: &str) -> Option<Value> {
+    fn reencoded(&self, old: &Value, prompt: &str, edited: &str) -> Option<Value> {
         let Value::String(formatted) = old else {
             return None;
         };
@@ -94,7 +97,8 @@ impl Anchored {
         if raw.matches(&anchor).count() != 1 {
             return None;
         }
-        let placed = style.encode(&self.placed(self.text))?;
+        let text = LineEnding::of(prompt).apply(self.text);
+        let placed = style.encode(&self.placed(&text))?;
         let new: Value = raw.replacen(&anchor, &placed, 1).parse().ok()?;
         (new.as_str() == Some(edited)).then_some(new)
     }
@@ -134,7 +138,8 @@ impl Style {
                     match c {
                         '\\' => out.push_str("\\\\"),
                         '"' => out.push_str("\\\""),
-                        '\n' if multiline => out.push('\n'),
+                        // Raw, so a CRLF string's added lines stay CRLF.
+                        '\n' | '\r' if multiline => out.push(c),
                         '\n' => out.push_str("\\n"),
                         '\t' => out.push_str("\\t"),
                         '\r' => out.push_str("\\r"),
@@ -216,6 +221,7 @@ mod tests {
             Placed::Edited(value) => Placed::Edited(value.to_string()),
             Placed::Has => Placed::Has,
             Placed::Unplaced { matches } => Placed::Unplaced { matches },
+            Placed::Unquotable => Placed::Unquotable,
         }
     }
 
@@ -240,15 +246,25 @@ mod tests {
     }
 
     #[test]
-    fn a_change_a_literal_string_cannot_hold_is_written_in_another_quoting() {
-        let edited = in_toml(&BEFORE, "'Lead. Grill.'");
-        assert_eq!(
-            edited,
-            Placed::Edited("\"\"\"\nLead. Limit {limit}.\n\nGrill.\"\"\"".into())
-        );
+    fn a_change_the_strings_own_quoting_or_layout_cannot_hold_is_not_placed() {
+        for raw in ["'Lead. Grill.'", "\"\"\"\nLead. Gr\\\n  ill.\"\"\""] {
+            assert_eq!(in_toml(&BEFORE, raw), Placed::Unquotable, "{raw}");
+        }
         assert_eq!(
             in_toml(&REPLACE, "'''Watch, re-arm.'''"),
             Placed::Edited("'''Watch, re-arm but on \"drained\".'''".into())
+        );
+    }
+
+    #[test]
+    fn a_crlf_multiline_string_gets_crlf_lines() {
+        assert_eq!(
+            in_toml(&BEFORE, "\"\"\"\r\nLead.\r\n\r\nGrill.\r\n\"\"\""),
+            Placed::Edited("\"\"\"\r\nLead.\r\n\r\nLimit {limit}.\r\n\r\nGrill.\r\n\"\"\"".into())
+        );
+        assert_eq!(
+            in_toml(&BEFORE, "'''\r\nLead.\r\nGrill.'''"),
+            Placed::Edited("'''\r\nLead.\r\nLimit {limit}.\r\n\r\nGrill.'''".into())
         );
     }
 
