@@ -31,6 +31,7 @@ fn run(state: &Path, args: &[&str]) -> Output {
         .env("LOOPHERD_CONFIG_DIR", state.join("config"))
         .env("PATH", "")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .output()
         .unwrap()
 }
@@ -445,6 +446,7 @@ fn setup_without_a_controlling_terminal_names_its_flags_instead_of_prompting() {
         .env("LOOPHERD_CONFIG_DIR", state.path().join("config"))
         .env("PATH", "")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .stdin(std::process::Stdio::piped());
     // SAFETY: setsid is async-signal-safe; a new session has no controlling terminal.
     unsafe {

@@ -38,6 +38,7 @@ impl Setup {
             .env("LOOPHERD_CONFIG_DIR", path("config"))
             .env("PATH", format!("{}:/usr/bin:/bin", path("bin").display()))
             .env_remove("HERDR_PANE_ID")
+            .env_remove("LOOPHERD_BROKER_OF")
             .output()
             .unwrap()
     }

@@ -107,6 +107,7 @@ fn herd_with_herdr(config: &Path, up: bool, args: &[&str]) -> Output {
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env_remove("HERDR_SOCKET_PATH")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .output()
         .unwrap()
 }
