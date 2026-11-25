@@ -317,36 +317,116 @@ pub fn path(skills_dir: &Path) -> PathBuf {
     skills_dir.join(NAME).join("SKILL.md")
 }
 
-/// Writes the skill, overwriting what's there. Returns whether it changed.
+/// Writes the skill and its references, overwriting what's there and
+/// pruning references no longer shipped. Returns whether anything changed.
 fn write(skills_dir: &Path) -> Result<bool> {
-    let path = path(skills_dir);
-    match fs::read(&path) {
-        Ok(bytes) if bytes == SKILL.as_bytes() => return Ok(false),
+    let skill = write_file(&path(skills_dir), SKILL)?;
+    let references = write_references(&references_dir(skills_dir))?;
+    Ok(skill || references)
+}
+
+fn write_file(path: &Path, text: &str) -> Result<bool> {
+    match fs::read(path) {
+        Ok(bytes) if bytes == text.as_bytes() => return Ok(false),
         Ok(_) => {}
         Err(e) if e.kind() == ErrorKind::NotFound => {}
         Err(e) => return Err(e).with_context(|| format!("read {}", path.display())),
     }
-    let dir = path.parent().expect("the skill sits in a directory");
+    let dir = path.parent().expect("a file sits in a directory");
     fs::create_dir_all(dir).with_context(|| format!("create {}", dir.display()))?;
-    // A rename replaces a symlinked SKILL.md rather than writing through to its target.
-    let tmp = dir.join(format!(".SKILL.md.{}.tmp", unique()));
-    fs::write(&tmp, SKILL).with_context(|| format!("write {}", tmp.display()))?;
-    fs::rename(&tmp, &path).with_context(|| format!("rename into {}", path.display()))?;
+    let name = path
+        .file_name()
+        .expect("a file has a name")
+        .to_string_lossy();
+    // A rename replaces a symlinked file rather than writing through to its target.
+    let tmp = dir.join(format!(".{name}.{}.tmp", unique()));
+    fs::write(&tmp, text).with_context(|| format!("write {}", tmp.display()))?;
+    fs::rename(&tmp, path).with_context(|| format!("rename into {}", path.display()))?;
     Ok(true)
 }
 
-/// Deletes the skill and its directory if that leaves it empty. Returns
-/// whether there was one.
-fn remove(skills_dir: &Path) -> Result<bool> {
-    let path = path(skills_dir);
-    match fs::remove_file(&path) {
-        Ok(()) => {}
-        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(false),
-        Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
+fn write_references(dir: &Path) -> Result<bool> {
+    let mut changed = false;
+    // Writing into a symlinked dir would change whatever it points to.
+    if fs::symlink_metadata(dir).is_ok_and(|m| !m.is_dir()) {
+        fs::remove_file(dir).with_context(|| format!("remove {}", dir.display()))?;
+        changed = true;
     }
+    for reference in &crate::references::ALL {
+        changed |= write_file(&dir.join(reference.file_name()), &reference.text())?;
+    }
+    for name in unshipped(dir)? {
+        let path = dir.join(&name);
+        match fs::symlink_metadata(&path).is_ok_and(|m| m.is_dir()) {
+            true => fs::remove_dir_all(&path),
+            false => fs::remove_file(&path),
+        }
+        .with_context(|| format!("remove {}", path.display()))?;
+        changed = true;
+    }
+    Ok(changed)
+}
+
+/// Entries in the references dir loopherd doesn't ship, but for dotfiles: a
+/// concurrent install's temp files.
+fn unshipped(dir: &Path) -> Result<Vec<String>> {
+    let shipped: Vec<String> = crate::references::ALL
+        .iter()
+        .map(|r| r.file_name())
+        .collect();
+    let entries = match fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(vec![]),
+        Err(e) => return Err(e).with_context(|| format!("read {}", dir.display())),
+    };
+    let mut names: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|name| !name.starts_with('.') && !shipped.contains(name))
+        .collect();
+    names.sort();
+    Ok(names)
+}
+
+/// The references under `skill_dir` that are missing, differ from this
+/// binary's, or are no longer shipped, by file name.
+pub fn stale_references(skill_dir: &Path) -> Vec<String> {
+    let dir = skill_dir.join(REFERENCES);
+    let mut stale: Vec<String> = crate::references::ALL
+        .iter()
+        .filter(|r| {
+            fs::read(dir.join(r.file_name())).map_or(true, |bytes| bytes != r.text().as_bytes())
+        })
+        .map(|r| r.file_name())
+        .collect();
+    stale.extend(unshipped(&dir).unwrap_or_default());
+    stale
+}
+
+const REFERENCES: &str = "references";
+
+fn references_dir(skills_dir: &Path) -> PathBuf {
+    skills_dir.join(NAME).join(REFERENCES)
+}
+
+/// Deletes the skill, its references, and its directory if that leaves it
+/// empty. Returns whether there was a skill or references.
+fn remove(skills_dir: &Path) -> Result<bool> {
+    let references = references_dir(skills_dir);
+    let had_references = match fs::remove_dir_all(&references) {
+        Ok(()) => true,
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => return Err(e).with_context(|| format!("remove {}", references.display())),
+    };
+    let path = path(skills_dir);
+    let had_skill = match fs::remove_file(&path) {
+        Ok(()) => true,
+        Err(e) if e.kind() == ErrorKind::NotFound => false,
+        Err(e) => return Err(e).with_context(|| format!("remove {}", path.display())),
+    };
     // Fails while the user keeps their own files there, which is the point.
     let _ = fs::remove_dir(path.parent().expect("the skill sits in a directory"));
-    Ok(true)
+    Ok(had_skill || had_references)
 }
 
 #[cfg(test)]
@@ -558,11 +638,37 @@ mod tests {
     }
 
     #[test]
+    fn the_references_section_names_every_shipped_reference() {
+        let references = super::section("references").unwrap();
+        for reference in &crate::references::ALL {
+            let file = format!("`references/{}`", reference.file_name());
+            assert!(references.contains(&file), "no {file} in {references}");
+        }
+        assert!(
+            references.contains("`loopherd docs <topic>`"),
+            "{references}"
+        );
+    }
+
+    #[test]
+    fn setting_up_a_project_points_to_the_herd_file_and_runbook_references() {
+        let (_, setup) = SKILL.split_once("\n### Setting up a project\n").unwrap();
+        let (setup, _) = setup.split_once("\n### ").unwrap();
+        for file in ["`references/herd-file.md`", "`references/runbook.md`"] {
+            assert!(setup.contains(file), "no {file} in {setup}");
+        }
+    }
+
+    #[test]
     fn names_nothing_from_this_repo() {
         // init writes these into any repo, so the skill may name them.
-        let skill = ["docs/agents/issue-tracker.md", "docs/agents/loopherd.md"]
-            .iter()
-            .fold(SKILL.to_owned(), |skill, path| skill.replace(path, ""));
+        let skill = [
+            "docs/agents/issue-tracker.md",
+            "docs/agents/loopherd.md",
+            "docs/agents/shepherd.md",
+        ]
+        .iter()
+        .fold(SKILL.to_owned(), |skill, path| skill.replace(path, ""));
         for word in [
             "lh-",
             "LH-",
@@ -653,6 +759,82 @@ mod tests {
         assert!(remove(dir.path()).unwrap());
         assert!(!path(dir.path()).exists());
         assert!(dir.path().join("loopherd/notes.md").exists());
+    }
+
+    fn references(dir: &Path) -> PathBuf {
+        dir.join("loopherd/references")
+    }
+
+    #[test]
+    fn install_writes_every_reference_and_reruns_change_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(write(dir.path()).unwrap());
+        for reference in &crate::references::ALL {
+            let written = fs::read_to_string(references(dir.path()).join(reference.file_name()));
+            assert_eq!(written.unwrap(), reference.text(), "{}", reference.topic);
+        }
+        assert!(!write(dir.path()).unwrap());
+        assert_eq!(
+            stale_references(&dir.path().join("loopherd")),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn install_updates_a_stale_reference_and_prunes_unshipped_ones() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path()).unwrap();
+        let refs = references(dir.path());
+        fs::write(refs.join("tour.md"), "old").unwrap();
+        fs::write(refs.join("retired.md"), "gone").unwrap();
+        fs::create_dir(refs.join("old-topic")).unwrap();
+        assert_eq!(
+            stale_references(&dir.path().join("loopherd")),
+            ["tour.md", "old-topic", "retired.md"]
+        );
+
+        assert!(write(dir.path()).unwrap());
+
+        let tour = crate::references::find("tour").unwrap().text();
+        assert_eq!(fs::read_to_string(refs.join("tour.md")).unwrap(), tour);
+        assert!(!refs.join("retired.md").exists());
+        assert!(!refs.join("old-topic").exists());
+    }
+
+    #[test]
+    fn install_replaces_a_symlinked_references_dir_and_leaves_its_target_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("mine");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("notes.md"), "mine").unwrap();
+        fs::create_dir_all(dir.path().join("loopherd")).unwrap();
+        std::os::unix::fs::symlink(&target, references(dir.path())).unwrap();
+
+        write(dir.path()).unwrap();
+
+        assert!(
+            fs::symlink_metadata(references(dir.path()))
+                .unwrap()
+                .is_dir()
+        );
+        assert_eq!(fs::read_dir(&target).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn remove_deletes_the_references_too() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path()).unwrap();
+        assert!(remove(dir.path()).unwrap());
+        assert!(!dir.path().join("loopherd").exists());
+    }
+
+    #[test]
+    fn remove_deletes_references_left_without_a_skill() {
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path()).unwrap();
+        fs::remove_file(path(dir.path())).unwrap();
+        assert!(remove(dir.path()).unwrap());
+        assert!(!dir.path().join("loopherd").exists());
     }
 
     fn linked(dir: &Path) -> Layout {
@@ -750,11 +932,14 @@ mod tests {
                     .map(|e| e.unwrap().file_name())
                     .collect();
                 assert_eq!(names, ["loopherd"]);
-                let names: Vec<_> = fs::read_dir(real.join("loopherd"))
+                let mut names: Vec<_> = fs::read_dir(real.join("loopherd"))
                     .unwrap()
                     .map(|e| e.unwrap().file_name())
                     .collect();
-                assert_eq!(names, ["SKILL.md"]);
+                names.sort();
+                assert_eq!(names, ["SKILL.md", "references"]);
+                let references = fs::read_dir(real.join("loopherd/references")).unwrap();
+                assert_eq!(references.count(), crate::references::ALL.len());
             }
         }
     }

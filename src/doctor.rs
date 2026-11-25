@@ -1300,7 +1300,17 @@ fn skill_check(install: &Install) -> Option<Check> {
             format!("move {} aside, then {fix}", skill_dir.display()),
         ));
     }
+    let stale = crate::skill::stale_references(skill_dir);
     Some(match crate::skill::link_state(real, link) {
+        Link::Ours if at.join("SKILL.md").is_file() && !stale.is_empty() => warning(
+            "skill",
+            format!(
+                "{} doesn't match this binary's: {}",
+                skill_dir.join("references").display(),
+                stale.join(", ")
+            ),
+            fix,
+        ),
         Link::Ours if at.join("SKILL.md").is_file() => ok(
             "skill",
             format!("{} links to {}", at.display(), skill.display()),
@@ -1841,6 +1851,25 @@ mod tests {
         std::fs::write(skill_link(&m).join("SKILL.md"), crate::skill::SKILL).unwrap();
         let warning = skill_warning(&m);
         assert!(warning.contains("isn't a symlink"), "{warning}");
+        assert!(warning.contains("loopherd install-hook"), "{warning}");
+    }
+
+    #[test]
+    fn references_that_dont_match_this_binarys_warn_naming_install_hook() {
+        let m = machine(&ALL);
+        let references = m.dir.path().join(".agents/skills/loopherd/references");
+        std::fs::write(references.join("tour.md"), "an older tour").unwrap();
+        std::fs::remove_file(references.join("glossary.md")).unwrap();
+
+        let warning = skill_warning(&m);
+
+        assert!(
+            warning.contains(&format!(
+                "{} doesn't match this binary's: tour.md, glossary.md",
+                references.display()
+            )),
+            "{warning}"
+        );
         assert!(warning.contains("loopherd install-hook"), "{warning}");
     }
 

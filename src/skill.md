@@ -23,6 +23,22 @@ The shepherd runs in a herdr pane (`$HERDR_PANE_ID`) of the human's live
 session; `report` and `watch` tell members, leads and the shepherd apart by
 that pane. Read `herdr --skill` before controlling herdr.
 
+## References
+
+loopherd's user docs sit beside this file in `references/`; read one when
+its topic comes up. Without the files (this guide read from `loopherd
+--skill`), `loopherd docs <topic>` prints the same text.
+
+- Every command and its flags: `references/tour.md`.
+- Setting up a project and a first herd with `loopherd init`:
+  `references/setup.md`.
+- Installing, updating, the herdr plugin and key bindings:
+  `references/install.md`.
+- What a term means (herd, member, mailbox, handoff and the rest):
+  `references/glossary.md`.
+- Writing or tailoring a herd file or lead prompt: `references/herd-file.md`.
+- What a project's shepherd runbook holds: `references/runbook.md`.
+
 ## Shepherd
 
 At the start of each session, run `loopherd doctor` (with `--settings
@@ -60,14 +76,18 @@ Init never launches an agent.
    each merge.
 4. Adjust the worker prompt and the checks it lists to how the repo builds,
    tests and reviews; for a herd with a lead, its prompt file too.
+   `references/herd-file.md` explains each key of the herd file and the
+   lead prompt.
 5. Edit only what init wrote: the herd file (with `loopherd herd set`), the
    lead's prompt file beside it, and the repo files init listed. Leave the
    rest of the repo and other herds alone.
 6. You're done when `loopherd herds` calls the herd valid and
    `loopherd feed <herd> --dry-run` lists the tasks you expect from the
    tracker.
-7. Have the human review and commit the repo files you and init changed.
-8. Remind the human to open Claude in the repo once and accept its
+7. Fill in the `docs/agents/shepherd.md` stub init wrote, the runbook a
+   later shepherd reads, per `references/runbook.md`.
+8. Have the human review and commit the repo files you and init changed.
+9. Remind the human to open Claude in the repo once and accept its
    trust dialog, since members can't start past it, and that
    `loopherd lead <herd>` starts the herd's lead when they want one.
 
