@@ -1,5 +1,6 @@
 //! `$LOOPHERD_CONFIG_DIR/config.toml`: user-wide settings, every one optional.
 
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::{ErrorKind, Write};
 use std::path::{Path, PathBuf};
@@ -19,6 +20,9 @@ use crate::view_pane::Layout;
 pub struct ConfigFile {
     pub default_context_limit: Option<Limit>,
     pub context_window: Option<u64>,
+    /// A model id's window, over `context_window` and the built-in table.
+    #[serde(default)]
+    pub context_windows: BTreeMap<String, u64>,
     pub shepherd: Option<ShepherdConfig>,
     /// Each lead's switches where its herd file's `[lead]` leaves one unset.
     pub lead_defaults: Option<SwitchValues>,
@@ -162,6 +166,7 @@ pub fn get(config: &Path, key: &str) -> Result<Option<String>> {
                 .map(|on| on.to_string()));
         }
         "context_window" => file.context_window,
+        key if let Some(model) = model_of(key) => file.context_windows.get(model).copied(),
         _ => file
             .lead_defaults
             .and_then(|d| d.review_rounds)
@@ -193,7 +198,9 @@ pub fn set(config: &Path, key: &str, value: &str) -> Result<()> {
         "shepherd.self_restart" | "herdr_plugin.revive_on_startup" => {
             Value::from(switch(key, value)?)
         }
-        "context_window" => Value::from(as_i64(key, context::tokens(key, value)?)?),
+        key if key == "context_window" || model_of(key).is_some() => {
+            Value::from(as_i64(key, context::tokens(key, value)?)?)
+        }
         "default_context_limit" | "shepherd.context_limit" => match context::limit(key, value)? {
             Limit::Tokens(tokens) => Value::from(as_i64(key, tokens)?),
             percent => Value::from(percent.to_string()),
@@ -417,11 +424,20 @@ fn lift_header(doc: &mut DocumentMut) {
     doc.decor_mut().set_prefix(&prefix[..split]);
 }
 
-fn known(key: &str) -> Result<&'static str> {
-    match KEYS.iter().find(|k| **k == key) {
-        Some(key) => Ok(key),
-        None => bail!("unknown key {key:?}: name one of {}", KEYS.join(", ")),
+fn known(key: &str) -> Result<&str> {
+    match KEYS.contains(&key) || model_of(key).is_some() {
+        true => Ok(key),
+        false => bail!(
+            "unknown key {key:?}: name one of {}, or context_windows.<model>",
+            KEYS.join(", ")
+        ),
     }
+}
+
+/// The model `key` sets a window for, when it is `context_windows.<model>`.
+fn model_of(key: &str) -> Option<&str> {
+    key.strip_prefix("context_windows.")
+        .filter(|model| !model.is_empty())
 }
 
 /// Sets `name` to `value`, keeping the comments around an old value.
@@ -519,6 +535,9 @@ fn check(text: &str) -> Result<ConfigFile> {
     let shepherd = file.shepherd.as_ref().and_then(|s| s.context_limit);
     check_limit("default_context_limit", file.default_context_limit)?;
     check_tokens("context_window", file.context_window)?;
+    for (model, &tokens) in &file.context_windows {
+        check_tokens(&format!("context_windows.{model}"), Some(tokens))?;
+    }
     check_limit("shepherd.context_limit", shepherd)?;
     Ok(file)
 }
@@ -1064,6 +1083,9 @@ mod key_tests {
             ("context_windw", "300000", "unknown key"),
             ("lead_defaults.merge", "true", "unknown key"),
             ("context_window", "9999", "at least 10000"),
+            ("context_windows.claude-opus-4-6", "9999", "at least 10000"),
+            ("context_windows.", "300000", "unknown key"),
+            ("context_windows", "300000", "unknown key"),
             ("default_context_limit", "lots", "a whole number"),
             ("shepherd.context_limit", "-1", "a whole number"),
             ("lead_defaults.review_rounds", "0", "nonzero"),
@@ -1103,6 +1125,35 @@ mod key_tests {
         assert_eq!(
             fs::read_to_string(&path).unwrap(),
             "context_window = 1000000\n"
+        );
+    }
+
+    #[test]
+    fn a_models_own_window_round_trips_through_set_get_and_unset() {
+        let (_dir, path) = config_with("context_window = 1000000\n");
+        let key = "context_windows.claude-opus-4-6";
+        assert_eq!(get(&path, key).unwrap(), None);
+        set(&path, key, "1M").unwrap();
+        assert_eq!(get(&path, key).unwrap().as_deref(), Some("1000000"));
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "context_window = 1000000\n\n[context_windows]\nclaude-opus-4-6 = 1000000\n"
+        );
+        assert!(unset(&path, key).unwrap());
+        assert!(!unset(&path, key).unwrap());
+        assert_eq!(
+            fs::read_to_string(&path).unwrap(),
+            "context_window = 1000000\n"
+        );
+    }
+
+    #[test]
+    fn a_models_own_window_under_the_minimum_fails_the_read_naming_it() {
+        let (_dir, path) = config_with("[context_windows]\nclaude-opus-4-6 = 9999\n");
+        let err = format!("{:#}", read(&path).unwrap_err());
+        assert!(
+            err.contains("context_windows.claude-opus-4-6 must be at least 10000"),
+            "{err}"
         );
     }
 
