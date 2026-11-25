@@ -98,6 +98,14 @@ Backlog cards into members `lh-<n>` on `<type>/LH-<n>-<slug>`.
   scripts/trello archive LH-<n>                     # <reason>: each stale card the human confirms
   ```
 
+  To carry out the human's veto of a follow-up a lead filed ready (D116):
+
+  ```bash
+  scripts/trello label LH-<n> -ready-for-agent
+  ```
+
+  Once a worker has claimed it, retire that worker instead.
+
   Comment text is double-quoted with any `"`, `$`, `` ` `` or `\` inside
   it escaped by a backslash.
 

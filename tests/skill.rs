@@ -672,7 +672,8 @@ fn with_follow_ups_ready_on_a_lead_files_a_qualifying_follow_up_ready_and_blocke
     let rounds = flat_section(&lead, "**Review rounds.**", "- **Heartbeat.**");
     for rule in [
         "With `new_cards` and `follow_ups_ready` on, file a qualifying follow-up with `--label ready-for-agent --label blocked` and the line `blocked-by: <parent key>` in its description, in your tracker's key form",
-        "comment `filed ready: follow-up of PR <n>` on it",
+        "File it before the parent merges, so the after-merge unblock frees it; if the parent is already Done, unblock in the tracker right after filing",
+        "Comment `filed ready: follow-up of PR <n>` on it",
         "`loopherd report --kind note` naming it",
         "It qualifies only if it holds findings from the parent PR's review files, under the parent card's scope",
         "Its criteria may offer the worker alternatives (\"fix X, or D<n> records why not\")",

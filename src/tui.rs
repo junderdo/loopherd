@@ -1387,7 +1387,7 @@ mod tests {
     }
 
     #[test]
-    fn a_paused_herds_title_adds_a_light_orange_paused_badge_and_its_reason() {
+    fn a_paused_herds_title_adds_a_light_orange_badge_with_its_reason() {
         let now = Instant::now();
         let app = paused_app(
             r#"{"since": "2026-11-05T09:00:00Z", "reason": "freeze"}"#,
@@ -1397,11 +1397,11 @@ mod tests {
         let terminal = render(&app, now);
 
         assert!(
-            title_row(&terminal, "prs").starts_with("│╭ prs  ⏸ paused — freeze ─"),
+            title_row(&terminal, "prs").starts_with("│╭ prs  ⏸ freeze ─"),
             "{:#?}",
             lines(&terminal)
         );
-        assert_eq!(at(&terminal, "⏸ paused").fg, LIGHT_ORANGE);
+        assert_eq!(at(&terminal, "⏸ freeze").fg, LIGHT_ORANGE);
         assert_eq!(at(&terminal, "freeze").fg, LIGHT_ORANGE);
     }
 
@@ -1542,7 +1542,7 @@ max = 3
     }
 
     #[test]
-    fn a_long_pause_reason_leaves_the_switch_chips_in_view() {
+    fn a_long_pause_reason_leaves_the_switch_chips_and_its_start_in_view_at_120_columns() {
         let herd = "repo = \"/r\"\n[lead]\nprompt = \"lead\"\n";
         let root = config_dir(&[("prs", herd)], None);
         std::fs::create_dir(root.path().join("paused")).unwrap();
@@ -1553,11 +1553,10 @@ max = 3
 
         let app = app_in(root.path(), &herdr(), &ledger(), now);
 
-        let terminal = render_at(&app, now, 132, 30);
+        let terminal = render_at(&app, now, 120, 30);
         assert!(
-            title_row(&terminal, "prs").starts_with(
-                "│╭ prs  merge install rebase cards design dialogs ready  ⏸ paused — xxx"
-            ),
+            title_row(&terminal, "prs")
+                .starts_with("│╭ prs  merge install rebase cards design dialogs ready  ⏸ xxxxxx╮"),
             "{:#?}",
             lines(&terminal)
         );
