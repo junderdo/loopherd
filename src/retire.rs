@@ -225,7 +225,9 @@ pub fn retire_and_close(
         }
     };
     out.extend(forget_marks(mailboxes, name));
-    out.extend(crate::awaiting::unmark(mailboxes, &record.pane_id, name));
+    for pane in record.env_pane_id.iter().chain([&record.pane_id]) {
+        out.extend(crate::awaiting::unmark(mailboxes, pane, name));
+    }
     let tab_open = match agent_tab(herdr, &record, &others, own_pane)? {
         TabFate::Gone => {
             out.push("tab already gone".into());
@@ -2245,6 +2247,37 @@ mod tests {
         .unwrap();
 
         assert_eq!(files_in(&mailboxes), [".awaiting-p-other"]);
+    }
+
+    #[test]
+    fn close_removes_a_moved_member_s_awaiting_marks_under_its_old_and_new_pane_ids() {
+        let cwd = tempfile::tempdir().unwrap();
+        let mailboxes = cwd.path().join("reports");
+        let herdr = two_workspaces();
+        let pane = herdr.add_tab("w1", "a", cwd.path(), true);
+        let mut ledger = plain(cwd.path(), &pane);
+        ledger.0.get_mut("a").unwrap().env_pane_id = Some("w9:p7".into());
+        std::fs::create_dir_all(&mailboxes).unwrap();
+        std::fs::write(mailboxes.join(format!(".awaiting-{pane}")), "a").unwrap();
+        std::fs::write(mailboxes.join(".awaiting-w9:p7"), "a").unwrap();
+        let mut out = vec![];
+
+        retire_and_close(
+            &herdr,
+            &FakeProcs::default(),
+            &mut ledger,
+            &open_guard(),
+            "a",
+            halloween_noon(),
+            Outcome::Retired,
+            &mailboxes,
+            None,
+            None,
+            &mut out,
+        )
+        .unwrap();
+
+        assert_eq!(files_in(&mailboxes), [] as [String; 0]);
     }
 
     #[test]

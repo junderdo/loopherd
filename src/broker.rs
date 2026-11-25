@@ -412,7 +412,9 @@ fn mark_awaiting(ledger: &dyn Ledger, mailboxes: &Path, lead: &str) -> Result<()
         .remove(lead)
         .filter(|r| !r.retired)
         .ok_or_else(|| anyhow!("{lead} has no unretired record in the ledger"))?;
-    crate::awaiting::mark(mailboxes, &record.pane_id, lead)
+    // The prompt hook looks under `$HERDR_PANE_ID`, which a move to another workspace doesn't change.
+    let own_pane = record.env_pane_id.as_deref().unwrap_or(&record.pane_id);
+    crate::awaiting::mark(mailboxes, own_pane, lead)
 }
 
 /// How long each of a gate's commands may run.
@@ -3723,6 +3725,34 @@ mod tests {
         client.call(&report(Kind::Question, "which DB?")).unwrap();
         assert_eq!(std::fs::read_to_string(&mark).unwrap(), "lead-h");
 
+        world.retire("lead-h");
+        serving.join().unwrap().0.unwrap();
+    }
+
+    #[test]
+    fn a_moved_lead_s_gate_request_marks_the_pane_id_its_own_process_carries() {
+        let world = World::new();
+        let client = world.route_from("p-lead-h").unwrap();
+        let serving = world.serve(FakeHerdr::new(&[]));
+        world
+            .ledger()
+            .update("lead-h", &mut |r| {
+                r.env_pane_id = Some(r.pane_id.clone());
+                r.pane_id = "w2:p1".into();
+                Ok(())
+            })
+            .unwrap();
+        let reports = world.paths.state_dir().join("reports");
+        let gate = Op::Report {
+            kind: Kind::Gate,
+            text: "Gate request: #9 at abc123".into(),
+        };
+
+        client.call(&gate).unwrap();
+
+        let mark = reports.join(".awaiting-p-lead-h");
+        assert_eq!(std::fs::read_to_string(mark).unwrap(), "lead-h");
+        assert!(!reports.join(".awaiting-w2:p1").exists());
         world.retire("lead-h");
         serving.join().unwrap().0.unwrap();
     }
