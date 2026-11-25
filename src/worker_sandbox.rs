@@ -745,9 +745,18 @@ pub fn check_running(paths: &Paths, record: &AgentRecord) -> Result<(Option<Stri
         let credentials = herd::guards_by_credentials(paths, &herd)?;
         let Some(otherwise) = unsandboxed_fix(&herd, credentials, mode, "run") else {
             let warning = format!("{name} runs unsandboxed ({why})");
+            let kept_args = match Member::kept(paths, name)? {
+                Some(member) => disallowed(&arg_sources(paths, &member, ArgsFrom::Kept)?),
+                None => vec![],
+            };
+            let arg_warnings = kept_args.iter().map(|line| disallowed_warning(name, line));
             return Ok((
                 Some(why),
-                [warning].into_iter().chain(mcp_warning).collect(),
+                [warning]
+                    .into_iter()
+                    .chain(arg_warnings)
+                    .chain(mcp_warning)
+                    .collect(),
             ));
         };
         bail!("{name} can't run sandboxed: {why}; {resume} to resume it sandboxed, or {otherwise}");
