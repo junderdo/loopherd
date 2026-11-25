@@ -1980,18 +1980,32 @@ fn start_with(
                     ),
                 ),
             };
-            bail!(
+            return Err(LockHeld(format!(
                 "{} is held by {holder}, which records nothing in it, as a broker older than \
                  this loopherd does, and didn't let it go within {}; {fix}",
                 lock.display(),
                 humantime::format_duration(wait)
-            );
+            ))
+            .into());
         }
         std::thread::sleep(Duration::from_millis(20));
     }
     spawn()?;
     Ok(true)
 }
+
+/// `start` found a lead's lock held, by a broker older than its record, past
+/// the wait. That broker still serves, so only stopping it lets a new one start.
+#[derive(Debug)]
+pub struct LockHeld(pub String);
+
+impl std::fmt::Display for LockHeld {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for LockHeld {}
 
 /// The broker serving once a start returns.
 #[derive(Debug, Clone, Copy)]
@@ -4728,7 +4742,9 @@ mod tests {
             },
         );
 
-        let why = format!("{:#}", started.unwrap_err());
+        let error = started.unwrap_err();
+        assert!(error.is::<LockHeld>(), "{error:#}");
+        let why = format!("{error:#}");
         assert!(
             why.contains(&format!("pid {}", std::process::id())),
             "{why}"
@@ -4749,7 +4765,9 @@ mod tests {
             &mut || Ok(()),
         );
 
-        let why = format!("{:#}", started.unwrap_err());
+        let error = started.unwrap_err();
+        assert!(error.is::<LockHeld>(), "{error:#}");
+        let why = format!("{error:#}");
         assert!(why.contains("recorded no pid"), "{why}");
         assert!(why.contains("pgrep -f 'loopherd broker lead-h'"), "{why}");
     }
