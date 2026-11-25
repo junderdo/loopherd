@@ -15,7 +15,8 @@ supported with migrations.
 ## Cutting a release
 
 1. Open a PR that bumps `version` in `Cargo.toml` (and `Cargo.lock` with
-   it: `cargo build` updates it). Merge it.
+   it: `cargo build` updates it) and in `herdr-plugin/herdr-plugin.toml`.
+   Merge it.
 2. Tag the merge commit and push the tag:
 
    ```bash
