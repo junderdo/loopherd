@@ -83,7 +83,10 @@ fn merged_repo(doc: &DocumentMut) -> State {
     let Some(merged) = merged else {
         return State::Current;
     };
-    if merged.contains("gh pr list --repo ") {
+    let names_repo = merged
+        .split_whitespace()
+        .any(|word| word == "--repo" || word == "-R" || word.starts_with("--repo="));
+    if names_repo || !merged.contains("gh pr list") {
         return State::Current;
     }
     let token = merged
@@ -113,6 +116,10 @@ pub fn upgrade(
         None => names(&paths.herds)?,
     };
     for herd in &herds {
+        if let Err(invalid) = super::checked(&file_of(&paths.herds, herd)?, paths) {
+            writeln!(out, "{herd}: skipped, {invalid}")?;
+            continue;
+        }
         upgrade_herd(paths, herd, &mut how, out).with_context(|| format!("upgrade {herd}"))?;
     }
     Ok(())
@@ -154,14 +161,11 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
     for migration in pending.iter().map(|(m, _)| *m) {
         // Read again: an earlier answer may have written the file.
         let doc = read(&file)?;
-        let state = (migration.state)(&doc);
-        if matches!(state, State::Current) {
-            continue;
-        }
-        writeln!(out, "{} — {}", migration.id, migration.explanation)?;
-        let decline = match state {
+        let header = format!("{} — {}", migration.id, migration.explanation);
+        let decline = match (migration.state)(&doc) {
             State::Current => continue,
             State::Pending(change) => {
+                writeln!(out, "{header}")?;
                 if migration.lead_reads_at_start && how.running_leads.contains(herd) {
                     writeln!(
                         out,
@@ -186,6 +190,7 @@ fn upgrade_herd(paths: &Paths, herd: &str, how: &mut Upgrade, out: &mut dyn Writ
                 }
             }
             State::Tailored { place, snippet } => {
+                writeln!(out, "{header}")?;
                 writeln!(
                     out,
                     "Not applied: this herd's own value is kept. It belongs in {place}:"
@@ -536,5 +541,35 @@ merge = false # the human merges
         };
         upgrade(&paths, Some("h"), how, &mut out).unwrap();
         assert_eq!(String::from_utf8(out).unwrap(), "herd h is up to date\n");
+    }
+
+    #[test]
+    fn a_merged_check_naming_its_repo_anywhere_or_not_using_gh_is_up_to_date() {
+        for merged in [
+            "merged = \"gh pr list --head {branch} -R o/r --state merged --json number --jq length | grep -qx 1\"\n",
+            "merged = \"git merge-base --is-ancestor {branch} origin/main\"\n",
+        ] {
+            let (_dir, paths) = herds(&unled_with(merged));
+            assert_eq!(
+                answered(&paths, Some("h"), "", &[]),
+                "herd h is up to date\n"
+            );
+        }
+    }
+
+    #[test]
+    fn an_invalid_herd_is_skipped_and_the_rest_upgraded() {
+        let (_dir, paths) = herds(LED);
+        fs::write(
+            paths.herds.join("b.toml"),
+            "repo = \"/r\"\nstalled_after = 0\n",
+        )
+        .unwrap();
+        let printed = answered(&paths, None, "\n", &[]);
+        assert!(
+            printed.starts_with("b: skipped, invalid b.toml: "),
+            "{printed}"
+        );
+        assert!(text(&paths).contains("follow_ups_ready = false"));
     }
 }
