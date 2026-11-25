@@ -1370,14 +1370,30 @@ impl Drop for DeleteBranch {
 /// The Write tool calls on `paths`, in order, from Claude session `session`'s
 /// transcript, each with whether permissions refused it.
 fn write_calls(session: &Value, paths: &[String]) -> Vec<(String, bool)> {
+    tool_calls(session, "Write", paths, &|result| {
+        result.contains("denied by your permission settings")
+    })
+}
+
+/// `tool`'s calls on `paths` (or commands), in order, from Claude session `session`'s
+/// transcript, each with whether it failed with a result `refused` accepts.
+fn tool_calls(
+    session: &Value,
+    tool: &str,
+    paths: &[String],
+    refused: &dyn Fn(&str) -> bool,
+) -> Vec<(String, bool)> {
     let file = format!("{}.jsonl", session.as_str().expect("no session id"));
     let projects = PathBuf::from(std::env::var_os("HOME").unwrap()).join(".claude/projects");
-    let transcript = std::fs::read_dir(&projects)
+    // None yet while the session starts.
+    let Some(transcript) = std::fs::read_dir(&projects)
         .unwrap()
         .flatten()
         .map(|project| project.path().join(&file))
         .find(|path| path.is_file())
-        .unwrap_or_else(|| panic!("no Claude transcript {file}"));
+    else {
+        return vec![];
+    };
     let transcript = std::fs::read_to_string(transcript).unwrap();
     let blocks: Vec<Value> = transcript
         .lines()
@@ -1388,17 +1404,19 @@ fn write_calls(session: &Value, paths: &[String]) -> Vec<(String, bool)> {
     let refused: std::collections::HashSet<&str> = blocks
         .iter()
         .filter(|b| b["type"] == "tool_result" && b["is_error"] == true)
-        .filter(|b| {
-            b["content"]
-                .to_string()
-                .contains("denied by your permission settings")
-        })
+        .filter(|b| refused(&b["content"].to_string()))
         .filter_map(|b| b["tool_use_id"].as_str())
         .collect();
     blocks
         .iter()
-        .filter(|b| b["type"] == "tool_use" && b["name"] == "Write")
-        .filter_map(|b| Some((b["id"].as_str()?, b["input"]["file_path"].as_str()?)))
+        .filter(|b| b["type"] == "tool_use" && b["name"] == tool)
+        .filter_map(|b| {
+            let input = &b["input"];
+            let path = [&input["file_path"], &input["path"], &input["command"]]
+                .into_iter()
+                .find_map(|field| field.as_str())?;
+            Some((b["id"].as_str()?, path))
+        })
         .filter(|(_, path)| paths.iter().any(|p| p == path))
         // A transcript can repeat a message, so each call counts once.
         .filter({
@@ -1942,6 +1960,129 @@ fn a_credentials_lead_reads_only_its_own_key_of_loopherds_config_and_no_windows_
             .next()
             .is_some_and(|line| line.starts_with("feed\t0\t")),
         "its broker is out of reach:\n{probed}"
+    );
+}
+
+#[test]
+fn a_credentials_leads_file_tools_are_refused_proc_and_its_sandbox_cant_see_its_claude() {
+    if !live_enabled() {
+        return;
+    }
+    let workspace = assert_dev_session();
+    let state = tempfile::tempdir().unwrap();
+    // This checkout is already trusted, and its origin is on GitHub, as credentials need.
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let herd = format!("lh-live-proc-{}", std::process::id());
+    let name = format!("lead-{herd}");
+    let checkout = repo.file_name().unwrap().to_str().unwrap();
+    let parent = repo.parent().unwrap();
+    let worktree = match parent.file_name() == repo.file_name() {
+        true => parent.join("worktrees"),
+        false => parent.join(format!("{checkout}-worktrees")),
+    }
+    .join(&name);
+    let _worktree = RemoveWorktree(repo.clone(), worktree.clone());
+    let config = state.path().join("config");
+    let credentials = config.join("credentials");
+    let herds = config.join("herds");
+    for dir in [&credentials, &herds] {
+        std::fs::create_dir_all(dir).unwrap();
+    }
+    let keygen = Command::new("ssh-keygen")
+        .args(["-q", "-t", "ed25519", "-N", "", "-f"])
+        .arg(credentials.join(format!("{herd}.key")))
+        .output()
+        .unwrap();
+    assert!(keygen.status.success(), "{keygen:?}");
+    std::fs::write(
+        credentials.join(format!("{herd}.token")),
+        "github_pat_own\n",
+    )
+    .unwrap();
+    // Written once the lead's Claude is up, before it reaches the calls that need them.
+    let claude_pid = state.path().join("claude.pid");
+    let link = state.path().join("probe-link");
+    std::fs::write(
+        herds.join(format!("{herd}.toml")),
+        format!(
+            "{}[worker]\nsandbox = \"require\"\n\
+             [lead]\nsandbox = \"prefer\"\nmerge_guard = \"credentials\"\n\
+             prompt = \"\"\"This is loopherd's live test of a guard on your file tools, \
+             which the human runs. Make these calls in order, one each, and expect most \
+             of them to be refused; the refusals are the result being measured. Call the \
+             Read tool on {pid}. Call the Read tool on /proc/self/environ. Call the Read \
+             tool on /proc/<the number in {pid}>/environ. Call the Read tool on {link}. \
+             Make one Bash call: ls /proc/<that number> \
+             Then reply with the word done.\"\"\"\n",
+            herd_head(repo.to_str().unwrap(), &workspace),
+            pid = claude_pid.display(),
+            link = link.display(),
+        ),
+    )
+    .unwrap();
+    if let Some(exposed) = doctor_findings(state.path(), &config, &herd, "sandbox repo", "failure")
+    {
+        eprintln!("skipped: this checkout can't hold a sandboxed lead to its worktree: {exposed}");
+        return;
+    }
+    let _cleanup = CloseTab(name.clone());
+
+    let out = dev(env!("CARGO_BIN_EXE_loopherd"))
+        .env("XDG_STATE_HOME", state.path())
+        .env("LOOPHERD_CONFIG_DIR", &config)
+        .args(["lead", &herd, "--", "--permission-mode", "auto"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let pane = herdr_ok(&["agent", "get", &name])["result"]["agent"]["pane_id"].clone();
+    let pane = pane.as_str().unwrap();
+    let (pid, _) = claude_in(pane);
+    // Through /proc/self, the Read tool's own process: its Claude.
+    std::os::unix::fs::symlink("/proc/self/environ", &link).unwrap();
+    std::fs::write(&claude_pid, pid.to_string()).unwrap();
+
+    let environs = [
+        "/proc/self/environ".to_string(),
+        format!("/proc/{pid}/environ"),
+    ];
+    let link = [link.display().to_string()];
+    let hook = "a credentials member's file tools can't read /proc";
+    // Claude Code's Read refuses a process file by the path it's given, before any hook.
+    let either = |result: &str| result.contains(hook) || result.contains("process file");
+    let by_hook = |result: &str| result.contains(hook);
+    let listed = [format!("ls /proc/{pid}")];
+    // The sandbox starts in its own PID namespace, with a /proc of its own.
+    let unseen = |result: &str| result.contains("No such file or directory");
+    let calls = || {
+        let session = ledger_entry(state.path(), &name)["session_id"].clone();
+        if !session.is_string() {
+            return vec![];
+        }
+        [
+            tool_calls(&session, "Read", &environs, &either),
+            tool_calls(&session, "Read", &link, &by_hook),
+            tool_calls(&session, "Bash", &listed, &unseen),
+        ]
+        .concat()
+    };
+    let expected: Vec<(String, bool)> = [environs.as_slice(), &link, &listed]
+        .concat()
+        .into_iter()
+        .map(|call| (call, true))
+        .collect();
+    // A call shows before its result, so wait for the results too.
+    poll(180, || (calls() == expected).then_some(()));
+    assert_eq!(
+        calls(),
+        expected,
+        "each call into its Claude's /proc entry, and whether it was refused or missed it:\n{}",
+        visible(pane)
     );
 }
 

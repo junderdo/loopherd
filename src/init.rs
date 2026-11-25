@@ -1,5 +1,6 @@
 //! `loopherd init`: a working herd for the GitHub repo around a directory.
 
+use std::collections::BTreeSet;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -14,6 +15,7 @@ use crate::worktree::{checkout_root, same_dir};
 mod agents;
 mod ask;
 mod explain;
+mod rerun;
 mod tracker;
 
 pub use tracker::Choice as Tracker;
@@ -293,6 +295,8 @@ pub struct Request<'a> {
     pub context_limit: Option<String>,
     /// Templates to add without asking.
     pub with: &'a [Template],
+    /// Herds whose lead is running, for a re-run's migration offers.
+    pub running_leads: &'a BTreeSet<String>,
 }
 
 /// A template init offers beyond the herd's own, asked on a terminal.
@@ -303,6 +307,7 @@ pub enum Template {
     GrillBatch,
 }
 
+#[derive(Clone)]
 struct GitHub {
     /// `<owner>/<name>`.
     slug: String,
@@ -312,6 +317,7 @@ struct GitHub {
 
 /// What init writes, settled from flags, inferred values and, on a
 /// terminal, the human's answers.
+#[derive(Clone)]
 struct Herd {
     repo: PathBuf,
     name: String,
@@ -332,6 +338,8 @@ struct Herd {
     /// What the human writes in the repo that init wouldn't.
     agents_steps: Vec<String>,
     groom: bool,
+    /// Whether it has the attended grill template; only a herd from before it lacks one.
+    grill: bool,
     /// Routes the queue's wayfinding tasks to their own template.
     wayfinding: bool,
     /// Routes the queue's batch grills to their own template.
@@ -347,7 +355,11 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
         terminal: ask::interactive(),
     };
     let no_github = req.no_github;
-    let herd = settle(paths, req, &ask, Mode::Write)?;
+    let repo = ask_repo(req.dir, &ask)?;
+    if let Some(name) = rerun_of(paths, &repo, req.herd)? {
+        return rerun::rerun(paths, repo, name, req, &ask);
+    }
+    let herd = settle(paths, repo, req, &ask, Mode::Write)?;
     if ask.terminal {
         eprint!("{}", summary(&herd));
         if !ask.yes("Write this herd?", "", None, true)? {
@@ -369,7 +381,9 @@ pub fn init(paths: &Paths, req: Request) -> Result<Vec<String>> {
 /// when they match. Asks nothing and changes nothing; an absent file diffs
 /// from empty.
 pub fn diff(paths: &Paths, req: Request) -> Result<Option<String>> {
-    let herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
+    let ask = ask::Asker { terminal: false };
+    let repo = ask_repo(req.dir, &ask)?;
+    let herd = settle(paths, repo, req, &ask, Mode::Diff)?;
     let mut files = rendered(paths, &herd)?.files;
     for doc in &herd.docs {
         let path = herd.repo.join(doc.path);
@@ -409,14 +423,14 @@ enum Mode {
     Diff,
 }
 
-fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<Herd> {
-    let here = checkout_root(req.dir).with_context(|| {
+fn ask_repo(dir: &Path, ask: &ask::Asker) -> Result<PathBuf> {
+    let here = checkout_root(dir).with_context(|| {
         format!(
             "can't read a git repo at {}; run init inside one",
-            req.dir.display()
+            dir.display()
         )
     })?;
-    let repo = ask.value(
+    ask.value(
         "Repo",
         explain::REPO,
         None,
@@ -426,11 +440,34 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             checkout_root(Path::new(answer))
                 .with_context(|| format!("can't read a git repo at {answer}"))
         },
-    )?;
-    // No herd name can get past these, so on a terminal they end init before it asks for one.
-    if ask.terminal {
-        refuse_second_herd(paths, &repo)?;
+    )
+}
+
+/// The herd that already runs `repo`, which init re-runs on; refuses a
+/// `--herd` naming another.
+fn rerun_of(paths: &Paths, repo: &Path, given: Option<&str>) -> Result<Option<String>> {
+    let Some(running) = herd_running(paths, repo)? else {
+        return Ok(None);
+    };
+    if let Some(given) = given
+        && given != running
+    {
+        refuse_other_repo(paths, given, repo)?;
+        bail!(
+            "herd {running} already runs {}; init writes one herd per repo",
+            repo.display()
+        );
     }
+    Ok(Some(running))
+}
+
+fn settle(
+    paths: &Paths,
+    repo: PathBuf,
+    req: Request,
+    ask: &ask::Asker,
+    mode: Mode,
+) -> Result<Herd> {
     let inferred = match mode {
         // A named herd needs no inference, so another herd's unreadable file can't stop it.
         Mode::Diff if req.herd.is_none() => herd_running(paths, &repo)?,
@@ -452,9 +489,6 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             Ok(name)
         },
     )?;
-    if !ask.terminal && mode == Mode::Write {
-        refuse_second_herd(paths, &repo)?;
-    }
     let batch_file = grill_batch_file(paths, &name);
     if mode == Mode::Write && req.with.contains(&Template::GrillBatch) {
         refuse_grill_batch_prompt(&batch_file)?;
@@ -546,41 +580,27 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
     for check in req.checks {
         prompt_text(check)?;
     }
-    let config = paths.herds.with_file_name("config.toml");
-    let defaults = crate::config::lead_defaults(&config)?
-        .unwrap_or_default()
-        .over(&Default::default());
+    let defaults = lead_defaults(paths)?;
     if defaults.merge && req.merge_guard.is_some() {
         bail!("--merge-guard is for a lead with merge off, and [lead_defaults] turns merge on");
     }
-    let switches = defaults
-        .named()
-        .map(|(name, on)| format!("{name} = {on}"))
-        .join("\n");
 
     let recorded_checks = recorded.as_ref().map(|r| r.checks.as_slice());
     let given = match req.checks {
         [] => recorded_checks.unwrap_or_default(),
         given => given,
     };
-    let checks = checks(&repo, given, ask)?;
-    let max = ask.value(
-        "max, how many workers run at once",
-        explain::MAX,
-        req.max
-            .or(recorded.as_ref().and_then(|r| r.max))
-            .map(|m| m.to_string())
-            .as_deref(),
-        Some("3"),
-        "",
-        |max| match max.parse::<i64>() {
-            Ok(max) if max > 0 => Ok(max as u64),
-            Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
-                bail!("max {max} is too big; at most {}", i64::MAX)
+    let checks = match given {
+        [] => {
+            let suggested = suggested_checks(&repo);
+            if suggested.is_empty() && !ask.terminal {
+                bail!("no checks found in Cargo.toml or package.json; pass --check <cmd>");
             }
-            _ => bail!("max must be a positive integer, got {max:?}"),
-        },
-    )?;
+            checks(given, &suggested, ask)?
+        }
+        given => given.to_vec(),
+    };
+    let max = ask_max(ask, req.max.or(recorded.as_ref().and_then(|r| r.max)), "3")?;
     let lead_file = paths.herds.join(format!("{name}-lead.md"));
     let lead = loop {
         let lead = ask.yes(
@@ -614,56 +634,14 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             "merge_guard = \"credentials\" needs the herd's repo on GitHub; pass --repo <owner>/<name>"
         );
     }
-    let config_file = crate::config::read(&config)?;
-    let cap = crate::context::limit_cap(&config)?;
-    let unset = config_file
-        .default_context_limit
-        .map_or(crate::context::DEFAULT_LIMIT, |limit| limit.of(cap.window));
-    let window = match config_file.context_window {
-        Some(_) => "config.toml's",
-        None => "the largest known",
-    };
-    let config_limit = match config_file.default_context_limit {
-        None if config_file.context_window.is_none() => {
-            format!("the default {}", cap.limit.min(unset))
-        }
-        _ if unset > cap.limit => format!(
-            "the cap of {} (80% of {window} {}-token context window)",
-            cap.limit, cap.window
-        ),
-        Some(limit) => format!("config.toml's {limit}"),
-        None => format!("the default {unset}"),
-    };
-    let context_limit = ask.value(
-        &format!(
-            "Workers' handoff limit in tokens or a percentage of the window (context_limit); \
-             Enter leaves it unset, \
-             so {config_limit} applies"
-        ),
-        explain::CONTEXT_LIMIT,
-        req.context_limit
-            .clone()
-            .or(recorded
-                .as_ref()
-                .and_then(|r| r.context_limit)
-                .map(|l| l.to_string()))
-            .as_deref(),
-        Some(""),
+    let (context_limit, config_limit) = ask_context_limit(
+        paths,
+        ask,
+        req.context_limit.clone().or(recorded
+            .as_ref()
+            .and_then(|r| r.context_limit)
+            .map(|l| l.to_string())),
         "",
-        |limit| {
-            if limit.is_empty() {
-                return Ok(None);
-            }
-            let limit = crate::context::limit("context_limit", limit)?;
-            if limit.of(cap.window) > cap.limit {
-                bail!(
-                    "context_limit {limit} is over {}, 80% of the {}-token context window",
-                    cap.limit,
-                    cap.window
-                );
-            }
-            Ok(Some(limit))
-        },
     )?;
     let github = match github {
         Some((owner, name)) => {
@@ -745,24 +723,7 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
             Some(_) => "",
             None => &unknown_branch,
         },
-        |branch| {
-            if branch.contains(char::is_whitespace) {
-                bail!("{branch:?} can't name a branch");
-            }
-            prompt_text(branch)?;
-            // The herd's shell commands hold it unquoted.
-            if branch.starts_with('-')
-                || !branch
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
-            {
-                bail!(
-                    "init takes a branch of letters, digits and - _ . / only, \
-                         not starting with -; got {branch:?}"
-                );
-            }
-            Ok(branch.to_string())
-        },
+        parse_branch,
     )?;
     let groom = ask.yes(
         "Add a groom template, to triage unready tasks when the herd runs low?",
@@ -871,13 +832,14 @@ fn settle(paths: &Paths, req: Request, ask: &ask::Asker, mode: Mode) -> Result<H
         checks,
         max,
         lead,
-        switches,
+        switches: switch_lines(&defaults),
         merge_guard,
         context_limit,
         config_limit,
         docs,
         agents_steps: plan.steps,
         groom,
+        grill: true,
         wayfinding,
         grill_batch,
     })
@@ -891,6 +853,101 @@ fn refuse_grill_batch_prompt(file: &Path) -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// The workers' `context_limit`, Enter taking `default` and an empty answer
+/// leaving it unset, with the text naming what applies when it is unset.
+fn ask_context_limit(
+    paths: &Paths,
+    ask: &ask::Asker,
+    given: Option<String>,
+    default: &str,
+) -> Result<(Option<Limit>, String)> {
+    let config = paths.herds.with_file_name("config.toml");
+    let config_file = crate::config::read(&config)?;
+    let cap = crate::context::limit_cap(&config)?;
+    let unset = config_file
+        .default_context_limit
+        .map_or(crate::context::DEFAULT_LIMIT, |limit| limit.of(cap.window));
+    let window = match config_file.context_window {
+        Some(_) => "config.toml's",
+        None => "the largest known",
+    };
+    let config_limit = match config_file.default_context_limit {
+        None if config_file.context_window.is_none() => {
+            format!("the default {}", cap.limit.min(unset))
+        }
+        _ if unset > cap.limit => format!(
+            "the cap of {} (80% of {window} {}-token context window)",
+            cap.limit, cap.window
+        ),
+        Some(limit) => format!("config.toml's {limit}"),
+        None => format!("the default {unset}"),
+    };
+    let context_limit = ask.value(
+        &format!(
+            "Workers' handoff limit in tokens or a percentage of the window (context_limit); \
+             Enter leaves it unset, \
+             so {config_limit} applies"
+        ),
+        explain::CONTEXT_LIMIT,
+        given.as_deref(),
+        Some(default),
+        "",
+        |limit| {
+            if limit.is_empty() {
+                return Ok(None);
+            }
+            let unchanged = limit == default;
+            let limit = crate::context::limit("context_limit", limit)?;
+            // A re-run keeps a herd's value that a later config.toml put over the cap.
+            if unchanged {
+                return Ok(Some(limit));
+            }
+            if limit.of(cap.window) > cap.limit {
+                bail!(
+                    "context_limit {limit} is over {}, 80% of the {}-token context window",
+                    cap.limit,
+                    cap.window
+                );
+            }
+            Ok(Some(limit))
+        },
+    )?;
+    Ok((context_limit, config_limit))
+}
+
+fn ask_max(ask: &ask::Asker, given: Option<u64>, default: &str) -> Result<u64> {
+    ask.value(
+        "max, how many workers run at once",
+        explain::MAX,
+        given.map(|m| m.to_string()).as_deref(),
+        Some(default),
+        "",
+        |max| match max.parse::<i64>() {
+            Ok(max) if max > 0 => Ok(max as u64),
+            Err(e) if *e.kind() == std::num::IntErrorKind::PosOverflow => {
+                bail!("max {max} is too big; at most {}", i64::MAX)
+            }
+            _ => bail!("max must be a positive integer, got {max:?}"),
+        },
+    )
+}
+
+/// `[lead_defaults]` from config.toml, over loopherd's own defaults.
+fn lead_defaults(paths: &Paths) -> Result<herd::Switches> {
+    let config = paths.herds.with_file_name("config.toml");
+    Ok(crate::config::lead_defaults(&config)?
+        .unwrap_or_default()
+        .over(&Default::default()))
+}
+
+/// One `<switch> = <on>` line per switch, as the lead table holds them.
+fn switch_lines(defaults: &herd::Switches) -> String {
+    defaults
+        .named()
+        .map(|(name, on)| format!("{name} = {on}"))
+        .join("\n")
 }
 
 /// Asks, on a terminal, how a lead with merge off is kept from merging.
@@ -927,6 +984,25 @@ const MERGE_GUARD_HELP: &str = "The lead has merge off. How is it kept from merg
                can't read your credentials. Needs loopherd merge-guard <herd> and
                a token you make in GitHub's web UI, once per repo.";
 
+fn parse_branch(branch: &str) -> Result<String> {
+    if branch.contains(char::is_whitespace) {
+        bail!("{branch:?} can't name a branch");
+    }
+    prompt_text(branch)?;
+    // The herd's shell commands hold it unquoted.
+    if branch.starts_with('-')
+        || !branch
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/'))
+    {
+        bail!(
+            "init takes a branch of letters, digits and - _ . / only, \
+             not starting with -; got {branch:?}"
+        );
+    }
+    Ok(branch.to_string())
+}
+
 /// The lead and members are lead-<herd> and <herd>-<n>, both [a-z][a-z0-9_-]{0,31}.
 fn herd_name(name: &str) -> Result<String> {
     let mut chars = name.chars();
@@ -942,17 +1018,14 @@ fn herd_name(name: &str) -> Result<String> {
     Ok(name.to_string())
 }
 
-/// `given`, else the checks the repo's build files suggest: on a terminal
-/// kept, or each kept, dropped or replaced, then others added.
-fn checks(repo: &Path, given: &[String], ask: &ask::Asker) -> Result<Vec<String>> {
+/// `given`, else `offered`: on a terminal kept, or each kept, dropped or
+/// replaced, then others added.
+fn checks(given: &[String], offered: &[String], ask: &ask::Asker) -> Result<Vec<String>> {
     if !given.is_empty() {
         return Ok(given.to_vec());
     }
-    let suggested = suggested_checks(repo);
+    let suggested = offered.to_vec();
     if !ask.terminal {
-        if suggested.is_empty() {
-            bail!("no checks found in Cargo.toml or package.json; pass --check <cmd>");
-        }
         return Ok(suggested);
     }
     ask::explain(explain::CHECKS);
@@ -1408,7 +1481,10 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
         true => format!("\n\n{}", wayfinding(&template, tracker.kind, &values)),
         false => String::new(),
     };
-    let (grill, grill_prompt) = grill(herd, &values, done);
+    let (grill, grill_prompt) = match herd.grill {
+        true => grill(herd, &values, done),
+        false => (String::new(), String::new()),
+    };
     let batch = herd
         .grill_batch
         .then(|| grill_batch(herd, &values, &template));
@@ -1433,10 +1509,11 @@ fn rendered(paths: &Paths, herd: &Herd) -> Result<Rendered> {
     values.push(("GROOM", &groom));
     values.push(("GRILL", &grill));
     let lead = herd.lead.then(|| (lead_file, fill(LEAD, &values)));
+    let grill_prompt = herd.grill.then(|| (grill_file(paths, name), grill_prompt));
     let batch_prompt = batch.map(|(_, prompt)| (grill_batch_file(paths, name), prompt));
     let files = lead
         .into_iter()
-        .chain([(grill_file(paths, name), grill_prompt)])
+        .chain(grill_prompt)
         .chain(batch_prompt)
         .chain([(herd_file, fill(HERD, &values))])
         .collect();
@@ -1499,8 +1576,11 @@ pub fn template(paths: &Paths, herd: &str, template: &str) -> Result<herd::NewTe
         merge_guard: None,
         context_limit: None,
         with: &with,
+        running_leads: &BTreeSet::new(),
     };
-    let mut herd = settle(paths, req, &ask::Asker { terminal: false }, Mode::Diff)?;
+    let ask = ask::Asker { terminal: false };
+    let repo = ask_repo(&repo, &ask)?;
+    let mut herd = settle(paths, repo, req, &ask, Mode::Diff)?;
     match template {
         "wayfinding" => return routed(paths, &mut herd, Template::Wayfinding),
         "grill-batch" => return routed(paths, &mut herd, Template::GrillBatch),
@@ -2120,17 +2200,6 @@ fn refuse_other_repo(paths: &Paths, herd: &str, repo: &Path) -> Result<()> {
     Ok(())
 }
 
-/// Refuses a repo another herd runs, or one a herd file init can't read might run.
-fn refuse_second_herd(paths: &Paths, repo: &Path) -> Result<()> {
-    match herd_running(paths, repo)? {
-        Some(other) => bail!(
-            "herd {other} already runs {}; init writes one herd per repo",
-            repo.display()
-        ),
-        None => Ok(()),
-    }
-}
-
 /// The herd that runs `repo`; an error for a herd file init can't read.
 fn herd_running(paths: &Paths, repo: &Path) -> Result<Option<String>> {
     for other in herd::names(&paths.herds)? {
@@ -2159,12 +2228,17 @@ struct Recorded {
     context_limit: Option<Limit>,
     /// The worker prompt's checklist items that are a bare `check`; a reworded one is skipped.
     checks: Vec<String>,
+    /// Whether any checklist item was reworded.
+    checks_reworded: bool,
     /// The default branch the worker prompt names.
     branch: Option<String>,
     /// The `owner/name` that `merged` checks PRs on.
     github: Option<String>,
+    /// The gh account the herd's commands take their token from.
+    account: Option<String>,
     has_merged: bool,
     groom: bool,
+    grill: bool,
     wayfinding: bool,
     grill_batch: bool,
 }
@@ -2185,11 +2259,14 @@ impl Recorded {
             .and_then(|t| t.get("prompt"))
             .and_then(toml::Value::as_str)
             .unwrap_or_default();
-        let checks = prompt
+        let items: Vec<&str> = prompt
             .lines()
             .skip_while(|line| !line.starts_with("4. Before calling it done"))
             .skip(1)
             .map_while(|line| line.strip_prefix("   - "))
+            .collect();
+        let checks: Vec<String> = items
+            .iter()
             .filter_map(|item| item.strip_prefix('`')?.strip_suffix('`'))
             .map(|check| check.replace("{{", "{").replace("}}", "}"))
             .collect();
@@ -2197,7 +2274,14 @@ impl Recorded {
             let branch = line.strip_prefix("If ")?.split_once(" moves under you")?.0;
             Some(branch.to_string())
         });
+        let account = fs::read_to_string(herd_file).ok().and_then(|text| {
+            let (_, rest) = text.split_once("gh auth token --user ")?;
+            let account = rest.split(|c: char| c == ')' || c.is_whitespace()).next()?;
+            Some(account.to_string())
+        });
         Some(Recorded {
+            checks_reworded: checks.len() != items.len(),
+            account,
             branch,
             lead: herd.contains_key("lead"),
             merge_guard: match herd.get("lead").and_then(|l| l.get("merge_guard")) {
@@ -2221,6 +2305,9 @@ impl Recorded {
                 })
                 .map(String::from),
             has_merged: issue.is_some_and(|t| t.contains_key("merged")),
+            grill: herd
+                .get("template")
+                .is_some_and(|t| t.get("grill").is_some()),
             groom: herd
                 .get("template")
                 .is_some_and(|t| t.get("groom").is_some()),
@@ -2312,7 +2399,8 @@ fn is_github_name(name: &str) -> bool {
 }
 
 /// `wanted` if gh is logged in as it, else the logged-in account named
-/// `owner`, asked on a terminal from the logged-in ones.
+/// `owner` (the remote's owner, or a re-run's account), asked on a terminal
+/// from the logged-in ones.
 fn account(owner: &str, wanted: Option<&str>, ask: &ask::Asker) -> Result<String> {
     let logins = gh_logins()?;
     let logins: Vec<&str> = logins
@@ -2450,15 +2538,22 @@ fn gh_logins() -> Result<Vec<String>> {
     if !stderr.contains("unknown flag: --json") {
         bail!("gh {}: {}", args.join(" "), stderr.trim());
     }
-    // Plain auth status exits 1 when any account fails or none is logged in,
-    // and older gh prints it on stderr, so read both streams whatever the exit.
-    let output = gh_output(None, &["auth", "status", "--hostname", "github.com"])?;
+    // Plain auth status prints on stdout or stderr depending on the gh version,
+    // and gh before 2.54 exits 0 even when every account fails, so the exit
+    // code says nothing; any output without a login is gh's failure.
+    let args = ["auth", "status", "--hostname", "github.com"];
+    let output = gh_output(None, &args)?;
     let text = [output.stdout, output.stderr].concat();
-    Ok(String::from_utf8_lossy(&text)
+    let text = String::from_utf8_lossy(&text);
+    let logins: Vec<String> = text
         .lines()
         .filter_map(plain_login)
         .map(String::from)
-        .collect())
+        .collect();
+    if logins.is_empty() && !text.trim().is_empty() {
+        bail!("gh {}: {}", args.join(" "), text.trim());
+    }
+    Ok(logins)
 }
 
 /// The login on a plain `gh auth status` line, in its newer

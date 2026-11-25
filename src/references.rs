@@ -273,6 +273,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("my-app.toml"), toml).unwrap();
         let paths = crate::herd::Paths {
+            env: |_| None,
             herds: dir.path().to_path_buf(),
             home: dir.path().to_path_buf(),
             feed_lock: dir.path().join("feed.lock"),

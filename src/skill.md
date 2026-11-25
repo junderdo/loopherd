@@ -217,7 +217,10 @@ Init never launches an agent.
    the reviewer as defined; later rounds pass `model: sonnet` to the
    subagent, since they only recheck findings and a small diff. Give it
    no loopherd or mutating herdr commands, and a temp `XDG_STATE_HOME`
-   and `LOOPHERD_CONFIG_DIR`. Put everything it
+   and `LOOPHERD_CONFIG_DIR`. Tell it every wait it runs has a timeout,
+   and it stops every background shell it started before it returns: a
+   leftover shell holds your stops at `paused` and blocks your restart.
+   Put everything it
    builds under one directory per PR, `<scratch>/pr<n>/`, where `<scratch>`
    is your session's own temp directory: its detached worktrees, its build
    target dirs and any copies (mutation runs), so one removal cleans up.
@@ -758,7 +761,8 @@ UserPromptSubmit hook from `install-hook`; `loopherd herds` warns when
   [<herd>]`, run by the human on a terminal: it offers each missing change
   with a diff and `Apply? [Y/n]`, and a no lands in the herd file's
   `declined`. Without a terminal it changes nothing and lists each herd's
-  pending ids.
+  pending ids. `loopherd init` re-run in the herd's repo asks the herd's
+  settings again, Enter keeping each, then makes the same offers.
 - **Remove a finished herd** with `loopherd herd remove <herd>` once the
   human says so: it deletes the herd file, its pause, its `[lead]`
   `prompt_file` (when that lies in the herds dir and no other herd file
@@ -930,7 +934,9 @@ Shepherd section has the detail):
    `herdr agent read`.
 4. **Verify** a `done` member's output with a read-only reviewer subagent
    against the task's acceptance criteria, with a temp `XDG_STATE_HOME` and
-   `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. It writes its
+   `LOOPHERD_CONFIG_DIR`, building under `<scratch>/pr<n>/`. Tell it every
+   wait it runs has a timeout, and it stops every background shell it
+   started before it returns. It writes its
    findings to `<scratch>/pr<n>/review-<round>.md` and returns one line:
    `pass <head sha>: <m> minor, <k> nit` when nothing is blocking, else
    `fail <head sha>: <b> blocking, <m> minor, <k> nit`, plus the file's

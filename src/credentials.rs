@@ -613,6 +613,7 @@ store --file=relative
     /// Herd `h` on a GitHub repo, with its deploy key and token, kept under `root`.
     fn credentials_herd(root: &Path) -> Paths {
         let paths = Paths {
+            env: |_| None,
             herds: root.join("config/herds"),
             home: PathBuf::from("/home/me"),
             feed_lock: root.join("feed.lock"),
@@ -744,6 +745,7 @@ server:/share /mnt/nfs 9p rw,aname=other 0 0
     fn a_host_block_isnt_written_over_an_ssh_config_that_cant_be_read() {
         let dir = tempfile::tempdir().unwrap();
         let paths = Paths {
+            env: |_| None,
             herds: dir.path().join("config/herds"),
             home: dir.path().to_path_buf(),
             feed_lock: dir.path().join("feed.lock"),
