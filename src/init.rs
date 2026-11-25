@@ -2023,13 +2023,19 @@ fn gh_logins() -> Result<Vec<String>> {
     }
     // Plain auth status exits 1 when any account fails or none is logged in,
     // and older gh prints it on stderr, so read both streams whatever the exit.
-    let output = gh_output(None, &["auth", "status", "--hostname", "github.com"])?;
+    let args = ["auth", "status", "--hostname", "github.com"];
+    let output = gh_output(None, &args)?;
     let text = [output.stdout, output.stderr].concat();
-    Ok(String::from_utf8_lossy(&text)
+    let text = String::from_utf8_lossy(&text);
+    let logins: Vec<String> = text
         .lines()
         .filter_map(plain_login)
         .map(String::from)
-        .collect())
+        .collect();
+    if logins.is_empty() && !output.status.success() {
+        bail!("gh {}: {}", args.join(" "), text.trim());
+    }
+    Ok(logins)
 }
 
 /// The login on a plain `gh auth status` line, in its newer
