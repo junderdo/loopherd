@@ -186,6 +186,13 @@ pub fn watch(
         as_lead(name)?;
     }
     let only = only_watch(dir, &reader)?;
+    // A Claude killed outright leaves its background watch running and holding the lock.
+    let own_claude = match &reader {
+        Reader::Lead { name, .. } => {
+            crate::process::nearest_claude(req.procs, req.own_lineage).map(|c| (name, c))
+        }
+        Reader::Shepherd => None,
+    };
     let mut checks = match (&reader, req.herd_files) {
         (
             Reader::Lead {
@@ -242,6 +249,14 @@ pub fn watch(
     // A gone is recorded again every poll until it's written; say each failure once.
     let mut unrecorded: HashSet<String> = HashSet::new();
     loop {
+        if let Some((name, claude)) = own_claude
+            && live(req.procs, Some(claude)).is_none()
+        {
+            bail!(
+                "{name}'s Claude (pid {}) is gone, so its watch ends",
+                claude.pid
+            );
+        }
         let before = last.clone();
         let marks = notify::BlockMarks::read(dir)?;
         let read = status::read_statuses(
@@ -3630,6 +3645,96 @@ mod tests {
             woke.contains(&"lh-1 note 2026-11-01 09:00 UTC after".to_string()),
             "{woke:?}"
         );
+    }
+
+    /// [`FakeProcs::pane`] with a watch under the pane's Claude, which can be killed.
+    struct WatchUnderClaude {
+        procs: crate::process::FakeProcs,
+        killed: std::cell::Cell<bool>,
+    }
+
+    impl WatchUnderClaude {
+        const CLAUDE: Process = Process {
+            pid: 30,
+            start: 300,
+        };
+        const LINEAGE: [Process; 5] = [
+            Process {
+                pid: 50,
+                start: 500,
+            },
+            Process {
+                pid: 40,
+                start: 400,
+            },
+            Self::CLAUDE,
+            crate::process::PANE_SHELL,
+            Process {
+                pid: 10,
+                start: 100,
+            },
+        ];
+
+        fn new() -> Self {
+            let mut procs = crate::process::FakeProcs::pane();
+            procs.add(40, "/bin/bash", 30, 400);
+            procs.add(50, "/usr/bin/loopherd", 40, 500);
+            WatchUnderClaude {
+                procs,
+                killed: false.into(),
+            }
+        }
+
+        fn gone(&self, pid: u32) -> bool {
+            self.killed.get() && pid == Self::CLAUDE.pid
+        }
+    }
+
+    impl Procs for WatchUnderClaude {
+        fn exe(&self, pid: u32) -> Option<PathBuf> {
+            self.procs.exe(pid).filter(|_| !self.gone(pid))
+        }
+        fn parent(&self, pid: u32) -> Option<u32> {
+            self.procs.parent(pid).filter(|_| !self.gone(pid))
+        }
+        fn start(&self, pid: u32) -> Option<u64> {
+            self.procs.start(pid).filter(|_| !self.gone(pid))
+        }
+        fn cmdline(&self, pid: u32) -> Option<Vec<String>> {
+            self.procs.cmdline(pid).filter(|_| !self.gone(pid))
+        }
+        fn resolve(&self, pid: u32, path: &str) -> Option<PathBuf> {
+            self.procs.resolve(pid, path)
+        }
+    }
+
+    #[test]
+    fn a_leads_watch_ends_and_frees_its_lock_once_its_claude_is_gone() {
+        let dir = tempfile::tempdir().unwrap();
+        let (ledger, herdr) = led_world(dir.path());
+        assert!(run_dyn(&herdr, &ledger, dir.path(), &from_pane("w9:p0")).is_some());
+        let procs = WatchUnderClaude::new();
+        let req = Request {
+            own_pane: Some("w9:p0"),
+            own_lineage: &WatchUnderClaude::LINEAGE,
+            procs: &procs,
+            ..EVERY
+        };
+
+        let mut clock = steps(|poll| match poll {
+            1 => {}
+            2 => procs.killed.set(true),
+            _ => panic!("polled after its Claude was gone"),
+        });
+        let Err(err) = watch(&herdr, &ledger, dir.path(), &req, &mut clock, &mut |_| {}) else {
+            panic!("the watch outlived its Claude");
+        };
+        assert!(
+            err.to_string()
+                .contains("lead-cards's Claude (pid 30) is gone, so its watch ends"),
+            "{err}"
+        );
+        assert!(!lead_watch_running(dir.path(), "lead-cards").unwrap());
     }
 
     fn run_dyn(
