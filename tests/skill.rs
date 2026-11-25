@@ -790,3 +790,32 @@ fn verify_tells_the_reviewer_to_bound_waits_and_stop_its_shells() {
         assert!(text.contains(rule), "{section} misses {rule:?}");
     }
 }
+
+#[test]
+fn install_hook_names_every_hook_it_installs_and_removes() {
+    let home = tempfile::tempdir().unwrap();
+    let settings = home.path().join("settings.json");
+    let settings = settings.to_str().unwrap();
+    let every = "Stop, StopFailure, SessionStart, PreToolUse, UserPromptSubmit, SubagentStart and SubagentStop hooks";
+
+    let installed = stdout(&loopherd(
+        home.path(),
+        &["install-hook", "--settings", settings],
+    ));
+    assert!(
+        installed.contains(&format!("installed loopherd's {every} in")),
+        "{installed}"
+    );
+
+    let removed = stdout(&loopherd(
+        home.path(),
+        &["install-hook", "--remove", "--settings", settings],
+    ));
+    assert!(
+        removed.contains(&format!("removed loopherd's {every} from")),
+        "{removed}"
+    );
+
+    let help = stdout(&loopherd(home.path(), &["install-hook", "--help"]));
+    assert!(help.contains("SubagentStart and SubagentStop"), "{help}");
+}
