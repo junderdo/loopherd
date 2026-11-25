@@ -131,6 +131,7 @@ fn run(state: &Path, args: &[&str]) -> Output {
         // Printed times are UTC whatever the local zone.
         .env("TZ", "America/New_York")
         .env_remove("HERDR_PANE_ID")
+        .env_remove("LOOPHERD_BROKER_OF")
         .env_remove("HERDR_SOCKET_PATH")
         .output()
         .unwrap()
