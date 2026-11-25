@@ -411,6 +411,7 @@ fn herd_checks(paths: &Paths, only: Option<&str>) -> Vec<Check> {
             ));
         }
         checks.extend(loosened_checks(paths, &herd));
+        checks.extend(exposure_checks(paths, &herd));
         checks.extend(lead_arg_checks(paths, &herd));
         if let Ok(wanted) = crate::herd::lead_mcp_servers(paths, &herd) {
             let check = format!("herd {herd} mcp_servers");
@@ -554,6 +555,23 @@ fn loosened_checks(paths: &Paths, herd: &str) -> Vec<Check> {
         return vec![];
     };
     finding_checks(paths, herd, "sandbox settings", lines, "remove it")
+}
+
+/// A lead whose worktree sits where Claude Code's sandbox opens writes, failing
+/// where that keeps it from starting.
+fn exposure_checks(paths: &Paths, herd: &str) -> Vec<Check> {
+    let exposed =
+        crate::lead::lead_name(herd).and_then(|name| crate::sandbox::exposed(paths, &name, herd));
+    let Ok(Some(line)) = exposed else {
+        return vec![];
+    };
+    finding_checks(
+        paths,
+        herd,
+        "sandbox repo",
+        vec![line],
+        "move its repo out of it",
+    )
 }
 
 /// Each arg a herd's file passes its lead outside the allowlist, failing where
